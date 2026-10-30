@@ -184,9 +184,33 @@ void NativeRegistry::register_runtime_classes()
 		}
 	}
 	// The Windows Runtime classes the runtime brings, in-process (activation type 0) and callable from any apartment (threading 0):
-	// installers ask the package manager whether a packaged version of what they install is present.
+	// installers ask the package manager whether a packaged version of what they install is present, and a XAML application starts
+	// from the Application class and the core window of its UI thread.
 	static constexpr std::pair<const char16_t *, const char16_t *> runtime_classes[] = {
-		{u"Windows.Management.Deployment.PackageManager", u"raven-deployment.dll"}};
+		{u"Windows.Management.Deployment.PackageManager", u"raven-deployment.dll"},
+		{u"Windows.UI.Core.CoreWindow", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Application", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Window", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.Frame", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.Page", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.Grid", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.TextBlock", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.Button", u"raven-xaml.dll"},
+		{u"Windows.UI.Composition.Compositor", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.RowDefinition", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.ColumnDefinition", u"raven-xaml.dll"},
+		{u"Windows.System.DispatcherQueueController", u"raven-xaml.dll"},
+		{u"Windows.ApplicationModel.Package", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.ResourceDictionary", u"raven-xaml.dll"},
+		{u"Windows.ApplicationModel.Resources.Core.ResourceManager", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Style", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.Primitives.FrameworkElementAutomationPeer", u"raven-xaml.dll"},
+		{u"Windows.Storage.ApplicationData", u"raven-xaml.dll"},
+		{u"Windows.Storage.PathIO", u"raven-xaml.dll"},
+		{u"Windows.ApplicationModel.Resources.Core.ResourceContext", u"raven-xaml.dll"},
+		{u"Windows.System.MemoryManager", u"raven-xaml.dll"},
+		{u"Windows.ApplicationModel.Core.CoreApplication", u"raven-xaml.dll"},
+		{u"Windows.System.DispatcherQueue", u"raven-xaml.dll"}};
 	for (const bool wow : {false, true})
 		for (const auto &[name, library] : runtime_classes) {
 			const std::u16string path = std::u16string(wow ? u"SOFTWARE\\Wow6432Node" : u"SOFTWARE") +

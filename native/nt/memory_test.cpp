@@ -81,6 +81,11 @@ int main(int argc, char **argv)
 			return result.value;
 		};
 		const auto output=process.map_memory(4096,PROT_READ | PROT_WRITE);
+		check(!api("VirtualAllocFromApp",{0,4096,0x3000,0x40}) && environment.last_error()==87 && !memory.count(),
+			"app allocation accepted executable protection");
+		const auto app_memory=api("VirtualAllocFromApp",{0,4096,0x3000,4});
+		check(app_memory && process.read_memory(app_memory,1)[0]==0 && api("VirtualFree",{app_memory,0,0x8000}) && !memory.count(),
+			"app allocation did not provide zeroed, releasable memory");
 		check(api("NtAllocateVirtualMemory",{1,output,0,output+8,0x3000,4})==0xc0000008U && !memory.count(),
 			"foreign process memory operation succeeded");
 		check(api("NtAllocateVirtualMemory",{UINT64_MAX,0,0,output+8,0x3000,4})==0xc0000005U && !memory.count(),

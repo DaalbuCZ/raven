@@ -92,6 +92,9 @@ void NativeMemory::open_window(uint64_t from, uint64_t to)
 {
 	if (!commit_block)
 		return;
+	// Watched commits/decommits must pass through the host so zeroing does not become a reported application write.
+	if (const auto found = region(from, to - from); found != regions.end() && found->second.write_watch)
+		return;
 	uint64_t *windows=commit_block+commit_windows/8;
 	// An allocator works through its reservation in order, so a range that touches one already open is joined to it.
 	for (uint64_t index=0; index<windows[0]; ++index)
@@ -153,6 +156,10 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 		return {0,0,invalid};
 	// MEM_TOP_DOWN only asks for the highest free address; any free address serves the program as well.
 	type&=~0x100000U;
+	const bool watch = type & 0x200000;
+	if (watch && !(type & 0x2000))
+		return {0,0,invalid};
+	type&=~0x200000U;
 	if (!(type & 0x3000) || (type & ~0x3000U))
 		return {0,0,unsupported};
 	const auto permissions=protection(access);
@@ -165,13 +172,15 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 		const auto found=region(base,length);
 		if (found==regions.end())
 			return {0,0,conflict};
+		if (found->second.write_watch)
+			collect_writes();
 		const auto first=(base-found->first)/4096;
 		// Programs such as a browser's allocators commit a few pages at a time, one block after the next, and each change of the guest's
 		// protection stops it. Read-write commits of part of a 64 KiB granule therefore also open the neighbouring pages that are only
 		// reserved, up to the 1 MiB around them; they stay reserved here, and committing them later changes nothing in the guest.
 		// Commits of whole granules, as a WebAssembly memory grows with guard pages after it, open nothing more, and pages committed
 		// otherwise are never touched.
-		const uint64_t granule=((base | length) & 65535) ? uint64_t(1) << 20 : 4096;
+		const uint64_t granule=!found->second.write_watch && ((base | length) & 65535) ? uint64_t(1) << 20 : 4096;
 		if (!process.has_protection(base,length,permissions)) {
 			uint64_t from=base, to=base+length;
 			if (permissions==(PROT_READ|PROT_WRITE)) {
@@ -205,6 +214,8 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 			return {0,0,no_memory};
 		found->second.pages.fill(first,length/4096,access);
 		used+=fresh;
+		if (found->second.write_watch)
+			process.reset_dirty_pages();
 		return {base,length};
 	}
 	const bool commit_now=type & 0x1000;
@@ -233,12 +244,29 @@ NativeMemoryRange NativeMemory::allocate(uint64_t address, uint64_t size, uint32
 	}
 	if (!selected || !process.memory_available(selected,length))
 		return {0,0,conflict};
+	if (watch) {
+		collect_writes();
+		// clear_refs rejects the soft-dirty mode on a kernel built without it, which is the one host feature write watching needs.
+		process.reset_dirty_pages();
+	}
 	const bool commit=commit_now;
-	auto [found,inserted]=regions.emplace(selected,Region{length,access,PageMap(length/4096,commit ? access : 0)});
+	auto [found,inserted]=regions.emplace(selected,Region{length,access,PageMap(length/4096,commit ? access : 0),false,{}});
 	if (!inserted)
 		return {0,0,conflict};
-	try { process.map_memory(length,commit ? permissions : PROT_NONE,selected); }
-	catch (...) { regions.erase(found); throw; }
+	bool mapped = false;
+	try {
+		process.map_memory(length,commit ? permissions : PROT_NONE,selected);
+		mapped = true;
+		if (watch) {
+			process.use_small_pages(selected, length);
+			process.reset_dirty_pages();
+			found->second.write_watch = true;
+		}
+	} catch (...) {
+		if (mapped) process.unmap_memory(selected);
+		regions.erase(found);
+		throw;
+	}
 	if (commit)
 		used+=length;
 	reserved_total+=length;
@@ -259,7 +287,7 @@ NativeMemoryRange NativeMemory::map_view(int descriptor, uint64_t offset, uint64
 	const auto address=process.map_shared(descriptor,length,offset);
 	if (permissions!=(PROT_READ|PROT_WRITE))
 		process.protect_memory(address,length,permissions);
-	regions.emplace(address,Region{length,access,PageMap(length/4096,access)});
+	regions.emplace(address,Region{length,access,PageMap(length/4096,access),false,{}});
 	used+=length;
 	reserved_total+=length;
 	return {address,length};
@@ -292,6 +320,8 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 	const auto base=address & ~uint64_t(4095), length=(size+address-base+4095)&~uint64_t(4095);
 	if (region(base,length)==regions.end())
 		return {0,0,conflict};
+	if (found->second.write_watch)
+		collect_writes();
 	// Pages inside an open range keep it: they are emptied, so a later commit finds them zeroed, and stay readable and writable, as the
 	// pages opened around a commit are. Allocators decommit and commit the same pages over and over, and the next commit is then
 	// done by the guest. Pages outside one become inaccessible again.
@@ -305,7 +335,98 @@ NativeMemoryRange NativeMemory::free(uint64_t address, uint64_t size, uint32_t t
 	const auto first=(base-found->first)/4096;
 	used-=found->second.pages.nonzero(first,length/4096)*4096;
 	found->second.pages.fill(first,length/4096,0);
+	if (found->second.write_watch) {
+		auto &dirty = found->second.dirty;
+		dirty.erase(dirty.lower_bound(base), dirty.lower_bound(base + length));
+		process.reset_dirty_pages();
+	}
 	return {base,length};
+}
+
+void NativeMemory::collect_writes()
+{
+	if (pause_writers)
+		pause_writers();
+	// clear_refs resets the whole address space: save every watch before clearing any subset of it.
+	for (auto &[base, allocation] : regions) {
+		if (!allocation.write_watch)
+			continue;
+		for (uint64_t page = 0; page < allocation.pages.size();) {
+			const auto end = allocation.pages.run_end(page);
+			if (allocation.pages.at(page)) {
+				const auto dirty = process.dirty_pages(base + page * 4096, (end - page) * 4096);
+				allocation.dirty.insert(dirty.begin(), dirty.end());
+			}
+			page = end;
+		}
+	}
+}
+
+bool NativeMemory::dispatch_write_watch(std::string_view name)
+{
+	const bool get = name == "GetWriteWatch";
+	if (!get && name != "ResetWriteWatch")
+		return false;
+	const auto args = process.api_arguments(get ? 6 : 2);
+	const uint64_t address = args[get ? 1 : 0], size = args[get ? 2 : 1];
+	const auto fail = [&](uint32_t error) { environment.set_last_error(error); process.return_api(UINT32_MAX); };
+	if (!range(address, size, user_limit) || (get && (uint32_t(args[0]) & ~1U))) {
+		fail(87);
+		return true;
+	}
+	settle();
+	const auto found = region(address, size);
+	if (found == regions.end() || !found->second.write_watch) {
+		fail(87);
+		return true;
+	}
+	const uint64_t base = address & ~4095ULL, end = (address + size + 4095) & ~4095ULL;
+	try {
+		const size_t width = process.mode() == NativeMode::x86 ? 4 : 8;
+		uint64_t capacity = 0;
+		if (get) {
+			const auto bytes = process.read_memory(args[4], width);
+			for (size_t byte = 0; byte < width; ++byte) capacity |= uint64_t(bytes[byte]) << (byte * 8);
+			if (!capacity) { fail(87); return true; }
+			process.validate_write_memory(args[4], width);
+			process.validate_write_memory(args[5], 4);
+		}
+		collect_writes();
+		auto &dirty = found->second.dirty;
+		const auto first = dirty.lower_bound(base), last = dirty.lower_bound(end);
+		auto consumed = first;
+		std::vector<uint8_t> addresses;
+		if (get) {
+			for (; consumed != last && addresses.size() / width < capacity; ++consumed) {
+				const auto offset = addresses.size();
+				addresses.resize(offset + width);
+				put(addresses, offset, *consumed, width);
+			}
+			// Validate before resetting, so a bad output buffer cannot lose pending writes.
+			process.validate_write_memory(args[3], std::max(width, addresses.size()));
+		}
+		if (!get || args[0]) {
+			process.reset_dirty_pages();
+			dirty.erase(first, get ? consumed : last);
+		}
+		if (get) {
+			std::array<uint8_t, 8> count{}, granularity{};
+			put(count, 0, addresses.size() / width, width);
+			put(granularity, 0, 4096, 4);
+			if (!addresses.empty()) process.write_memory(args[3], addresses);
+			process.write_memory(args[4], std::span(count).first(width));
+			process.write_memory(args[5], std::span(granularity).first(4));
+		}
+		process.return_api(0);
+	} catch (const std::bad_alloc &) {
+		fail(8);
+	} catch (const std::runtime_error &error) {
+		const std::string_view message = error.what();
+		if (message.starts_with("native write tracking")) fail(120);
+		else if (message.find("readable") != message.npos || message.find("writable") != message.npos) fail(998);
+		else throw;
+	}
+	return true;
 }
 
 void NativeMemory::add_image(uint64_t base, uint64_t size, std::span<const std::pair<std::pair<uint64_t,uint64_t>,uint32_t>> sections)
@@ -444,8 +565,10 @@ static uint32_t error(uint32_t status)
 
 bool NativeMemory::dispatch(std::string_view name)
 {
+	if (dispatch_write_watch(name))
+		return true;
 	const bool nt=name.starts_with("Nt");
-	const bool alloc=name=="VirtualAlloc" || name=="NtAllocateVirtualMemory";
+	const bool alloc=name=="VirtualAlloc" || name=="VirtualAllocFromApp" || name=="NtAllocateVirtualMemory";
 	const bool release=name=="VirtualFree" || name=="NtFreeVirtualMemory";
 	const bool change=name=="VirtualProtect" || name=="NtProtectVirtualMemory";
 	// Other process handles are served by the process API through their owner's channel.
@@ -462,7 +585,9 @@ bool NativeMemory::dispatch(std::string_view name)
 	uint64_t result=0;
 	uint32_t status=0;
 	try {
-		if (nt && args[0]!=UINT64_MAX)
+		if (name=="VirtualAllocFromApp" && (args[3] & 0xf0))
+			status=0xc000000dU;
+		else if (nt && args[0]!=UINT64_MAX)
 			status=0xc0000008U;
 		else if (alloc && nt && args[2])
 			status=unsupported;
@@ -520,9 +645,12 @@ bool NativeMemory::dispatch(std::string_view name)
 		status=no_memory;
 	} catch (const std::runtime_error &failure) {
 		const std::string_view message=failure.what();
-		if (message.find("readable")==message.npos && message.find("writable")==message.npos)
+		if (message.starts_with("native write tracking"))
+			status=unsupported;
+		else if (message.find("readable")==message.npos && message.find("writable")==message.npos)
 			throw;
-		status=0xc0000005U;
+		else
+			status=0xc0000005U;
 	}
 	// RAVEN_TRACE_MEMORY lists every virtual memory request with the arguments the program passed and the status it got.
 	static const bool trace=std::getenv("RAVEN_TRACE_MEMORY")!=nullptr;

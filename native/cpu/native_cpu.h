@@ -89,6 +89,10 @@ public:
 	uint64_t map_descriptor(int descriptor, size_t size, uint64_t offset = 0);
 	bool memory_available(uint64_t address, size_t size) const;
 	void discard_memory(uint64_t address, size_t size);
+	// Linux soft-dirty state for anonymous guest pages, including writes made through process_vm_writev.
+	std::vector<uint64_t> dirty_pages(uint64_t address, size_t size) const;
+	void reset_dirty_pages();
+	void use_small_pages(uint64_t address, size_t size);
 	// Dynamic image mappings share LoadedImage storage; the loader owns initialization and lifetime.
 	void map_image(LoadedImage &image);
 	void unmap_image(uint64_t address);

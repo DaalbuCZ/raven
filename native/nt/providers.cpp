@@ -59,15 +59,15 @@ static std::vector<uint8_t> read_host_file(const std::filesystem::path &path)
 	return bytes;
 }
 
-// The PathCch functions live in kernelbase.dll on Windows and are not in the import libraries the public lists come from.
-static constexpr std::array<std::string_view, 49> names{
-	"CloseHandle","CreateEventA","CreateEventW","ExitProcess",
+// Additional kernel exports absent from the import libraries used to generate the public lists.
+static constexpr std::array<std::string_view, 52> names{
+	"CloseHandle","CreateEventA","CreateEventW","EnumDynamicTimeZoneInformation","ExitProcess",
 	"FindResourceA", "FindResourceExA", "FindResourceExW", "FindResourceW", "FreeLibrary",
-	"GetACP", "GetCommandLineA", "GetCommandLineW", "GetCurrentProcessId", "GetCurrentThreadId", "GetFileType", "GetLastError", "GetModuleHandleA",
+	"GetACP", "GetCommandLineA", "GetCommandLineW", "GetCurrentProcessId", "GetCurrentThreadId", "GetDynamicTimeZoneInformationEffectiveYears", "GetFileType", "GetLastError", "GetModuleHandleA",
 	"GetModuleHandleW", "GetProcAddress", "GetProcessHeap", "GetStartupInfoA", "GetStartupInfoW", "GetStdHandle", "HeapAlloc", "HeapCreate", "HeapDestroy", "HeapFree", "HeapReAlloc", "HeapSize",
 	"LoadLibraryA", "LoadLibraryW", "LoadResource",
 	"LockResource", "MultiByteToWideChar", "PathCchCanonicalize", "PathCchCanonicalizeEx", "PathCchCombineEx", "PathCchSkipRoot", "RaiseException", "ResetEvent", "SetEvent", "SetLastError", "SizeofResource",
-	"VirtualAlloc", "VirtualFree", "VirtualProtect", "VirtualQuery", "WaitForSingleObject", "WriteFile"
+	"VirtualAlloc", "VirtualAllocFromApp", "VirtualFree", "VirtualProtect", "VirtualQuery", "WaitForSingleObject", "WriteFile"
 };
 
 std::vector<uint8_t> environment_provider(std::string_view name, uint64_t base)
@@ -2148,6 +2148,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	GuestAllocator allocator(memory, heap);
 	NativeThreads threads(process, environment, memory, &tls, deadline);
 	threads.set_runner(invoke);
+	module_api.set_call(invoke);
 	threads_ptr = &threads;
 	// Other processes ask for handles of this one and send theirs; the scheduler answers them.
 	threads.add_service([&kernel_objects] { receive_handles(kernel_objects); });

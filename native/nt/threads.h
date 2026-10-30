@@ -80,6 +80,7 @@ private:
 
 struct ThreadExit {
 	uint32_t code;
+	bool notify = true;
 };
 
 // Cooperative scheduler over one traced process: guest threads switch only inside API calls.

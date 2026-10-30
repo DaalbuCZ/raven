@@ -1093,6 +1093,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 		const auto quit=(kinds & 0x108) ? quits.find(me) : quits.end();
 		if (found!=messages.end() || quit!=quits.end()) {
 			const auto value=found!=messages.end() ? *found : Message{0,quit->second,0,0x12,message_time(),cursor_x,cursor_y};
+			retrieved_times[me]=value.time;
 			std::vector<uint8_t> bytes(layout.size);
 			put(bytes,0,value.window,layout.pointer); put(bytes,layout.message,value.message,4);
 			put(bytes,layout.wparam,value.wparam,layout.pointer); put(bytes,layout.lparam,value.lparam,layout.pointer);
@@ -1153,7 +1154,7 @@ uint64_t NativeWindows::retrieve(std::span<const uint64_t> args,bool blocking)
 			}
 			paint_cursor=paint;
 			std::vector<uint8_t> bytes(layout.size);
-			put(bytes,0,paint,layout.pointer); put(bytes,layout.message,0x0f,4); put(bytes,layout.time,message_time(),4);
+			put(bytes,0,paint,layout.pointer); put(bytes,layout.message,0x0f,4); put(bytes,layout.time,retrieved_times[me]=message_time(),4);
 			process.write_memory(args[0],bytes);
 			queue_status(me,seen,true);
 			return 1;

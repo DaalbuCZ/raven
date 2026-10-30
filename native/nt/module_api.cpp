@@ -3,9 +3,11 @@
 #include "apiset.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
+#include <sys/mman.h>
 
 namespace raven {
 
@@ -152,10 +154,39 @@ bool NativeModuleAPI::dispatch(std::string_view name)
 				process.write_memory(base + handle_rva, bytes);
 			}
 		}
+		const uint64_t import = read64(base + names_rva + (thunk - (base + table_rva)));
+		const uint64_t target = import >> 63 ? (import & 0xffff) : base + uint32_t(import) + 2;
 		uint64_t result = 0;
 		if (handle) {
-			const uint64_t entry = read64(base + names_rva + (thunk - (base + table_rva)));
-			result = procedure(handle, entry >> 63 ? (entry & 0xffff) : base + uint32_t(entry) + 2);
+			result = procedure(handle, target);
+		}
+		if (!result && invoke && (arguments[2] || arguments[3])) {
+			NativeResult recovered{NativeStop::returned, 0, 0, 0};
+			if (arguments[2]) {
+				// DELAYLOAD_INFO uses the native x64 layout; reason 4 reports a failed import lookup.
+				std::array<uint64_t, 9> info{72, descriptor, thunk, base + name_rva, import >> 63 ? 0ULL : 1ULL,
+					target, handle, 0, handle ? 0xc0000139ULL : 0xc0000135ULL};
+				const auto scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
+				try {
+					process.write_memory(scratch, std::span(reinterpret_cast<const uint8_t *>(info.data()), sizeof(info)));
+					const std::array<uint64_t, 2> args{4, scratch};
+					recovered = invoke(arguments[2], args);
+				} catch (...) {
+					process.unmap_memory(scratch);
+					throw;
+				}
+				process.unmap_memory(scratch);
+				if (recovered.stop != NativeStop::returned)
+					throw recovered;
+			}
+			if (!recovered.value && arguments[3]) {
+				const std::array<uint64_t, 2> args{base + name_rva, target};
+				recovered = invoke(arguments[3], args);
+			}
+			if (recovered.stop != NativeStop::returned)
+				throw recovered;
+			process.return_api(recovered.value);
+			return true;
 		}
 		if (result) {
 			std::vector<uint8_t> bytes(8);

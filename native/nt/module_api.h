@@ -13,6 +13,7 @@ public:
 		const ModuleSet &modules, const PEModule &entry);
 	bool dispatch(std::string_view name);
 	void set_loader(std::function<uint64_t(std::string)> load, std::function<bool(uint64_t)> free);
+	void set_call(std::function<NativeResult(uint64_t, std::span<const uint64_t>)> caller) { invoke = std::move(caller); }
 	// The flags of the LoadLibraryEx call being served, zero for LoadLibrary.
 	uint32_t load_flags() const { return flags; }
 	// A library asked for by a path is a particular file, which only the loader that read it can tell is already in the process.
@@ -25,6 +26,7 @@ private:
 	const PEModule &entry;
 	std::function<uint64_t(std::string)> load;
 	std::function<bool(uint64_t)> free;
+	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> invoke;
 	std::function<uint64_t(const std::string &)> path_lookup;
 	uint32_t flags = 0;
 	std::optional<std::string> guest_name(uint64_t address, bool wide) const;

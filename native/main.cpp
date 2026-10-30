@@ -575,8 +575,10 @@ int main(int argc, char **argv)
 					load_component("raven-user32.dll", {"user32.dll"});
 					// The shell component serves every graphical program, as libraries it loads later, such as a setup program's engine, import the
 					// shell, the setup API and the dialogs that the program itself may not. A program that imports automation creates classes
-					// through COM too, even when it loads ole32 only later.
-					load_component("raven-shell.dll", {"comdlg32.dll", "ole32.dll", "oleaut32.dll", "shell32.dll", "shlwapi.dll", "user32.dll"});
+					// through COM too, even when it loads ole32 only later. The Windows Runtime is served by the same component, so a program
+					// that imports the runtime contracts, combase or runtimeobject gets it whether or not it also imports the shell.
+					load_component("raven-shell.dll", {"comdlg32.dll", "ole32.dll", "oleaut32.dll", "shell32.dll", "shlwapi.dll", "user32.dll",
+						"combase.dll", "runtimeobject.dll", "api-ms-win-core-winrt-*", "api-ms-win-ro-*"});
 					// The setup API component: setup information files, file queues and cabinets, for the programs that import it and for
 					// installers, whose engines and the advpack they load import it later.
 					if (const auto setup = component_directory / "raven-setupapi.dll"; !modules.all().contains("raven-setupapi.dll") &&

@@ -998,6 +998,17 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("RoParseTypeName", 3, [](ApiCall &call) { call.ret(0x80004001U); });
 	registry.add("RoResolveNamespace", 7, [](ApiCall &call) { call.ret(0x80004001U); });
 	registry.add("RoGetParameterizedTypeInstanceIID", 5, [](ApiCall &call) { call.ret(0x80004001U); });
+	// No restricted error information is kept: a query reports that the thread has none (S_FALSE with a null interface), and storing
+	// one is accepted, as a runtime that inspects a failed call expects.
+	registry.add("GetRestrictedErrorInfo", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.ret(0x80004003U);
+			return;
+		}
+		call.store_pointer(call[0], 0);
+		call.ret(1);
+	});
+	registry.add("SetRestrictedErrorInfo", 1, [](ApiCall &call) { call.ret(0); });
 	// No HLSL compiler stands behind d3dcompiler_47 yet: a compile is refused with no code and no message blob, so a program falls back to
 	// what it does without a GPU path instead of running an empty shader.
 	registry.add("D3DCompile", 11, [](ApiCall &call) {

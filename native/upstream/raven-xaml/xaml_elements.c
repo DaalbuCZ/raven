@@ -1,0 +1,2830 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Mirko Brombin
+ * See LICENSES/MIT.txt.
+ */
+/* Raven XAML component: the first control classes of the element tree.
+ *
+ * Grid, TextBlock and Button are the controls the XAML engine builds its pages from. Grid owns its children through IPanel, whose
+ * Children is an IVector<UIElement>, and its row and column definitions through IGrid, whose RowDefinitions and ColumnDefinitions
+ * are the IVector`1 over RowDefinition and ColumnDefinition; TextBlock stores its text through ITextBlock; Button stores its
+ * content through the IContentControl it inherits from ContentControl. The definition classes carry the fixed lengths the grid
+ * lays its children into. The interface declarations come from Windows.UI.Xaml.winmd by scripts/generate-winrt-header.py; members
+ * the engine does not implement yet answer E_NOTIMPL, and every stub keeps the exact signature of its slot so a call never depends
+ * on an argument count the metadata did not give.
+ *
+ * The collections are the parameterized interface Windows.Foundation.Collections.IVector`1. A parameterized interface has no winmd
+ * of its own: its GUID is the SHA-1 of its signature (pinterface({913337e9-11a1-4345-a3a2-4e7f956e222d};...), namespace
+ * d57af411-737b-c042-abae-878b1e16adee), and its vtable carries the twelve IVector`1 methods of the generic definition, without
+ * the inherited IIterable`1.First.
+ *
+ * Every element answers IUIElement (the default interface of UIElement, generated into windows_ui_xaml_uielement.h), so the
+ * render pass's flat projection makes the three classes hit-testable peers: the routing (xaml_input.c) hit-tests the pointer
+ * position against the geometry the pass recorded and delivers the pointer events here, where the handlers the application
+ * stored on the element wait. Button additionally answers IButtonBase (generated into windows_ui_xaml_buttonbase.h) and runs
+ * the ClickMode.Release behavior of ButtonBase on the events it receives. */
+#define INITGUID
+#define CINTERFACE
+#define COBJMACROS
+#define WIN32_LEAN_AND_MEAN
+#include "xaml_internal.h"
+#include <string.h>
+#include <windows.ui.composition.h>
+#include "events.h"
+#include "windows_ui_xaml_elements.h"
+#include "windows_ui_xaml_layout.h"
+#include "windows_ui_xaml_uielement.h"
+#include "windows_ui_xaml_buttonbase.h"
+#include "xaml_input.h"
+#include "xaml_automation.h"
+#include "windows_ui_xaml_dictionary.h" /* the boxed string __FIReference_1_HSTRING; mingw precomputes no instantiation */
+#include "xaml_styles.h"
+
+#define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
+#define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
+
+typedef __x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock textblock1;
+typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIPanel panel1;
+typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIGrid grid1;
+typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIButton button1;
+typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl content_control;
+typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition row_definition1;
+typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition column_definition1;
+
+/* The default interface of UIElement; the vector stores element interface pointers, which are word-sized references. */
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIUIElement ui_element;
+
+/* The GUID of IVector<UIElement>, derived from the signature of the two winmd GUIDs as the Windows Runtime parameterized-type
+ * rule defines it. The two definition vectors derive the same way; both facts were validated against the precomputed
+ * IVector<HSTRING> in mingw's windows.foundation.h and against the derived IVector<UIElement> before use. */
+DEFINE_GUID(IID___FIVector_1_UIElement, 0x393d6210, 0xfa21, 0x573a, 0xa2, 0x38, 0xf0, 0xe8, 0x73, 0x3b, 0x3c, 0x94);
+DEFINE_GUID(IID___FIVector_1_RowDefinition, 0x2a17524a, 0x48ef, 0x579b, 0x9e, 0x63, 0xe1, 0xce, 0x52, 0xad, 0xca, 0xe2);
+DEFINE_GUID(IID___FIVector_1_ColumnDefinition, 0xcaf7c66c, 0x1ccb, 0x5ada, 0xaf, 0xce, 0xfc, 0x62, 0xd2, 0xdb, 0x2c, 0x66);
+
+static const WCHAR grid_class[] = L"Windows.UI.Xaml.Controls.Grid";
+static const WCHAR textblock_class[] = L"Windows.UI.Xaml.Controls.TextBlock";
+static const WCHAR button_class[] = L"Windows.UI.Xaml.Controls.Button";
+static const WCHAR row_definition_class[] = L"Windows.UI.Xaml.Controls.RowDefinition";
+static const WCHAR column_definition_class[] = L"Windows.UI.Xaml.Controls.ColumnDefinition";
+static const WCHAR vector_class_name[] = L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.IUIElement>";
+static const WCHAR row_vector_class_name[] = L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Controls.RowDefinition>";
+static const WCHAR column_vector_class_name[] = L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Controls.ColumnDefinition>";
+
+static HRESULT inspectable_iids(ULONG *count, IID **iids)
+{
+	if (!count || !iids)
+		return E_POINTER;
+	*count = 0;
+	*iids = NULL;
+	return S_OK;
+}
+
+static HRESULT inspectable_trust(TrustLevel *level)
+{
+	if (!level)
+		return E_POINTER;
+	*level = BaseTrust;
+	return S_OK;
+}
+
+static int equal_iid(REFIID left, const IID *right)
+{
+	return left->Data1 == right->Data1 && left->Data2 == right->Data2 && left->Data3 == right->Data3 &&
+		left->Data4[0] == right->Data4[0] && left->Data4[1] == right->Data4[1] &&
+		left->Data4[2] == right->Data4[2] && left->Data4[3] == right->Data4[3] &&
+		left->Data4[4] == right->Data4[4] && left->Data4[5] == right->Data4[5] &&
+		left->Data4[6] == right->Data4[6] && left->Data4[7] == right->Data4[7];
+}
+
+#define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) \
+	{ (void)This; if (a1) *(void **)(uintptr_t)a1 = NULL; return E_NOTIMPL; }
+#define STUB1_SET(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) \
+	{ (void)This; (void)a1; return E_NOTIMPL; }
+#define STUB2(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) \
+	{ (void)This; (void)a1; (void)a2; return E_NOTIMPL; }
+
+/* The UIElement part every element class answers: the pointer events the routing delivers, the hit-test visibility, and the
+ * owner plumbing, since the refcount and the identity live on the owning element and every part of it must answer as one COM
+ * object. One stored handler list per pointer event; the tokens revoke exactly what add handed out, following the event
+ * pattern of the CoreWindow's own events (events.c). The class name is the runtime class of the owner: a grid answers IUIElement
+ * as Windows.UI.Xaml.Controls.Grid, the way a real projection reports the object rather than the interface. */
+typedef HRESULT (*element_query_function)(void *owner, REFIID iid, void **out);
+typedef ULONG (*element_reference_function)(void *owner);
+struct element_ui {
+	const __x_ABI_CWindows_CUI_CXaml_CIUIElementVtbl *lpVtbl;
+	void *owner;
+	HRESULT (*owner_query)(void *owner, REFIID iid, void **out);
+	ULONG (*owner_addref)(void *owner);
+	ULONG (*owner_release)(void *owner);
+	const WCHAR *class_name;
+	/* The element-specific pointer behavior (the button's IsPressed and Click); NULL where the engine has none. */
+	void (*behavior)(void *owner, IInspectable *element, enum raven_element_pointer kind,
+		__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args);
+	struct raven_event_list events[RAVEN_ELEMENT_POINTER_COUNT];
+	boolean hit_test_visible;
+};
+
+static HRESULT WINAPI ui_query(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, REFIID iid, void **out)
+{
+	struct element_ui *self = (struct element_ui *)This;
+	return self->owner_query(self->owner, iid, out);
+}
+static ULONG WINAPI ui_addref(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This)
+{
+	struct element_ui *self = (struct element_ui *)This;
+	return self->owner_addref(self->owner);
+}
+static ULONG WINAPI ui_release(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This)
+{
+	struct element_ui *self = (struct element_ui *)This;
+	return self->owner_release(self->owner);
+}
+static HRESULT WINAPI ui_iids(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, ULONG *count, IID **iids)
+{
+	(void)This;
+	return inspectable_iids(count, iids);
+}
+static HRESULT WINAPI ui_name(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, HSTRING *name)
+{
+	const WCHAR *text = ((struct element_ui *)This)->class_name;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(text, (UINT32)lstrlenW(text), name);
+}
+static HRESULT WINAPI ui_trust(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, TrustLevel *level)
+{
+	(void)This;
+	return inspectable_trust(level);
+}
+
+/* The slots the engine does not implement answer E_NOTIMPL with the exact signature the generated header declares, so a call
+ * never depends on an argument count the metadata did not give; getters clear their out parameter first. */
+static HRESULT WINAPI ui_stub0(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This)
+{
+	(void)This;
+	return E_NOTIMPL;
+}
+static HRESULT WINAPI ui_stub1(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1)
+{
+	(void)This;
+	if (a1)
+		*(void **)(uintptr_t)a1 = NULL;
+	return E_NOTIMPL;
+}
+static HRESULT WINAPI ui_stub1_set(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1)
+{
+	(void)This;
+	(void)a1;
+	return E_NOTIMPL;
+}
+static HRESULT WINAPI ui_stub2(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2)
+{
+	(void)This;
+	(void)a1;
+	(void)a2;
+	return E_NOTIMPL;
+}
+static HRESULT WINAPI ui_stub3(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+	(void)This;
+	(void)a1;
+	(void)a2;
+	(void)a3;
+	return E_NOTIMPL;
+}
+
+#define UI_POINTER_ADDREMOVE(NAME, KIND) \
+	static HRESULT WINAPI ui_add_##NAME(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t handler, uint64_t token) \
+	{ \
+		return raven_event_add(&((struct element_ui *)This)->events[KIND], (IUnknown *)(uintptr_t)handler, \
+			(EventRegistrationToken *)(uintptr_t)token); \
+	} \
+	static HRESULT WINAPI ui_remove_##NAME(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t token) \
+	{ \
+		EventRegistrationToken value; \
+		value.value = (INT64)token; \
+		return raven_event_remove(&((struct element_ui *)This)->events[KIND], value); \
+	}
+
+UI_POINTER_ADDREMOVE(pointer_pressed, RAVEN_ELEMENT_POINTER_PRESSED)
+UI_POINTER_ADDREMOVE(pointer_moved, RAVEN_ELEMENT_POINTER_MOVED)
+UI_POINTER_ADDREMOVE(pointer_released, RAVEN_ELEMENT_POINTER_RELEASED)
+UI_POINTER_ADDREMOVE(pointer_entered, RAVEN_ELEMENT_POINTER_ENTERED)
+UI_POINTER_ADDREMOVE(pointer_exited, RAVEN_ELEMENT_POINTER_EXITED)
+UI_POINTER_ADDREMOVE(pointer_capture_lost, RAVEN_ELEMENT_POINTER_CAPTURE_LOST)
+UI_POINTER_ADDREMOVE(pointer_wheel_changed, RAVEN_ELEMENT_POINTER_WHEEL)
+
+static HRESULT WINAPI ui_get_hit_test_visible(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t out)
+{
+	if (!out)
+		return E_POINTER;
+	*(boolean *)(uintptr_t)out = ((struct element_ui *)This)->hit_test_visible;
+	return S_OK;
+}
+static HRESULT WINAPI ui_put_hit_test_visible(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t value)
+{
+	((struct element_ui *)This)->hit_test_visible = !!value;
+	return S_OK;
+}
+
+/* The vtable follows the generated windows_ui_xaml_uielement.h slot for slot: IUIElement declares 96 methods after the
+ * IInspectable ones, and every unimplemented slot carries the E_NOTIMPL stub of its arity. */
+static const __x_ABI_CWindows_CUI_CXaml_CIUIElementVtbl uielement_table = {
+	.QueryInterface = ui_query,
+	.AddRef = ui_addref,
+	.Release = ui_release,
+	.GetIids = ui_iids,
+	.GetRuntimeClassName = ui_name,
+	.GetTrustLevel = ui_trust,
+	.get_DesiredSize = ui_stub1,
+	.get_AllowDrop = ui_stub1,
+	.put_AllowDrop = ui_stub1_set,
+	.get_Opacity = ui_stub1,
+	.put_Opacity = ui_stub1_set,
+	.get_Clip = ui_stub1,
+	.put_Clip = ui_stub1_set,
+	.get_RenderTransform = ui_stub1,
+	.put_RenderTransform = ui_stub1_set,
+	.get_Projection = ui_stub1,
+	.put_Projection = ui_stub1_set,
+	.get_RenderTransformOrigin = ui_stub1,
+	.put_RenderTransformOrigin = ui_stub1_set,
+	.get_IsHitTestVisible = ui_get_hit_test_visible,
+	.put_IsHitTestVisible = ui_put_hit_test_visible,
+	.get_Visibility = ui_stub1,
+	.put_Visibility = ui_stub1_set,
+	.get_RenderSize = ui_stub1,
+	.get_UseLayoutRounding = ui_stub1,
+	.put_UseLayoutRounding = ui_stub1_set,
+	.get_Transitions = ui_stub1,
+	.put_Transitions = ui_stub1_set,
+	.get_CacheMode = ui_stub1,
+	.put_CacheMode = ui_stub1_set,
+	.get_IsTapEnabled = ui_stub1,
+	.put_IsTapEnabled = ui_stub1_set,
+	.get_IsDoubleTapEnabled = ui_stub1,
+	.put_IsDoubleTapEnabled = ui_stub1_set,
+	.get_IsRightTapEnabled = ui_stub1,
+	.put_IsRightTapEnabled = ui_stub1_set,
+	.get_IsHoldingEnabled = ui_stub1,
+	.put_IsHoldingEnabled = ui_stub1_set,
+	.get_ManipulationMode = ui_stub1,
+	.put_ManipulationMode = ui_stub1_set,
+	.get_PointerCaptures = ui_stub1,
+	.add_KeyUp = ui_stub2,
+	.remove_KeyUp = ui_stub1_set,
+	.add_KeyDown = ui_stub2,
+	.remove_KeyDown = ui_stub1_set,
+	.add_GotFocus = ui_stub2,
+	.remove_GotFocus = ui_stub1_set,
+	.add_LostFocus = ui_stub2,
+	.remove_LostFocus = ui_stub1_set,
+	.add_DragEnter = ui_stub2,
+	.remove_DragEnter = ui_stub1_set,
+	.add_DragLeave = ui_stub2,
+	.remove_DragLeave = ui_stub1_set,
+	.add_DragOver = ui_stub2,
+	.remove_DragOver = ui_stub1_set,
+	.add_Drop = ui_stub2,
+	.remove_Drop = ui_stub1_set,
+	.add_PointerPressed = ui_add_pointer_pressed,
+	.remove_PointerPressed = ui_remove_pointer_pressed,
+	.add_PointerMoved = ui_add_pointer_moved,
+	.remove_PointerMoved = ui_remove_pointer_moved,
+	.add_PointerReleased = ui_add_pointer_released,
+	.remove_PointerReleased = ui_remove_pointer_released,
+	.add_PointerEntered = ui_add_pointer_entered,
+	.remove_PointerEntered = ui_remove_pointer_entered,
+	.add_PointerExited = ui_add_pointer_exited,
+	.remove_PointerExited = ui_remove_pointer_exited,
+	.add_PointerCaptureLost = ui_add_pointer_capture_lost,
+	.remove_PointerCaptureLost = ui_remove_pointer_capture_lost,
+	.add_PointerCanceled = ui_stub2,
+	.remove_PointerCanceled = ui_stub1_set,
+	.add_PointerWheelChanged = ui_add_pointer_wheel_changed,
+	.remove_PointerWheelChanged = ui_remove_pointer_wheel_changed,
+	.add_Tapped = ui_stub2,
+	.remove_Tapped = ui_stub1_set,
+	.add_DoubleTapped = ui_stub2,
+	.remove_DoubleTapped = ui_stub1_set,
+	.add_Holding = ui_stub2,
+	.remove_Holding = ui_stub1_set,
+	.add_RightTapped = ui_stub2,
+	.remove_RightTapped = ui_stub1_set,
+	.add_ManipulationStarting = ui_stub2,
+	.remove_ManipulationStarting = ui_stub1_set,
+	.add_ManipulationInertiaStarting = ui_stub2,
+	.remove_ManipulationInertiaStarting = ui_stub1_set,
+	.add_ManipulationStarted = ui_stub2,
+	.remove_ManipulationStarted = ui_stub1_set,
+	.add_ManipulationDelta = ui_stub2,
+	.remove_ManipulationDelta = ui_stub1_set,
+	.add_ManipulationCompleted = ui_stub2,
+	.remove_ManipulationCompleted = ui_stub1_set,
+	.Measure = ui_stub1,
+	.Arrange = ui_stub1,
+	.CapturePointer = ui_stub2,
+	.ReleasePointerCapture = ui_stub1,
+	.ReleasePointerCaptures = ui_stub0,
+	.AddHandler = ui_stub3,
+	.RemoveHandler = ui_stub2,
+	.TransformToVisual = ui_stub2,
+	.InvalidateMeasure = ui_stub0,
+	.InvalidateArrange = ui_stub0,
+	.UpdateLayout = ui_stub0,
+};
+
+static void element_ui_init(struct element_ui *self, void *owner, HRESULT (*owner_query)(void *, REFIID, void **),
+	ULONG (*owner_addref)(void *), ULONG (*owner_release)(void *), const WCHAR *class_name)
+{
+	self->lpVtbl = &uielement_table;
+	self->owner = owner;
+	self->owner_query = owner_query;
+	self->owner_addref = owner_addref;
+	self->owner_release = owner_release;
+	self->class_name = class_name;
+	self->hit_test_visible = TRUE; /* an element is hit-testable unless the application says otherwise */
+	for (int event = 0; event < RAVEN_ELEMENT_POINTER_COUNT; ++event)
+		InitializeCriticalSection(&self->events[event].lock);
+}
+
+static void element_ui_release(struct element_ui *self)
+{
+	for (int event = 0; event < RAVEN_ELEMENT_POINTER_COUNT; ++event) {
+		raven_event_close(&self->events[event]);
+		DeleteCriticalSection(&self->events[event].lock);
+	}
+}
+
+/* The delivery the routing reaches: the element's own behavior first (a button tracks IsPressed and raises Click), then the
+ * handlers the application stored, each with the element as sender and the CoreWindow's snapshot as the routed arguments. A
+ * handler failure is the application's business and never reaches the caller; the routing stays alive whatever it returns. */
+void raven_xaml_element_pointer(IInspectable *element, enum raven_element_pointer kind,
+	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args)
+{
+	__x_ABI_CWindows_CUI_CXaml_CIUIElement *ui = NULL;
+	IUnknown **handlers = NULL;
+	ULONG count = 0;
+	if (!element || !args ||
+		FAILED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui)) || !ui)
+		return;
+	struct element_ui *self = (struct element_ui *)ui;
+	if (self->behavior)
+		self->behavior(self->owner, element, kind, args);
+	if (raven_event_snapshot(&self->events[kind], &handlers, &count) == S_OK) {
+		for (ULONG index = 0; index < count; ++index) {
+			__FITypedEventHandler_2_Windows__CUI__CXaml__CUIElement_Windows__CUI__CXaml__CInput__CPointerRoutedEventArgs *handler =
+				(void *)handlers[index];
+			handler->lpVtbl->Invoke(handler, ui, (__x_ABI_CWindows_CUI_CXaml_CInput_CIPointerRoutedEventArgs *)args);
+			IUnknown_Release(handlers[index]);
+		}
+		FREE(handlers);
+	}
+	ui->lpVtbl->Release(ui);
+}
+
+static int same_text(const WCHAR *text, UINT32 length, const WCHAR *name)
+{
+	return text && CompareStringOrdinal(text, (int)length, name, -1, FALSE) == CSTR_EQUAL;
+}
+
+static void store_name(HSTRING *slot, const WCHAR *text, UINT32 length)
+{
+	if (*slot) {
+		WindowsDeleteString(*slot);
+		*slot = NULL;
+	}
+	if (text && length)
+		WindowsCreateString(text, length, slot);
+}
+
+/* The children collection */
+
+struct children_vector;
+
+struct children_vector_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(struct children_vector *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(struct children_vector *This);
+	ULONG (STDMETHODCALLTYPE *Release)(struct children_vector *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(struct children_vector *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(struct children_vector *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(struct children_vector *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *GetAt)(struct children_vector *This, UINT32 index, ui_element **value);
+	HRESULT (STDMETHODCALLTYPE *get_Size)(struct children_vector *This, UINT32 *value);
+	HRESULT (STDMETHODCALLTYPE *GetView)(struct children_vector *This, void **value);
+	HRESULT (STDMETHODCALLTYPE *IndexOf)(struct children_vector *This, ui_element *element, UINT32 *index, boolean *value);
+	HRESULT (STDMETHODCALLTYPE *SetAt)(struct children_vector *This, UINT32 index, ui_element *value);
+	HRESULT (STDMETHODCALLTYPE *InsertAt)(struct children_vector *This, UINT32 index, ui_element *value);
+	HRESULT (STDMETHODCALLTYPE *RemoveAt)(struct children_vector *This, UINT32 index);
+	HRESULT (STDMETHODCALLTYPE *Append)(struct children_vector *This, ui_element *value);
+	HRESULT (STDMETHODCALLTYPE *RemoveAtEnd)(struct children_vector *This);
+	HRESULT (STDMETHODCALLTYPE *Clear)(struct children_vector *This);
+	HRESULT (STDMETHODCALLTYPE *GetMany)(struct children_vector *This, UINT32 start_index, UINT32 items_size,
+		ui_element **items, UINT32 *value);
+	HRESULT (STDMETHODCALLTYPE *ReplaceAll)(struct children_vector *This, UINT32 count, ui_element **items);
+};
+
+struct children_vector {
+	const struct children_vector_vtbl *lpVtbl;
+	LONG refs;
+	/* The parameterized identity: the QI answers the instantiation's IID and the runtime class name spells its signature. */
+	const IID *iid;
+	const WCHAR *class_name;
+	/* A definitions vector drives the layout pass, so an append re-renders the hosted trees; the children vector renders when
+	 * the loader has finished attaching the object, not on each append. */
+	BOOL definitions;
+	ui_element **items;
+	UINT32 count, capacity;
+};
+
+static HRESULT WINAPI vector_query(struct children_vector *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, self->iid))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	*out = self;
+	return S_OK;
+}
+
+static ULONG WINAPI vector_addref(struct children_vector *self)
+{
+	return (ULONG)InterlockedIncrement(&self->refs);
+}
+
+static ULONG WINAPI vector_release(struct children_vector *self)
+{
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		for (UINT32 index = 0; index < self->count; ++index)
+			if (self->items[index])
+				((IInspectable *)self->items[index])->lpVtbl->Release((IInspectable *)self->items[index]);
+		if (self->items)
+			FREE(self->items);
+		FREE(self);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI vector_iids(struct children_vector *self, ULONG *count, IID **iids)
+{
+	(void)self;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI vector_name(struct children_vector *self, HSTRING *name)
+{
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(self->class_name, (UINT32)lstrlenW(self->class_name), name);
+}
+
+static HRESULT WINAPI vector_trust(struct children_vector *self, TrustLevel *level)
+{
+	(void)self;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI vector_get_at(struct children_vector *self, UINT32 index, ui_element **value)
+{
+	if (!value)
+		return E_POINTER;
+	*value = NULL;
+	if (index >= self->count)
+		return E_BOUNDS;
+	*value = self->items[index];
+	if (*value)
+		((IInspectable *)*value)->lpVtbl->AddRef((IInspectable *)*value);
+	return S_OK;
+}
+
+static HRESULT WINAPI vector_size(struct children_vector *self, UINT32 *value)
+{
+	if (!value)
+		return E_POINTER;
+	*value = self->count;
+	return S_OK;
+}
+
+static HRESULT WINAPI vector_get_view(struct children_vector *self, void **value)
+{
+	(void)self;
+	if (value)
+		*value = NULL;
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI vector_index_of(struct children_vector *self, ui_element *element, UINT32 *index, boolean *value)
+{
+	if (!index || !value)
+		return E_POINTER;
+	*value = FALSE;
+	*index = 0;
+	/* Collection identity is IUnknown identity: two references to one element can arrive through different interfaces. */
+	IUnknown *unknown = NULL;
+	if (!element || FAILED(((IInspectable *)element)->lpVtbl->QueryInterface((IInspectable *)element, &IID_IUnknown,
+		(void **)&unknown)))
+		return S_OK;
+	for (UINT32 position = 0; position < self->count; ++position) {
+		IUnknown *other = NULL;
+		if (FAILED(((IInspectable *)self->items[position])->lpVtbl->QueryInterface((IInspectable *)self->items[position],
+			&IID_IUnknown, (void **)&other)))
+			continue;
+		const int same = other == unknown;
+		other->lpVtbl->Release(other);
+		if (same) {
+			*index = position;
+			*value = TRUE;
+			break;
+		}
+	}
+	unknown->lpVtbl->Release(unknown);
+	return S_OK;
+}
+
+static HRESULT WINAPI vector_set_at(struct children_vector *self, UINT32 index, ui_element *value)
+{
+	(void)self;
+	(void)index;
+	(void)value;
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI vector_insert_at(struct children_vector *self, UINT32 index, ui_element *value)
+{
+	(void)self;
+	(void)index;
+	(void)value;
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI vector_remove_at(struct children_vector *self, UINT32 index)
+{
+	(void)self;
+	(void)index;
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI vector_append(struct children_vector *self, ui_element *value)
+{
+	if (!value)
+		return E_POINTER;
+	if (self->count == self->capacity) {
+		const UINT32 capacity = self->capacity ? self->capacity * 2 : 4;
+		ui_element **items = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)capacity * sizeof *items);
+		if (!items)
+			return E_OUTOFMEMORY;
+		if (self->items) {
+			for (UINT32 index = 0; index < self->count; ++index)
+				items[index] = self->items[index];
+			FREE(self->items);
+		}
+		self->items = items;
+		self->capacity = capacity;
+	}
+	self->items[self->count] = value;
+	((IInspectable *)value)->lpVtbl->AddRef((IInspectable *)value);
+	++self->count;
+	if (self->definitions)
+		raven_render_changed();
+	return S_OK;
+}
+
+static HRESULT WINAPI vector_remove_at_end(struct children_vector *self)
+{
+	(void)self;
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI vector_clear(struct children_vector *self)
+{
+	for (UINT32 index = 0; index < self->count; ++index)
+		if (self->items[index])
+			((IInspectable *)self->items[index])->lpVtbl->Release((IInspectable *)self->items[index]);
+	self->count = 0;
+	return S_OK;
+}
+
+static HRESULT WINAPI vector_get_many(struct children_vector *self, UINT32 start_index, UINT32 items_size,
+	ui_element **items, UINT32 *value)
+{
+	(void)self;
+	(void)start_index;
+	(void)items_size;
+	(void)items;
+	if (value)
+		*value = 0;
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI vector_replace_all(struct children_vector *self, UINT32 count, ui_element **items)
+{
+	(void)self;
+	(void)count;
+	(void)items;
+	return E_NOTIMPL;
+}
+
+static const struct children_vector_vtbl vector_table = {
+	.QueryInterface = vector_query,
+	.AddRef = vector_addref,
+	.Release = vector_release,
+	.GetIids = vector_iids,
+	.GetRuntimeClassName = vector_name,
+	.GetTrustLevel = vector_trust,
+	.GetAt = vector_get_at,
+	.get_Size = vector_size,
+	.GetView = vector_get_view,
+	.IndexOf = vector_index_of,
+	.SetAt = vector_set_at,
+	.InsertAt = vector_insert_at,
+	.RemoveAt = vector_remove_at,
+	.Append = vector_append,
+	.RemoveAtEnd = vector_remove_at_end,
+	.Clear = vector_clear,
+	.GetMany = vector_get_many,
+	.ReplaceAll = vector_replace_all,
+};
+
+static struct children_vector *create_children(const IID *iid, const WCHAR *class_name, BOOL definitions)
+{
+	struct children_vector *vector = ALLOC(sizeof *vector);
+	if (!vector)
+		return NULL;
+	vector->lpVtbl = &vector_table;
+	vector->refs = 1;
+	vector->iid = iid;
+	vector->class_name = class_name;
+	vector->definitions = definitions;
+	return vector;
+}
+
+/* Grid */
+
+struct grid;
+
+struct grid1_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIGridVtbl *lpVtbl; struct grid *owner; };
+struct panel_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIPanelVtbl *lpVtbl; struct grid *owner; };
+
+struct grid {
+	struct grid1_part first;
+	struct panel_part panel;
+	struct element_ui ui;
+	LONG refs;
+	HSTRING name;
+	struct children_vector *children, *rows, *columns;
+	COLORREF color;
+	BYTE alpha;
+	IInspectable *background;
+	/* The Style the element was given (an owned reference); the render readback applies its setters over the own state
+	 * above, so clearing the reference restores the own state exactly. */
+	IInspectable *style;
+	float width, height;
+	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
+	 * sit beside them in the same order the store selector uses; a child without a span reads back one track. */
+	UINT32 row, column;
+	UINT32 row_span, column_span;
+};
+
+static HRESULT grid_query_any(struct grid *self, REFIID iid, void **out);
+static ULONG grid_addref(struct grid *self);
+static ULONG grid_release(struct grid *self);
+
+#define GRID_PART(part, iface, prefix) \
+	static HRESULT WINAPI prefix##_query(iface *This, REFIID iid, void **out) \
+	{ return grid_query_any(((struct part *)This)->owner, iid, out); } \
+	static ULONG WINAPI prefix##_addref(iface *This) { return grid_addref(((struct part *)This)->owner); } \
+	static ULONG WINAPI prefix##_release(iface *This) { return grid_release(((struct part *)This)->owner); } \
+	static HRESULT WINAPI prefix##_iids(iface *This, ULONG *count, IID **iids) \
+	{ (void)This; return inspectable_iids(count, iids); } \
+	static HRESULT WINAPI prefix##_name(iface *This, HSTRING *name) \
+	{ (void)This; if (!name) return E_POINTER; return WindowsCreateString(grid_class, (UINT32)lstrlenW(grid_class), name); } \
+	static HRESULT WINAPI prefix##_trust(iface *This, TrustLevel *level) \
+	{ (void)This; return inspectable_trust(level); }
+
+GRID_PART(grid1_part, grid1, gridp)
+GRID_PART(panel_part, panel1, panelp)
+
+static HRESULT grid_query_any(struct grid *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid))
+		*out = &self->first;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel))
+		*out = &self->panel;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement))
+		*out = &self->ui;
+	else
+		return E_NOINTERFACE;
+	grid_addref(self);
+	return S_OK;
+}
+
+static ULONG grid_addref(struct grid *self)
+{
+	return (ULONG)InterlockedIncrement(&self->refs);
+}
+
+static ULONG grid_release(struct grid *self)
+{
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->name)
+			WindowsDeleteString(self->name);
+		if (self->children)
+			vector_release(self->children);
+		if (self->rows)
+			vector_release(self->rows);
+		if (self->columns)
+			vector_release(self->columns);
+		if (self->background)
+			self->background->lpVtbl->Release(self->background);
+		if (self->style)
+			self->style->lpVtbl->Release(self->style);
+		element_ui_release(&self->ui);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI grid_row_definitions(grid1 *iface, uint64_t out)
+{
+	struct grid *self = ((struct grid1_part *)iface)->owner;
+	if (!out)
+		return E_POINTER;
+	InterlockedIncrement(&self->rows->refs);
+	*(void **)(uintptr_t)out = self->rows;
+	return S_OK;
+}
+
+static HRESULT WINAPI grid_column_definitions(grid1 *iface, uint64_t out)
+{
+	struct grid *self = ((struct grid1_part *)iface)->owner;
+	if (!out)
+		return E_POINTER;
+	InterlockedIncrement(&self->columns->refs);
+	*(void **)(uintptr_t)out = self->columns;
+	return S_OK;
+}
+
+static HRESULT WINAPI panel_children(panel1 *iface, uint64_t out)
+{
+	struct grid *self = ((struct panel_part *)iface)->owner;
+	if (!out)
+		return E_POINTER;
+	InterlockedIncrement(&self->children->refs);
+	*(void **)(uintptr_t)out = self->children;
+	return S_OK;
+}
+
+static HRESULT WINAPI panel_background(panel1 *iface, uint64_t out)
+{
+	struct grid *self = ((struct panel_part *)iface)->owner;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = self->background;
+	if (self->background)
+		self->background->lpVtbl->AddRef(self->background);
+	return S_OK;
+}
+
+/* Panel.Background takes a Brush; the composition colour brush is the brush the engine can read a colour from today, so a
+ * brush of that kind fills the panel and any other brush is stored without effect until the media brushes arrive. */
+static HRESULT WINAPI panel_put_background(panel1 *iface, uint64_t value)
+{
+	struct grid *self = ((struct panel_part *)iface)->owner;
+	IInspectable *brush = (IInspectable *)(uintptr_t)value;
+	COLORREF color = 0;
+	BYTE alpha = 0;
+	if (brush) {
+		__x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush *color_brush = NULL;
+		if (SUCCEEDED(brush->lpVtbl->QueryInterface(brush,
+			&IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush, (void **)&color_brush)) && color_brush) {
+			__x_ABI_CWindows_CUI_CColor read;
+			if (color_brush->lpVtbl->get_Color(color_brush, &read) == S_OK) {
+				color = RGB(read.R, read.G, read.B);
+				alpha = read.A;
+			}
+			color_brush->lpVtbl->Release(color_brush);
+		}
+		brush->lpVtbl->AddRef(brush);
+	}
+	if (self->background)
+		self->background->lpVtbl->Release(self->background);
+	self->background = brush;
+	self->color = color;
+	self->alpha = alpha;
+	raven_render_changed();
+	return S_OK;
+}
+
+STUB1(panel1, panel_items_host)
+STUB1(panel1, panel_transitions)
+STUB1_SET(panel1, panel_put_transitions)
+
+static const __x_ABI_CWindows_CUI_CXaml_CControls_CIGridVtbl grid1_table = {
+	.QueryInterface = gridp_query,
+	.AddRef = gridp_addref,
+	.Release = gridp_release,
+	.GetIids = gridp_iids,
+	.GetRuntimeClassName = gridp_name,
+	.GetTrustLevel = gridp_trust,
+	.get_RowDefinitions = grid_row_definitions,
+	.get_ColumnDefinitions = grid_column_definitions,
+};
+
+static const __x_ABI_CWindows_CUI_CXaml_CControls_CIPanelVtbl panel_table = {
+	.QueryInterface = panelp_query,
+	.AddRef = panelp_addref,
+	.Release = panelp_release,
+	.GetIids = panelp_iids,
+	.GetRuntimeClassName = panelp_name,
+	.GetTrustLevel = panelp_trust,
+	.get_Children = panel_children,
+	.get_Background = panel_background,
+	.put_Background = panel_put_background,
+	.get_IsItemsHost = panel_items_host,
+	.get_ChildrenTransitions = panel_transitions,
+	.put_ChildrenTransitions = panel_put_transitions,
+};
+
+static struct grid *create_grid(void)
+{
+	struct grid *grid = ALLOC(sizeof *grid);
+	if (!grid)
+		return NULL;
+	grid->first.lpVtbl = &grid1_table;
+	grid->first.owner = grid;
+	grid->panel.lpVtbl = &panel_table;
+	grid->panel.owner = grid;
+	element_ui_init(&grid->ui, grid, (element_query_function)grid_query_any, (element_reference_function)grid_addref,
+		(element_reference_function)grid_release, grid_class);
+	grid->refs = 1;
+	grid->children = create_children(&IID___FIVector_1_UIElement, vector_class_name, FALSE);
+	grid->rows = create_children(&IID___FIVector_1_RowDefinition, row_vector_class_name, TRUE);
+	grid->columns = create_children(&IID___FIVector_1_ColumnDefinition, column_vector_class_name, TRUE);
+	if (!grid->children || !grid->rows || !grid->columns) {
+		if (grid->children)
+			vector_release(grid->children);
+		if (grid->rows)
+			vector_release(grid->rows);
+		if (grid->columns)
+			vector_release(grid->columns);
+		FREE(grid);
+		return NULL;
+	}
+	InterlockedIncrement(&raven_xaml_objects);
+	return grid;
+}
+
+/* TextBlock */
+
+struct textblock {
+	const __x_ABI_CWindows_CUI_CXaml_CControls_CITextBlockVtbl *lpVtbl;
+	struct element_ui ui;
+	LONG refs;
+	HSTRING name, text;
+	/* FontSize in DIPs (the UWP default is 14) and the Foreground colour, which accepts a composition colour brush the
+	 * way Panel.Background does plus the compiled colour-name path. The XAML default foreground is black — the light
+	 * theme's SystemControlForegroundBaseHighBrush over a light background — and the CPU presentation clears the window
+	 * to black, so a fixture checking pixels sets an explicit Foreground. */
+	float font_size;
+	COLORREF foreground;
+	BYTE foreground_alpha;
+	IInspectable *foreground_brush;
+	/* The Style the element was given (an owned reference), plus the text override the style application last produced:
+	 * the override's boxed value hands out a fresh string per read, and the render pass copies the buffer synchronously,
+	 * so the element keeps the copy alive in the slot until the next read or the style clears. */
+	IInspectable *style;
+	HSTRING styled_text;
+	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
+	 * sit beside them in the same order the store selector uses; a child without a span reads back one track. */
+	UINT32 row, column;
+	UINT32 row_span, column_span;
+};
+
+/* The slot words the generated ABI uses carry a float as its IEEE-754 bit pattern in the low 32 bits; every caller of
+ * put_FontSize packs it the same way. */
+static float float_of_word(uint64_t word)
+{
+	float value = 0;
+	memcpy(&value, &word, sizeof value);
+	return value;
+}
+
+static HRESULT WINAPI textblock_query(textblock1 *iface, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock)) {
+		InterlockedIncrement(&((struct textblock *)iface)->refs);
+		*out = iface;
+		return S_OK;
+	}
+	if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement)) {
+		InterlockedIncrement(&((struct textblock *)iface)->refs);
+		*out = &((struct textblock *)iface)->ui;
+		return S_OK;
+	}
+	return E_NOINTERFACE;
+}
+
+static ULONG WINAPI textblock_addref(textblock1 *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct textblock *)iface)->refs);
+}
+
+static ULONG WINAPI textblock_release(textblock1 *iface)
+{
+	struct textblock *self = (struct textblock *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->name) WindowsDeleteString(self->name);
+		if (self->text) WindowsDeleteString(self->text);
+		if (self->styled_text) WindowsDeleteString(self->styled_text);
+		if (self->foreground_brush)
+			self->foreground_brush->lpVtbl->Release(self->foreground_brush);
+		if (self->style)
+			self->style->lpVtbl->Release(self->style);
+		element_ui_release(&self->ui);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI textblock_iids(textblock1 *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI textblock_name(textblock1 *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(textblock_class, (UINT32)lstrlenW(textblock_class), name);
+}
+
+static HRESULT WINAPI textblock_trust(textblock1 *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI text_font_size(textblock1 *iface, uint64_t out)
+{
+	if (!out)
+		return E_POINTER;
+	*(float *)(uintptr_t)out = ((struct textblock *)iface)->font_size;
+	return S_OK;
+}
+static HRESULT WINAPI text_put_font_size(textblock1 *iface, uint64_t value)
+{
+	struct textblock *self = (struct textblock *)iface;
+	const float size = float_of_word(value);
+	if (size <= 0.0f)
+		return E_INVALIDARG;
+	self->font_size = size;
+	raven_render_changed();
+	return S_OK;
+}
+STUB1(textblock1, text_font_family)
+STUB1_SET(textblock1, text_put_font_family)
+STUB1(textblock1, text_font_weight)
+STUB1_SET(textblock1, text_put_font_weight)
+STUB1(textblock1, text_font_style)
+STUB1_SET(textblock1, text_put_font_style)
+STUB1(textblock1, text_font_stretch)
+STUB1_SET(textblock1, text_put_font_stretch)
+STUB1(textblock1, text_spacing)
+STUB1_SET(textblock1, text_put_spacing)
+static HRESULT WINAPI text_foreground(textblock1 *iface, uint64_t out)
+{
+	struct textblock *self = (struct textblock *)iface;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = self->foreground_brush;
+	if (self->foreground_brush)
+		self->foreground_brush->lpVtbl->AddRef(self->foreground_brush);
+	return S_OK;
+}
+/* Foreground takes a Brush; like Panel.Background the composition colour brush is the brush the engine can read a colour
+ * from today, and any other brush is stored without effect until the media brushes arrive. */
+static HRESULT WINAPI text_put_foreground(textblock1 *iface, uint64_t value)
+{
+	struct textblock *self = (struct textblock *)iface;
+	IInspectable *brush = (IInspectable *)(uintptr_t)value;
+	COLORREF color = 0;
+	BYTE alpha = 0;
+	if (brush) {
+		__x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush *color_brush = NULL;
+		if (SUCCEEDED(brush->lpVtbl->QueryInterface(brush,
+			&IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush, (void **)&color_brush)) && color_brush) {
+			__x_ABI_CWindows_CUI_CColor read;
+			if (color_brush->lpVtbl->get_Color(color_brush, &read) == S_OK) {
+				color = RGB(read.R, read.G, read.B);
+				alpha = read.A;
+			}
+			color_brush->lpVtbl->Release(color_brush);
+		}
+		brush->lpVtbl->AddRef(brush);
+	}
+	if (self->foreground_brush)
+		self->foreground_brush->lpVtbl->Release(self->foreground_brush);
+	self->foreground_brush = brush;
+	self->foreground = color;
+	self->foreground_alpha = alpha;
+	raven_render_changed();
+	return S_OK;
+}
+STUB1(textblock1, text_wrapping)
+STUB1_SET(textblock1, text_put_wrapping)
+STUB1(textblock1, text_trimming)
+STUB1_SET(textblock1, text_put_trimming)
+STUB1(textblock1, text_alignment)
+STUB1_SET(textblock1, text_put_alignment)
+static HRESULT WINAPI textblock_text(textblock1 *iface, uint64_t out)
+{
+	struct textblock *self = (struct textblock *)iface;
+	if (!out)
+		return E_POINTER;
+	*(HSTRING *)(uintptr_t)out = self->text;
+	if (self->text)
+		WindowsDuplicateString(self->text, (HSTRING *)(uintptr_t)out);
+	return S_OK;
+}
+static HRESULT WINAPI textblock_put_text(textblock1 *iface, uint64_t value)
+{
+	struct textblock *self = (struct textblock *)iface;
+	HSTRING string = (HSTRING)(uintptr_t)value;
+	UINT32 length = 0;
+	const WCHAR *text = string ? WindowsGetStringRawBuffer(string, &length) : NULL;
+	store_name(&self->text, text, length);
+	raven_render_changed();
+	return S_OK;
+}
+STUB1(textblock1, text_inlines)
+STUB1(textblock1, text_padding)
+STUB1_SET(textblock1, text_put_padding)
+STUB1(textblock1, text_line_height)
+STUB1_SET(textblock1, text_put_line_height)
+STUB1(textblock1, text_stacking)
+STUB1_SET(textblock1, text_put_stacking)
+STUB1(textblock1, text_selection_enabled)
+STUB1_SET(textblock1, text_put_selection_enabled)
+STUB1(textblock1, text_selected)
+STUB1(textblock1, text_content_start)
+STUB1(textblock1, text_content_end)
+STUB1(textblock1, text_selection_start)
+STUB1(textblock1, text_selection_end)
+STUB1(textblock1, text_baseline)
+STUB2(textblock1, text_add_selection)
+STUB1(textblock1, text_remove_selection)
+STUB2(textblock1, text_add_context)
+STUB1(textblock1, text_remove_context)
+static HRESULT WINAPI textblock_select_all(textblock1 *iface)
+{
+	(void)iface;
+	return E_NOTIMPL;
+}
+STUB2(textblock1, text_select)
+STUB2(textblock1, text_focus)
+
+static const __x_ABI_CWindows_CUI_CXaml_CControls_CITextBlockVtbl textblock_table = {
+	.QueryInterface = textblock_query,
+	.AddRef = textblock_addref,
+	.Release = textblock_release,
+	.GetIids = textblock_iids,
+	.GetRuntimeClassName = textblock_name,
+	.GetTrustLevel = textblock_trust,
+	.get_FontSize = text_font_size,
+	.put_FontSize = text_put_font_size,
+	.get_FontFamily = text_font_family,
+	.put_FontFamily = text_put_font_family,
+	.get_FontWeight = text_font_weight,
+	.put_FontWeight = text_put_font_weight,
+	.get_FontStyle = text_font_style,
+	.put_FontStyle = text_put_font_style,
+	.get_FontStretch = text_font_stretch,
+	.put_FontStretch = text_put_font_stretch,
+	.get_CharacterSpacing = text_spacing,
+	.put_CharacterSpacing = text_put_spacing,
+	.get_Foreground = text_foreground,
+	.put_Foreground = text_put_foreground,
+	.get_TextWrapping = text_wrapping,
+	.put_TextWrapping = text_put_wrapping,
+	.get_TextTrimming = text_trimming,
+	.put_TextTrimming = text_put_trimming,
+	.get_TextAlignment = text_alignment,
+	.put_TextAlignment = text_put_alignment,
+	.get_Text = textblock_text,
+	.put_Text = textblock_put_text,
+	.get_Inlines = text_inlines,
+	.get_Padding = text_padding,
+	.put_Padding = text_put_padding,
+	.get_LineHeight = text_line_height,
+	.put_LineHeight = text_put_line_height,
+	.get_LineStackingStrategy = text_stacking,
+	.put_LineStackingStrategy = text_put_stacking,
+	.get_IsTextSelectionEnabled = text_selection_enabled,
+	.put_IsTextSelectionEnabled = text_put_selection_enabled,
+	.get_SelectedText = text_selected,
+	.get_ContentStart = text_content_start,
+	.get_ContentEnd = text_content_end,
+	.get_SelectionStart = text_selection_start,
+	.get_SelectionEnd = text_selection_end,
+	.get_BaselineOffset = text_baseline,
+	.add_SelectionChanged = text_add_selection,
+	.remove_SelectionChanged = text_remove_selection,
+	.add_ContextMenuOpening = text_add_context,
+	.remove_ContextMenuOpening = text_remove_context,
+	.SelectAll = textblock_select_all,
+	.Select = text_select,
+	.Focus = text_focus,
+};
+
+static struct textblock *create_textblock(void)
+{
+	struct textblock *textblock = ALLOC(sizeof *textblock);
+	if (!textblock)
+		return NULL;
+	textblock->lpVtbl = &textblock_table;
+	element_ui_init(&textblock->ui, textblock, (element_query_function)textblock_query,
+		(element_reference_function)textblock_addref, (element_reference_function)textblock_release, textblock_class);
+	textblock->refs = 1;
+	/* The UWP defaults: FontSize 14 and the light theme's black foreground. */
+	textblock->font_size = 14.0f;
+	textblock->foreground = RGB(0, 0, 0);
+	textblock->foreground_alpha = 255;
+	InterlockedIncrement(&raven_xaml_objects);
+	return textblock;
+}
+
+/* Button */
+
+struct button;
+
+struct button1_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIButtonVtbl *lpVtbl; struct button *owner; };
+struct buttonbase_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBaseVtbl *lpVtbl; struct button *owner; };
+struct content_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControlVtbl *lpVtbl; struct button *owner; };
+
+struct button {
+	struct button1_part first;
+	struct buttonbase_part base;
+	struct content_part content;
+	struct element_ui ui;
+	LONG refs;
+	HSTRING name;
+	IInspectable *content_value;
+	IInspectable *command, *command_parameter;
+	struct raven_event_list click;
+	UINT32 click_mode; /* enum raven_xaml_click_mode; the zero initialization is ClickMode.Release, the platform default */
+	boolean is_pressed, is_pointer_over;
+	/* The size the layout pass gave the button: its Width and Height, or the cell it lays out into. The routing records the
+	 * rectangle this produces and the release-within-bounds check reads it back. */
+	float width, height;
+	/* The Style the element was given (an owned reference); the control chrome the setters would restyle does not render
+	 * yet, so the reference is stored until that stage wires the readback. */
+	IInspectable *style;
+	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
+	 * sit beside them in the same order the store selector uses; a child without a span reads back one track. */
+	UINT32 row, column;
+	UINT32 row_span, column_span;
+};
+
+static HRESULT button_query_any(struct button *self, REFIID iid, void **out);
+static ULONG button_addref(struct button *self);
+static ULONG button_release(struct button *self);
+
+#define BUTTON_PART(part, iface, prefix) \
+	static HRESULT WINAPI prefix##_query(iface *This, REFIID iid, void **out) \
+	{ return button_query_any(((struct part *)This)->owner, iid, out); } \
+	static ULONG WINAPI prefix##_addref(iface *This) { return button_addref(((struct part *)This)->owner); } \
+	static ULONG WINAPI prefix##_release(iface *This) { return button_release(((struct part *)This)->owner); } \
+	static HRESULT WINAPI prefix##_iids(iface *This, ULONG *count, IID **iids) \
+	{ (void)This; return inspectable_iids(count, iids); } \
+	static HRESULT WINAPI prefix##_name(iface *This, HSTRING *name) \
+	{ (void)This; if (!name) return E_POINTER; return WindowsCreateString(button_class, (UINT32)lstrlenW(button_class), name); } \
+	static HRESULT WINAPI prefix##_trust(iface *This, TrustLevel *level) \
+	{ (void)This; return inspectable_trust(level); }
+
+BUTTON_PART(button1_part, button1, buttonp)
+BUTTON_PART(buttonbase_part, __x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase, basep)
+BUTTON_PART(content_part, content_control, contentp)
+
+static HRESULT button_query_any(struct button *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton))
+		*out = &self->first;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase))
+		*out = &self->base;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement))
+		*out = &self->ui;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl))
+		*out = &self->content;
+	else
+		return E_NOINTERFACE;
+	button_addref(self);
+	return S_OK;
+}
+
+static ULONG button_addref(struct button *self)
+{
+	return (ULONG)InterlockedIncrement(&self->refs);
+}
+
+static ULONG button_release(struct button *self)
+{
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->name)
+			WindowsDeleteString(self->name);
+		if (self->content_value)
+			IInspectable_Release(self->content_value);
+		if (self->command)
+			IInspectable_Release(self->command);
+		if (self->command_parameter)
+			IInspectable_Release(self->command_parameter);
+		if (self->style)
+			IInspectable_Release(self->style);
+		raven_event_close(&self->click);
+		DeleteCriticalSection(&self->click.lock);
+		element_ui_release(&self->ui);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+/* IButton declares no members of its own. */
+
+/* The RoutedEventArgs snapshot a Click raise carries: an IInspectable with the runtime class name, since the event carries no
+ * data until the routed-event stage of the engine. */
+struct routed_arguments {
+	const IInspectableVtbl *lpVtbl;
+	LONG refs;
+};
+
+static HRESULT WINAPI routed_query(IInspectable *iface, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&((struct routed_arguments *)iface)->refs);
+	*out = iface;
+	return S_OK;
+}
+static ULONG WINAPI routed_addref(IInspectable *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct routed_arguments *)iface)->refs);
+}
+static ULONG WINAPI routed_release(IInspectable *iface)
+{
+	struct routed_arguments *self = (struct routed_arguments *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+static HRESULT WINAPI routed_iids(IInspectable *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+static HRESULT WINAPI routed_name(IInspectable *iface, HSTRING *name)
+{
+	static const WCHAR routed_class[] = L"Windows.UI.Xaml.RoutedEventArgs";
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(routed_class, (UINT32)lstrlenW(routed_class), name);
+}
+static HRESULT WINAPI routed_trust(IInspectable *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+static const IInspectableVtbl routed_table = {
+	routed_query, routed_addref, routed_release, routed_iids, routed_name, routed_trust
+};
+
+static IInspectable *create_routed_arguments(void)
+{
+	struct routed_arguments *args = ALLOC(sizeof *args);
+	if (!args)
+		return NULL;
+	args->lpVtbl = &routed_table;
+	args->refs = 1;
+	InterlockedIncrement(&raven_xaml_objects);
+	return (IInspectable *)args;
+}
+
+static void button_raise_click(struct button *self)
+{
+	IUnknown **handlers = NULL;
+	ULONG count = 0;
+	if (FAILED(raven_event_snapshot(&self->click, &handlers, &count)))
+		return;
+	if (count) {
+		IInspectable *args = create_routed_arguments();
+		if (args) {
+			for (ULONG index = 0; index < count; ++index) {
+				__FITypedEventHandler_2_Windows__CObject_Windows__CUI__CXaml__CRoutedEventArgs *handler =
+					(void *)handlers[index];
+				handler->lpVtbl->Invoke(handler, (IInspectable *)&self->first, (__x_ABI_CWindows_CUI_CXaml_CRoutedEventArgs *)args);
+				IUnknown_Release(handlers[index]);
+			}
+			args->lpVtbl->Release(args);
+		} else {
+			for (ULONG index = 0; index < count; ++index)
+				IUnknown_Release(handlers[index]);
+		}
+	}
+	FREE(handlers);
+}
+
+/* The internal pointer behavior of the button, run before the application's handlers: IsPressed follows the press, and Click
+ * follows the click mode — ClickMode.Release raises on a release within the button's bounds (the press reached the button
+ * because it was the hit target, so only the release position needs the bounds check), ClickMode.Press on the press,
+ * ClickMode.Hover on the entry. */
+static void button_pointer_behavior(void *owner, IInspectable *element, enum raven_element_pointer kind,
+	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args)
+{
+	struct button *self = owner;
+	switch (kind) {
+	case RAVEN_ELEMENT_POINTER_ENTERED:
+		self->is_pointer_over = TRUE;
+		if (self->click_mode == raven_xaml_click_hover)
+			button_raise_click(self);
+		break;
+	case RAVEN_ELEMENT_POINTER_EXITED:
+		self->is_pointer_over = FALSE;
+		break;
+	case RAVEN_ELEMENT_POINTER_PRESSED:
+		self->is_pressed = TRUE;
+		if (self->click_mode == raven_xaml_click_press)
+			button_raise_click(self);
+		break;
+	case RAVEN_ELEMENT_POINTER_RELEASED: {
+		const boolean was_pressed = self->is_pressed;
+		self->is_pressed = FALSE;
+		if (self->click_mode == raven_xaml_click_release && was_pressed) {
+			__x_ABI_CWindows_CUI_CInput_CIPointerPoint *point = NULL;
+			__x_ABI_CWindows_CFoundation_CPoint position = {0, 0};
+			if (__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs_get_CurrentPoint(args, &point) == S_OK && point) {
+				__x_ABI_CWindows_CUI_CInput_CIPointerPoint_get_Position(point, &position);
+				point->lpVtbl->Release(point);
+			}
+			if (raven_input_element_contains(element, &position))
+				button_raise_click(self);
+		}
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+static HRESULT WINAPI base_get_click_mode(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t out)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	if (!out)
+		return E_POINTER;
+	*(enum raven_xaml_click_mode *)(uintptr_t)out = (enum raven_xaml_click_mode)self->click_mode;
+	return S_OK;
+}
+static HRESULT WINAPI base_put_click_mode(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t value)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	if (value > raven_xaml_click_hover)
+		return E_INVALIDARG;
+	self->click_mode = (UINT32)value;
+	return S_OK;
+}
+static HRESULT WINAPI base_get_is_pointer_over(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t out)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	if (!out)
+		return E_POINTER;
+	*(boolean *)(uintptr_t)out = self->is_pointer_over;
+	return S_OK;
+}
+static HRESULT WINAPI base_get_is_pressed(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t out)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	if (!out)
+		return E_POINTER;
+	*(boolean *)(uintptr_t)out = self->is_pressed;
+	return S_OK;
+}
+static HRESULT WINAPI base_get_command(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t out)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = self->command;
+	if (self->command)
+		IInspectable_AddRef(self->command);
+	return S_OK;
+}
+static HRESULT WINAPI base_put_command(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t value)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	IInspectable *command = (IInspectable *)(uintptr_t)value;
+	if (command)
+		IInspectable_AddRef(command);
+	if (self->command)
+		IInspectable_Release(self->command);
+	self->command = command;
+	return S_OK;
+}
+static HRESULT WINAPI base_get_command_parameter(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t out)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = self->command_parameter;
+	if (self->command_parameter)
+		IInspectable_AddRef(self->command_parameter);
+	return S_OK;
+}
+static HRESULT WINAPI base_put_command_parameter(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t value)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	IInspectable *parameter = (IInspectable *)(uintptr_t)value;
+	if (parameter)
+		IInspectable_AddRef(parameter);
+	if (self->command_parameter)
+		IInspectable_Release(self->command_parameter);
+	self->command_parameter = parameter;
+	return S_OK;
+}
+static HRESULT WINAPI base_add_click(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t handler, uint64_t token)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	return raven_event_add(&self->click, (IUnknown *)(uintptr_t)handler, (EventRegistrationToken *)(uintptr_t)token);
+}
+static HRESULT WINAPI base_remove_click(__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *This, uint64_t token)
+{
+	struct button *self = ((struct buttonbase_part *)This)->owner;
+	EventRegistrationToken value;
+	value.value = (INT64)token;
+	return raven_event_remove(&self->click, value);
+}
+
+static HRESULT WINAPI button_content(content_control *iface, uint64_t out)
+{
+	struct button *self = ((struct content_part *)iface)->owner;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = self->content_value;
+	if (self->content_value)
+		IInspectable_AddRef(self->content_value);
+	return S_OK;
+}
+
+static HRESULT WINAPI button_put_content(content_control *iface, uint64_t value)
+{
+	struct button *self = ((struct content_part *)iface)->owner;
+	IInspectable *object = (IInspectable *)(uintptr_t)value;
+	if (object)
+		IInspectable_AddRef(object);
+	if (self->content_value)
+		IInspectable_Release(self->content_value);
+	self->content_value = object;
+	return S_OK;
+}
+
+STUB1(content_control, content_template)
+STUB1(content_control, content_put_template)
+STUB1(content_control, content_selector)
+STUB1(content_control, content_put_selector)
+STUB1(content_control, content_transitions)
+STUB1(content_control, content_put_transitions)
+
+static const __x_ABI_CWindows_CUI_CXaml_CControls_CIButtonVtbl button1_table = {
+	.QueryInterface = buttonp_query,
+	.AddRef = buttonp_addref,
+	.Release = buttonp_release,
+	.GetIids = buttonp_iids,
+	.GetRuntimeClassName = buttonp_name,
+	.GetTrustLevel = buttonp_trust,
+};
+
+/* IButtonBase, generated from the Primitives namespace of the same winmd: the click mode, the press and hover state, the
+ * command plumbing and the Click handlers. */
+static const __x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBaseVtbl buttonbase_table = {
+	.QueryInterface = basep_query,
+	.AddRef = basep_addref,
+	.Release = basep_release,
+	.GetIids = basep_iids,
+	.GetRuntimeClassName = basep_name,
+	.GetTrustLevel = basep_trust,
+	.get_ClickMode = base_get_click_mode,
+	.put_ClickMode = base_put_click_mode,
+	.get_IsPointerOver = base_get_is_pointer_over,
+	.get_IsPressed = base_get_is_pressed,
+	.get_Command = base_get_command,
+	.put_Command = base_put_command,
+	.get_CommandParameter = base_get_command_parameter,
+	.put_CommandParameter = base_put_command_parameter,
+	.add_Click = base_add_click,
+	.remove_Click = base_remove_click,
+};
+
+static const __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControlVtbl button_content_table = {
+	.QueryInterface = contentp_query,
+	.AddRef = contentp_addref,
+	.Release = contentp_release,
+	.GetIids = contentp_iids,
+	.GetRuntimeClassName = contentp_name,
+	.GetTrustLevel = contentp_trust,
+	.get_Content = button_content,
+	.put_Content = button_put_content,
+	.get_ContentTemplate = content_template,
+	.put_ContentTemplate = content_put_template,
+	.get_ContentTemplateSelector = content_selector,
+	.put_ContentTemplateSelector = content_put_selector,
+	.get_ContentTransitions = content_transitions,
+	.put_ContentTransitions = content_put_transitions,
+};
+
+static struct button *create_button(void)
+{
+	struct button *button = ALLOC(sizeof *button);
+	if (!button)
+		return NULL;
+	button->first.lpVtbl = &button1_table;
+	button->first.owner = button;
+	button->base.lpVtbl = &buttonbase_table;
+	button->base.owner = button;
+	button->content.lpVtbl = &button_content_table;
+	button->content.owner = button;
+	element_ui_init(&button->ui, button, (element_query_function)button_query_any, (element_reference_function)button_addref,
+		(element_reference_function)button_release, button_class);
+	button->ui.behavior = button_pointer_behavior;
+	InitializeCriticalSection(&button->click.lock);
+	button->refs = 1;
+	InterlockedIncrement(&raven_xaml_objects);
+	return button;
+}
+
+/* RowDefinition and ColumnDefinition: the tracks a grid lays its children into. The engine supports the fixed pixel lengths
+ * only; an Auto or Star length is stored and reported with its unit and lays out as zero until the measure stage distributes
+ * the free space. The Height and Width slots are the hand declarations in windows_ui_xaml_layout.h, since a GridLength crosses
+ * the ABI as a 16-byte struct the compiler passes per architecture. */
+
+struct row_definition {
+	const __x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinitionVtbl *lpVtbl;
+	LONG refs;
+	double height;
+	UINT32 unit;
+};
+
+struct column_definition {
+	const __x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinitionVtbl *lpVtbl;
+	LONG refs;
+	double width;
+	UINT32 unit;
+};
+
+static HRESULT WINAPI row_definition_query(row_definition1 *iface, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&((struct row_definition *)iface)->refs);
+	*out = iface;
+	return S_OK;
+}
+
+static ULONG WINAPI row_definition_addref(row_definition1 *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct row_definition *)iface)->refs);
+}
+
+static ULONG WINAPI row_definition_release(row_definition1 *iface)
+{
+	struct row_definition *self = (struct row_definition *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI row_definition_iids(row_definition1 *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI row_definition_name(row_definition1 *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(row_definition_class, (UINT32)lstrlenW(row_definition_class), name);
+}
+
+static HRESULT WINAPI row_definition_trust(row_definition1 *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI row_height(row_definition1 *iface, __x_ABI_CWindows_CUI_CXaml_CGridLength *value)
+{
+	struct row_definition *self = (struct row_definition *)iface;
+	if (!value)
+		return E_POINTER;
+	value->Value = self->height;
+	value->GridUnitType = (__x_ABI_CWindows_CUI_CXaml_CGridUnitType)self->unit;
+	return S_OK;
+}
+
+static HRESULT WINAPI row_put_height(row_definition1 *iface, __x_ABI_CWindows_CUI_CXaml_CGridLength value)
+{
+	struct row_definition *self = (struct row_definition *)iface;
+	self->height = value.Value;
+	self->unit = (UINT32)value.GridUnitType;
+	raven_render_changed();
+	return S_OK;
+}
+
+STUB1(row_definition1, row_max_height)
+STUB1_SET(row_definition1, row_put_max_height)
+STUB1(row_definition1, row_min_height)
+STUB1_SET(row_definition1, row_put_min_height)
+STUB1(row_definition1, row_actual_height)
+
+static const __x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinitionVtbl row_definition_table = {
+	.QueryInterface = row_definition_query,
+	.AddRef = row_definition_addref,
+	.Release = row_definition_release,
+	.GetIids = row_definition_iids,
+	.GetRuntimeClassName = row_definition_name,
+	.GetTrustLevel = row_definition_trust,
+	.get_Height = row_height,
+	.put_Height = row_put_height,
+	.get_MaxHeight = row_max_height,
+	.put_MaxHeight = row_put_max_height,
+	.get_MinHeight = row_min_height,
+	.put_MinHeight = row_put_min_height,
+	.get_ActualHeight = row_actual_height,
+};
+
+static HRESULT WINAPI column_definition_query(column_definition1 *iface, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&((struct column_definition *)iface)->refs);
+	*out = iface;
+	return S_OK;
+}
+
+static ULONG WINAPI column_definition_addref(column_definition1 *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct column_definition *)iface)->refs);
+}
+
+static ULONG WINAPI column_definition_release(column_definition1 *iface)
+{
+	struct column_definition *self = (struct column_definition *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI column_definition_iids(column_definition1 *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI column_definition_name(column_definition1 *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(column_definition_class, (UINT32)lstrlenW(column_definition_class), name);
+}
+
+static HRESULT WINAPI column_definition_trust(column_definition1 *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI column_width(column_definition1 *iface, __x_ABI_CWindows_CUI_CXaml_CGridLength *value)
+{
+	struct column_definition *self = (struct column_definition *)iface;
+	if (!value)
+		return E_POINTER;
+	value->Value = self->width;
+	value->GridUnitType = (__x_ABI_CWindows_CUI_CXaml_CGridUnitType)self->unit;
+	return S_OK;
+}
+
+static HRESULT WINAPI column_put_width(column_definition1 *iface, __x_ABI_CWindows_CUI_CXaml_CGridLength value)
+{
+	struct column_definition *self = (struct column_definition *)iface;
+	self->width = value.Value;
+	self->unit = (UINT32)value.GridUnitType;
+	raven_render_changed();
+	return S_OK;
+}
+
+STUB1(column_definition1, column_max_width)
+STUB1_SET(column_definition1, column_put_max_width)
+STUB1(column_definition1, column_min_width)
+STUB1_SET(column_definition1, column_put_min_width)
+STUB1(column_definition1, column_actual_width)
+
+static const __x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinitionVtbl column_definition_table = {
+	.QueryInterface = column_definition_query,
+	.AddRef = column_definition_addref,
+	.Release = column_definition_release,
+	.GetIids = column_definition_iids,
+	.GetRuntimeClassName = column_definition_name,
+	.GetTrustLevel = column_definition_trust,
+	.get_Width = column_width,
+	.put_Width = column_put_width,
+	.get_MaxWidth = column_max_width,
+	.put_MaxWidth = column_put_max_width,
+	.get_MinWidth = column_min_width,
+	.put_MinWidth = column_put_min_width,
+	.get_ActualWidth = column_actual_width,
+};
+
+static struct row_definition *create_row_definition(void)
+{
+	struct row_definition *definition = ALLOC(sizeof *definition);
+	if (!definition)
+		return NULL;
+	definition->lpVtbl = &row_definition_table;
+	definition->refs = 1;
+	InterlockedIncrement(&raven_xaml_objects);
+	return definition;
+}
+
+static struct column_definition *create_column_definition(void)
+{
+	struct column_definition *definition = ALLOC(sizeof *definition);
+	if (!definition)
+		return NULL;
+	definition->lpVtbl = &column_definition_table;
+	definition->refs = 1;
+	InterlockedIncrement(&raven_xaml_objects);
+	return definition;
+}
+
+/* Loader application: names, text and object properties on the three classes. */
+
+static int elements_name(IInspectable *object, const WCHAR *text, UINT32 length)
+{
+	grid1 *grid = NULL;
+	textblock1 *textblock = NULL;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl == &grid1_table)
+			store_name(&((struct grid1_part *)grid)->owner->name, text, length);
+		grid->lpVtbl->Release(grid);
+		return 1;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock, (void **)&textblock)) && textblock) {
+		if (textblock->lpVtbl == &textblock_table)
+			store_name(&((struct textblock *)textblock)->name, text, length);
+		textblock->lpVtbl->Release(textblock);
+		return 1;
+	}
+	return 0;
+}
+
+HRESULT raven_xaml_elements_set_name(IInspectable *object, const WCHAR *text, UINT32 length)
+{
+	if (!object)
+		return E_POINTER;
+	return elements_name(object, text, length) ? S_OK : S_FALSE;
+}
+
+/* The colour names the compiled-markup path accepts for Background until the media brushes and resource dictionaries arrive.
+ * The spellings follow the XAML Colors class. */
+static int named_color(const WCHAR *text, UINT32 length, COLORREF *color, BYTE *alpha)
+{
+	static const struct { const WCHAR *name; COLORREF color; } table[] = {
+		{L"Black", RGB(0, 0, 0)}, {L"Gray", RGB(128, 128, 128)}, {L"White", RGB(255, 255, 255)},
+		{L"Red", RGB(255, 0, 0)}, {L"Green", RGB(0, 128, 0)}, {L"Lime", RGB(0, 255, 0)},
+		{L"Blue", RGB(0, 0, 255)}, {L"Yellow", RGB(255, 255, 0)}, {L"Cyan", RGB(0, 255, 255)},
+		{L"Magenta", RGB(255, 0, 255)}, {L"Brown", RGB(165, 42, 42)}, {L"Orange", RGB(255, 165, 0)},
+	};
+	if (!text)
+		return 0;
+	for (size_t index = 0; index < ARRAYSIZE(table); ++index)
+		if (same_text(text, length, table[index].name)) {
+			*color = table[index].color;
+			*alpha = 255;
+			return 1;
+		}
+	if (same_text(text, length, L"Transparent")) {
+		*color = 0;
+		*alpha = 0;
+		return 1;
+	}
+	return 0;
+}
+
+static void grid_store_color(struct grid *self, COLORREF color, BYTE alpha)
+{
+	self->color = color;
+	self->alpha = alpha;
+	if (self->background) {
+		self->background->lpVtbl->Release(self->background);
+		self->background = NULL;
+	}
+	raven_render_changed();
+}
+
+/* The compiled colour-name path of the TextBlock foreground: the named colour replaces the brush reference, the way the
+ * grid's Background constant does. */
+static void textblock_store_color(struct textblock *self, COLORREF color, BYTE alpha)
+{
+	self->foreground = color;
+	self->foreground_alpha = alpha;
+	if (self->foreground_brush) {
+		self->foreground_brush->lpVtbl->Release(self->foreground_brush);
+		self->foreground_brush = NULL;
+	}
+	raven_render_changed();
+}
+
+/* The attached Grid.Row, Grid.Column, Grid.RowSpan and Grid.ColumnSpan of an element: stored on the element classes the engine
+ * implements, read back by the layout pass, which lays out an element kind that does not store them at cell (0, 0) with a
+ * one-track span. The store keeps the value as given; a stored span below one reads back as one track. */
+enum grid_slot { grid_slot_row, grid_slot_column, grid_slot_row_span, grid_slot_column_span };
+
+static HRESULT store_slot(IInspectable *object, enum grid_slot slot, UINT32 value)
+{
+	grid1 *grid = NULL;
+	textblock1 *textblock = NULL;
+	button1 *button = NULL;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl == &grid1_table) {
+			struct grid *self = ((struct grid1_part *)grid)->owner;
+			/* The four attached fields sit together in the class layout, in selector order. */
+			UINT32 *fields[] = {&self->row, &self->column, &self->row_span, &self->column_span};
+			*fields[slot] = value;
+		}
+		grid->lpVtbl->Release(grid);
+		raven_render_changed();
+		return S_OK;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock, (void **)&textblock)) && textblock) {
+		if (textblock->lpVtbl == &textblock_table) {
+			struct textblock *self = (struct textblock *)textblock;
+			/* The four attached fields sit together in the class layout, in selector order. */
+			UINT32 *fields[] = {&self->row, &self->column, &self->row_span, &self->column_span};
+			*fields[slot] = value;
+		}
+		textblock->lpVtbl->Release(textblock);
+		raven_render_changed();
+		return S_OK;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
+		if (button->lpVtbl == &button1_table) {
+			struct button *self = ((struct button1_part *)button)->owner;
+			/* The four attached fields sit together in the class layout, in selector order. */
+			UINT32 *fields[] = {&self->row, &self->column, &self->row_span, &self->column_span};
+			*fields[slot] = value;
+		}
+		button->lpVtbl->Release(button);
+		raven_render_changed();
+		return S_OK;
+	}
+	return S_FALSE;
+}
+
+/* The integer constants a forwarded Grid.Row, Grid.Column, Grid.RowSpan and Grid.ColumnSpan reach: the loader's integer
+ * dispatch lives in xaml_controls.c, which forwards the names it does not take itself to the element layer, so the
+ * compiled-markup constants arrive here (the fixture's constants arrive as float nodes through
+ * raven_xaml_elements_set_float below). */
+HRESULT raven_xaml_elements_set_integer(IInspectable *object, const WCHAR *name, UINT32 length, int64_t value)
+{
+	if (!object)
+		return E_POINTER;
+	if (same_text(name, length, L"Row"))
+		return value < 0 || value > 0xffff ? E_INVALIDARG : store_slot(object, grid_slot_row, (UINT32)value);
+	if (same_text(name, length, L"Column"))
+		return value < 0 || value > 0xffff ? E_INVALIDARG : store_slot(object, grid_slot_column, (UINT32)value);
+	if (same_text(name, length, L"RowSpan"))
+		return value < 0 || value > 0xffff ? E_INVALIDARG : store_slot(object, grid_slot_row_span, (UINT32)value);
+	if (same_text(name, length, L"ColumnSpan"))
+		return value < 0 || value > 0xffff ? E_INVALIDARG : store_slot(object, grid_slot_column_span, (UINT32)value);
+	return S_FALSE;
+}
+
+HRESULT raven_xaml_elements_set_float(IInspectable *object, const WCHAR *name, UINT32 length, float value)
+{
+	grid1 *grid = NULL;
+	if (!object)
+		return E_POINTER;
+	if (same_text(name, length, L"Row") || same_text(name, length, L"Column") ||
+		same_text(name, length, L"RowSpan") || same_text(name, length, L"ColumnSpan")) {
+		if (value < 0.0f || value > 65535.0f)
+			return E_INVALIDARG;
+		return store_slot(object,
+			same_text(name, length, L"Row") ? grid_slot_row :
+			same_text(name, length, L"Column") ? grid_slot_column :
+			same_text(name, length, L"RowSpan") ? grid_slot_row_span : grid_slot_column_span,
+			(UINT32)value);
+	}
+	if (same_text(name, length, L"FontSize")) {
+		/* The text size in DIPs; the real property rejects non-positive sizes and so does this. */
+		textblock1 *textblock = NULL;
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+			(void **)&textblock)) || !textblock)
+			return S_FALSE;
+		if (textblock->lpVtbl == &textblock_table) {
+			struct textblock *self = (struct textblock *)textblock;
+			if (value <= 0.0f) {
+				textblock->lpVtbl->Release(textblock);
+				return E_INVALIDARG;
+			}
+			self->font_size = value;
+			raven_render_changed();
+		}
+		textblock->lpVtbl->Release(textblock);
+		return S_OK;
+	}
+	if (!same_text(name, length, L"Width") && !same_text(name, length, L"Height"))
+		return S_FALSE;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl == &grid1_table) {
+			struct grid *self = ((struct grid1_part *)grid)->owner;
+			if (same_text(name, length, L"Width"))
+				self->width = value;
+			else
+				self->height = value;
+			raven_render_changed();
+		}
+		grid->lpVtbl->Release(grid);
+		return S_OK;
+	}
+	/* The button carries its own size too: the fixture positions it with Width and Height, and the render pass reads both back
+	 * for the rectangle the hit test works from. */
+	button1 *button = NULL;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
+		if (button->lpVtbl == &button1_table) {
+			struct button *self = ((struct button1_part *)button)->owner;
+			if (same_text(name, length, L"Width"))
+				self->width = value;
+			else
+				self->height = value;
+			raven_render_changed();
+		}
+		button->lpVtbl->Release(button);
+		return S_OK;
+	}
+	return S_FALSE;
+}
+
+HRESULT raven_xaml_elements_set_text(IInspectable *object, const WCHAR *name, UINT32 length, const WCHAR *text, UINT32 text_length)
+{
+	grid1 *grid = NULL;
+	textblock1 *textblock = NULL;
+	HRESULT result;
+	if (!object)
+		return E_POINTER;
+	if (same_text(name, length, L"Background")) {
+		COLORREF color = 0;
+		BYTE alpha = 0;
+		const int named = named_color(text, text_length, &color, &alpha);
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) || !grid)
+			return S_FALSE;
+		if (grid->lpVtbl == &grid1_table && named)
+			grid_store_color(((struct grid1_part *)grid)->owner, color, alpha);
+		grid->lpVtbl->Release(grid);
+		return S_OK;
+	}
+	if (same_text(name, length, L"Foreground")) {
+		COLORREF color = 0;
+		BYTE alpha = 0;
+		textblock1 *textblock = NULL;
+		const int named = named_color(text, text_length, &color, &alpha);
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+			(void **)&textblock)) || !textblock)
+			return S_FALSE;
+		if (textblock->lpVtbl == &textblock_table && named)
+			textblock_store_color((struct textblock *)textblock, color, alpha);
+		textblock->lpVtbl->Release(textblock);
+		return S_OK;
+	}
+	if (!same_text(name, length, L"Text"))
+		return S_FALSE;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock, (void **)&textblock)) || !textblock)
+		return S_FALSE;
+	HSTRING value = NULL;
+	result = WindowsCreateString(text, text_length, &value);
+	if (SUCCEEDED(result)) {
+		result = textblock->lpVtbl->put_Text(textblock, (uint64_t)(uintptr_t)value);
+		WindowsDeleteString(value);
+	}
+	textblock->lpVtbl->Release(textblock);
+	return result;
+}
+
+HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value)
+{
+	panel1 *panel = NULL;
+	content_control *content = NULL;
+	HRESULT result;
+	if (!object)
+		return E_POINTER;
+	if (same_text(name, length, L"Children")) {
+		void *children = NULL;
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel, (void **)&panel)) || !panel)
+			return S_FALSE;
+		result = panel->lpVtbl->get_Children(panel, (uint64_t)(uintptr_t)&children);
+		panel->lpVtbl->Release(panel);
+		if (FAILED(result) || !children)
+			return FAILED(result) ? result : S_FALSE;
+		/* The vector is whatever IVector<UIElement> the panel handed out; the vtable layout is the parameterized ABI, so
+		 * Append reaches the panel's own collection. */
+		result = ((struct children_vector *)children)->lpVtbl->Append((struct children_vector *)children, (ui_element *)value);
+		((IInspectable *)children)->lpVtbl->Release((IInspectable *)children);
+		if (SUCCEEDED(result))
+			raven_render_changed();
+		return result;
+	}
+	if (same_text(name, length, L"RowDefinitions") || same_text(name, length, L"ColumnDefinitions")) {
+		grid1 *grid = NULL;
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) || !grid)
+			return S_FALSE;
+		if (grid->lpVtbl != &grid1_table) {
+			grid->lpVtbl->Release(grid);
+			return S_FALSE;
+		}
+		struct grid *self = ((struct grid1_part *)grid)->owner;
+		struct children_vector *vector = same_text(name, length, L"RowDefinitions") ? self->rows : self->columns;
+		grid->lpVtbl->Release(grid);
+		result = vector->lpVtbl->Append(vector, (ui_element *)value);
+		if (SUCCEEDED(result))
+			raven_render_changed();
+		return result;
+	}
+	if (same_text(name, length, L"Content")) {
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl, (void **)&content)) || !content)
+			return S_FALSE;
+		result = content->lpVtbl->put_Content(content, (uint64_t)(uintptr_t)value);
+		content->lpVtbl->Release(content);
+		return result;
+	}
+	return S_FALSE;
+}
+
+/* The per-element Style property and the style application of the render readback.
+ *
+ * The element keeps its own owned reference (put_style clears it with NULL), and the application happens where the element's
+ * render state is read — raven_xaml_element_render_info and raven_xaml_element_render_text below — so a setter OVERRIDES the
+ * value the pass reads instead of mutating the own state: clearing the style restores the own state exactly. For each setter
+ * pair the property name selects the field and the value kind selects the application, the same paths the loader uses: a
+ * boxed string goes through the set_text spelling (the named colours, the text), a boxed number through the set_float path
+ * (the font size, the extent), and a composition colour brush straight into the state the brush slot stores. Setter values
+ * of any other kind — the set_object path — have no readback surface yet and are skipped; the dependency-property stage
+ * wires the rest. The last matching setter wins, the way the real application order works. */
+
+/* A boxed string value: IReference`1<HSTRING>, what a WinRT caller passes for a string setter value. */
+static int style_boxed_text(IInspectable *value, HSTRING *out)
+{
+	__FIReference_1_HSTRING *box = NULL;
+	HSTRING string = NULL;
+	if (FAILED(value->lpVtbl->QueryInterface(value, &IID___FIReference_1_HSTRING, (void **)&box)) || !box)
+		return 0;
+	const int boxed = box->lpVtbl->get_Value(box, &string) == S_OK && string;
+	box->lpVtbl->Release(box);
+	*out = string;
+	return boxed;
+}
+
+/* A boxed number value: IReference`1<double>, the boxing a WinRT caller uses for the numeric properties. */
+static int style_boxed_number(IInspectable *value, float *number)
+{
+	__FIReference_1_DOUBLE *box = NULL;
+	double read = 0;
+	if (FAILED(value->lpVtbl->QueryInterface(value, &IID___FIReference_1_DOUBLE, (void **)&box)) || !box)
+		return 0;
+	const int boxed = box->lpVtbl->get_Value(box, &read) == S_OK;
+	box->lpVtbl->Release(box);
+	*number = (float)read;
+	return boxed;
+}
+
+/* A brush value: the composition colour brush is the brush the engine can read a colour from, the way Panel.Background
+ * treats one. */
+static int style_brush_color(IInspectable *value, COLORREF *color, BYTE *alpha)
+{
+	__x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush *brush = NULL;
+	if (FAILED(value->lpVtbl->QueryInterface(value, &IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush,
+		(void **)&brush)) || !brush)
+		return 0;
+	__x_ABI_CWindows_CUI_CColor read;
+	int matched = 0;
+	if (brush->lpVtbl->get_Color(brush, &read) == S_OK) {
+		*color = RGB(read.R, read.G, read.B);
+		*alpha = read.A;
+		matched = 1;
+	}
+	brush->lpVtbl->Release(brush);
+	return matched;
+}
+
+/* The override of one colour-valued property ("Background", "Foreground") from the stored style; 0 when no setter matches. */
+static int style_override_color(IInspectable *style, const WCHAR *property, COLORREF *color, BYTE *alpha)
+{
+	UINT32 count = 0;
+	if (FAILED(raven_style_setter_count(style, &count)) || !count)
+		return 0;
+	for (UINT32 index = count; index--;) {
+		const WCHAR *name = NULL;
+		UINT32 length = 0;
+		IInspectable *value = NULL;
+		if (raven_style_setter_at(style, index, &name, &length, &value) != S_OK)
+			continue;
+		int matched = 0;
+		if (same_text(name, length, property) && value) {
+			if (style_brush_color(value, color, alpha))
+				matched = 1;
+			else {
+				HSTRING string = NULL;
+				if (style_boxed_text(value, &string)) {
+					UINT32 text_length = 0;
+					const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
+					if (named_color(text, text_length, color, alpha))
+						matched = 1;
+					WindowsDeleteString(string);
+				}
+			}
+		}
+		if (value)
+			value->lpVtbl->Release(value);
+		if (matched)
+			return 1;
+	}
+	return 0;
+}
+
+/* The override of one number-valued property ("FontSize", "Width", "Height"); 0 when no setter matches. */
+static int style_override_number(IInspectable *style, const WCHAR *property, float *number)
+{
+	UINT32 count = 0;
+	if (FAILED(raven_style_setter_count(style, &count)) || !count)
+		return 0;
+	for (UINT32 index = count; index--;) {
+		const WCHAR *name = NULL;
+		UINT32 length = 0;
+		IInspectable *value = NULL;
+		if (raven_style_setter_at(style, index, &name, &length, &value) != S_OK)
+			continue;
+		int matched = 0;
+		if (same_text(name, length, property) && value)
+			matched = style_boxed_number(value, number);
+		if (value)
+			value->lpVtbl->Release(value);
+		if (matched)
+			return 1;
+	}
+	return 0;
+}
+
+/* The override of the TextBlock's Text: the boxed string is stored in the element's slot so the buffer outlives the read
+ * the way the element's own text does; 0 when no setter matches. */
+static int style_override_text(IInspectable *style, struct textblock *self, const WCHAR *property, const WCHAR **text,
+	UINT32 *length)
+{
+	UINT32 count = 0;
+	if (FAILED(raven_style_setter_count(style, &count)) || !count)
+		return 0;
+	for (UINT32 index = count; index--;) {
+		const WCHAR *name = NULL;
+		UINT32 name_length = 0;
+		IInspectable *value = NULL;
+		if (raven_style_setter_at(style, index, &name, &name_length, &value) != S_OK)
+			continue;
+		int matched = 0;
+		HSTRING string = NULL;
+		if (same_text(name, name_length, property) && value && style_boxed_text(value, &string)) {
+			if (self->styled_text)
+				WindowsDeleteString(self->styled_text);
+			self->styled_text = string;
+			*text = WindowsGetStringRawBuffer(self->styled_text, length);
+			if (!*text)
+				*length = 0;
+			matched = 1;
+		} else if (string) {
+			WindowsDeleteString(string);
+		}
+		if (value)
+			value->lpVtbl->Release(value);
+		if (matched)
+			return 1;
+	}
+	return 0;
+}
+
+/* The fixture-facing exports of the style property; the component exports only what it marks, so the style fixture reaches
+ * these through GetProcAddress the way it reaches RavenXamlLoad. */
+__declspec(dllexport) HRESULT raven_xaml_element_put_style(IInspectable *object, IInspectable *style)
+{
+	grid1 *grid = NULL;
+	textblock1 *textblock = NULL;
+	button1 *button = NULL;
+	if (!object)
+		return E_POINTER;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl != &grid1_table) {
+			grid->lpVtbl->Release(grid);
+			return S_FALSE;
+		}
+		struct grid *self = ((struct grid1_part *)grid)->owner;
+		if (style)
+			style->lpVtbl->AddRef(style);
+		if (self->style)
+			self->style->lpVtbl->Release(self->style);
+		self->style = style;
+		grid->lpVtbl->Release(grid);
+		raven_render_changed();
+		return S_OK;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+		(void **)&textblock)) && textblock) {
+		if (textblock->lpVtbl != &textblock_table) {
+			textblock->lpVtbl->Release(textblock);
+			return S_FALSE;
+		}
+		struct textblock *self = (struct textblock *)textblock;
+		if (style)
+			style->lpVtbl->AddRef(style);
+		if (self->style)
+			self->style->lpVtbl->Release(self->style);
+		self->style = style;
+		/* The override slots the old style filled no longer apply. */
+		if (self->styled_text)
+			WindowsDeleteString(self->styled_text);
+		self->styled_text = NULL;
+		textblock->lpVtbl->Release(textblock);
+		raven_render_changed();
+		return S_OK;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
+		if (button->lpVtbl != &button1_table) {
+			button->lpVtbl->Release(button);
+			return S_FALSE;
+		}
+		struct button *self = ((struct button1_part *)button)->owner;
+		if (style)
+			style->lpVtbl->AddRef(style);
+		if (self->style)
+			IInspectable_Release(self->style);
+		self->style = style;
+		button->lpVtbl->Release(button);
+		raven_render_changed();
+		return S_OK;
+	}
+	return S_FALSE;
+}
+
+__declspec(dllexport) HRESULT raven_xaml_element_get_style(IInspectable *object, IInspectable **out)
+{
+	grid1 *grid = NULL;
+	textblock1 *textblock = NULL;
+	button1 *button = NULL;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!object)
+		return S_FALSE;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl != &grid1_table) {
+			grid->lpVtbl->Release(grid);
+			return S_FALSE;
+		}
+		struct grid *self = ((struct grid1_part *)grid)->owner;
+		*out = self->style;
+		grid->lpVtbl->Release(grid);
+	} else if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+		(void **)&textblock)) && textblock) {
+		if (textblock->lpVtbl != &textblock_table) {
+			textblock->lpVtbl->Release(textblock);
+			return S_FALSE;
+		}
+		*out = ((struct textblock *)textblock)->style;
+		textblock->lpVtbl->Release(textblock);
+	} else if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
+		if (button->lpVtbl != &button1_table) {
+			button->lpVtbl->Release(button);
+			return S_FALSE;
+		}
+		*out = ((struct button1_part *)button)->owner->style;
+		button->lpVtbl->Release(button);
+	} else {
+		return S_FALSE;
+	}
+	if (*out)
+		(*out)->lpVtbl->AddRef(*out);
+	return S_OK;
+}
+
+/* The information the rendering pass reads back from an element: what it is, the colour it fills, the size it was given and
+ * how many visual children it has. */
+
+HRESULT raven_xaml_element_render_info(IInspectable *object, enum element_render_kind *kind, COLORREF *color, BYTE *alpha,
+	float *width, float *height, UINT32 *child_count)
+{
+	grid1 *grid = NULL;
+	if (!kind || !color || !alpha || !width || !height || !child_count)
+		return E_POINTER;
+	*kind = element_render_none;
+	*color = 0;
+	*alpha = 0;
+	*width = 0;
+	*height = 0;
+	*child_count = 0;
+	if (!object)
+		return S_OK;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl == &grid1_table) {
+			struct grid *self = ((struct grid1_part *)grid)->owner;
+			*kind = element_render_grid;
+			*color = self->color;
+			*alpha = self->alpha;
+			*width = self->width;
+			*height = self->height;
+			*child_count = self->children ? self->children->count : 0;
+			/* The stored style's setters override the own state before the pass reads it; without a style this is the
+			 * own state untouched, the way every pre-style tree renders. */
+			if (self->style) {
+				COLORREF styled_color = 0;
+				BYTE styled_alpha = 0;
+				float styled_number = 0;
+				if (style_override_color(self->style, L"Background", &styled_color, &styled_alpha)) {
+					*color = styled_color;
+					*alpha = styled_alpha;
+				}
+				if (style_override_number(self->style, L"Width", &styled_number) && styled_number > 0)
+					*width = styled_number;
+				if (style_override_number(self->style, L"Height", &styled_number) && styled_number > 0)
+					*height = styled_number;
+			}
+		}
+		grid->lpVtbl->Release(grid);
+		return S_OK;
+	}
+	/* A button paints no chrome yet, but its size drives the rectangle the layout gives it and the hit test works from. */
+	button1 *button = NULL;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
+		if (button->lpVtbl == &button1_table) {
+			struct button *self = ((struct button1_part *)button)->owner;
+			*width = self->width;
+			*height = self->height;
+		}
+		button->lpVtbl->Release(button);
+	}
+	return S_OK;
+}
+
+/* The text payload the rendering pass draws for a TextBlock: the text, the font size in DIPs and the foreground colour.
+ * S_FALSE for every element that is not a TextBlock; a TextBlock without text reports a zero length and paints nothing.
+ * The text stays owned by the element — the caller copies it synchronously, while the reference here is alive. */
+HRESULT raven_xaml_element_render_text(IInspectable *object, const WCHAR **text, UINT32 *length, float *font_size,
+	COLORREF *color, BYTE *alpha)
+{
+	textblock1 *textblock = NULL;
+	if (!text || !length || !font_size || !color || !alpha)
+		return E_POINTER;
+	*text = NULL;
+	*length = 0;
+	*font_size = 0;
+	*color = 0;
+	*alpha = 0;
+	if (!object)
+		return S_FALSE;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+		(void **)&textblock)) || !textblock)
+		return S_FALSE;
+	HRESULT result = S_FALSE;
+	if (textblock->lpVtbl == &textblock_table) {
+		struct textblock *self = (struct textblock *)textblock;
+		if (self->text)
+			*text = WindowsGetStringRawBuffer(self->text, length);
+		if (!*text)
+			*length = 0;
+		*font_size = self->font_size;
+		*color = self->foreground;
+		*alpha = self->foreground_alpha;
+		/* The stored style's setters override the own state before the pass reads it. */
+		if (self->style) {
+			COLORREF styled_color = 0;
+			BYTE styled_alpha = 0;
+			float styled_number = 0;
+			const WCHAR *styled_text = NULL;
+			UINT32 styled_length = 0;
+			if (style_override_color(self->style, L"Foreground", &styled_color, &styled_alpha)) {
+				*color = styled_color;
+				*alpha = styled_alpha;
+			}
+			if (style_override_number(self->style, L"FontSize", &styled_number) && styled_number > 0)
+				*font_size = styled_number;
+			if (style_override_text(self->style, self, L"Text", &styled_text, &styled_length)) {
+				*text = styled_text;
+				*length = styled_length;
+			}
+		}
+		result = S_OK;
+	}
+	textblock->lpVtbl->Release(textblock);
+	return result;
+}
+
+/* The automation name the peers report for an element, the xaml_automation.h precedence: the stored Name first, a TextBlock
+ * without one falls back to its Text, everything else to the runtime class name. An element of one of the classes here reads
+ * its own storage and falls back to the class constant; any other IInspectable falls back to the runtime class name its
+ * GetRuntimeClassName reports, so a peer of an element the engine grows later still answers a name. */
+HRESULT raven_xaml_element_automation_name(IInspectable *element, HSTRING *out)
+{
+	textblock1 *textblock = NULL;
+	grid1 *grid = NULL;
+	button1 *button = NULL;
+	HSTRING source = NULL;
+	const WCHAR *fallback = NULL;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!element)
+		return E_POINTER;
+	if (SUCCEEDED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+		(void **)&textblock)) && textblock) {
+		if (textblock->lpVtbl == &textblock_table) {
+			struct textblock *self = (struct textblock *)textblock;
+			source = self->name ? self->name : self->text;
+			fallback = self->ui.class_name;
+		}
+		textblock->lpVtbl->Release(textblock);
+	}
+	if (!source && !fallback &&
+		SUCCEEDED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid,
+			(void **)&grid)) && grid) {
+		if (grid->lpVtbl == &grid1_table) {
+			struct grid *self = ((struct grid1_part *)grid)->owner;
+			source = self->name;
+			fallback = self->ui.class_name;
+		}
+		grid->lpVtbl->Release(grid);
+	}
+	if (!source && !fallback &&
+		SUCCEEDED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+			(void **)&button)) && button) {
+		if (button->lpVtbl == &button1_table) {
+			struct button *self = ((struct button1_part *)button)->owner;
+			source = self->name;
+			fallback = self->ui.class_name;
+		}
+		button->lpVtbl->Release(button);
+	}
+	if (source)
+		return WindowsDuplicateString(source, out);
+	if (fallback)
+		return WindowsCreateString(fallback, (UINT32)lstrlenW(fallback), out);
+	/* An element of a class this file does not implement answers its own runtime class name. */
+	if (element->lpVtbl->GetRuntimeClassName(element, out) == S_OK && *out)
+		return S_OK;
+	return *out ? S_OK : E_FAIL;
+}
+
+HRESULT raven_xaml_element_render_child(IInspectable *object, UINT32 index, IInspectable **out);
+
+HRESULT raven_xaml_grid_render_child(IInspectable *object, UINT32 index, IInspectable **out)
+{
+	grid1 *grid = NULL;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) || !grid)
+		return S_FALSE;
+	if (grid->lpVtbl != &grid1_table) {
+		grid->lpVtbl->Release(grid);
+		return S_FALSE;
+	}
+	struct children_vector *children = ((struct grid1_part *)grid)->owner->children;
+	if (!children || index >= children->count) {
+		grid->lpVtbl->Release(grid);
+		return S_OK;
+	}
+	*out = (IInspectable *)children->items[index];
+	(*out)->lpVtbl->AddRef(*out);
+	grid->lpVtbl->Release(grid);
+	return S_OK;
+}
+
+/* The layout pass reads back what the grid lays its children into: the fixed lengths of its definitions and the attached
+ * row/column of each child. */
+
+static int definition_value(IInspectable *item, double *value, UINT32 *unit)
+{
+	row_definition1 *row = NULL;
+	column_definition1 *column = NULL;
+	if (SUCCEEDED(item->lpVtbl->QueryInterface(item, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition, (void **)&row)) && row) {
+		if (row->lpVtbl == &row_definition_table) {
+			struct row_definition *self = (struct row_definition *)row;
+			*value = self->height;
+			*unit = self->unit;
+		}
+		row->lpVtbl->Release(row);
+		return 1;
+	}
+	if (SUCCEEDED(item->lpVtbl->QueryInterface(item, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition, (void **)&column)) && column) {
+		if (column->lpVtbl == &column_definition_table) {
+			struct column_definition *self = (struct column_definition *)column;
+			*value = self->width;
+			*unit = self->unit;
+		}
+		column->lpVtbl->Release(column);
+		return 1;
+	}
+	return 0;
+}
+
+static void tracks_of(struct children_vector *vector, struct raven_xaml_grid_track *tracks, UINT32 capacity, UINT32 *count)
+{
+	UINT32 filled = 0;
+	if (!vector)
+		return;
+	for (UINT32 index = 0; index < vector->count && filled < capacity; ++index) {
+		double value = 0;
+		UINT32 unit = 0;
+		if (definition_value((IInspectable *)vector->items[index], &value, &unit)) {
+			tracks[filled].value = value;
+			tracks[filled].unit = unit;
+			++filled;
+		}
+	}
+	*count = filled;
+}
+
+HRESULT raven_xaml_grid_render_rows(IInspectable *object, struct raven_xaml_grid_track *tracks, UINT32 capacity, UINT32 *count)
+{
+	grid1 *grid = NULL;
+	if (!tracks || !count)
+		return E_POINTER;
+	*count = 0;
+	if (!object)
+		return E_POINTER;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) || !grid)
+		return S_FALSE;
+	if (grid->lpVtbl != &grid1_table) {
+		grid->lpVtbl->Release(grid);
+		return S_FALSE;
+	}
+	tracks_of(((struct grid1_part *)grid)->owner->rows, tracks, capacity, count);
+	grid->lpVtbl->Release(grid);
+	return S_OK;
+}
+
+HRESULT raven_xaml_grid_render_columns(IInspectable *object, struct raven_xaml_grid_track *tracks, UINT32 capacity, UINT32 *count)
+{
+	grid1 *grid = NULL;
+	if (!tracks || !count)
+		return E_POINTER;
+	*count = 0;
+	if (!object)
+		return E_POINTER;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) || !grid)
+		return S_FALSE;
+	if (grid->lpVtbl != &grid1_table) {
+		grid->lpVtbl->Release(grid);
+		return S_FALSE;
+	}
+	tracks_of(((struct grid1_part *)grid)->owner->columns, tracks, capacity, count);
+	grid->lpVtbl->Release(grid);
+	return S_OK;
+}
+
+/* The attached cell and spans the layout pass reads back: the row and column the child was given (children without them land
+ * at cell (0, 0)) plus the row and column spans. The span out-parameters are optional; the default is one track, and a stored
+ * span below one reads back as one, so the pass never sees an empty span — a span of zero or negative occupies the child's own
+ * track only, and the pass clamps a span reaching past the last track. */
+HRESULT raven_xaml_element_render_slot(IInspectable *object, UINT32 *row, UINT32 *column, UINT32 *row_span, UINT32 *column_span)
+{
+	grid1 *grid = NULL;
+	textblock1 *textblock = NULL;
+	button1 *button = NULL;
+	if (!row || !column)
+		return E_POINTER;
+	*row = 0;
+	*column = 0;
+	if (row_span)
+		*row_span = 1;
+	if (column_span)
+		*column_span = 1;
+	if (!object)
+		return S_OK;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl == &grid1_table) {
+			struct grid *self = ((struct grid1_part *)grid)->owner;
+			*row = self->row;
+			*column = self->column;
+			if (row_span)
+				*row_span = self->row_span > 1 ? self->row_span : 1;
+			if (column_span)
+				*column_span = self->column_span > 1 ? self->column_span : 1;
+		}
+		grid->lpVtbl->Release(grid);
+		return S_OK;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock, (void **)&textblock)) && textblock) {
+		if (textblock->lpVtbl == &textblock_table) {
+			struct textblock *self = (struct textblock *)textblock;
+			*row = self->row;
+			*column = self->column;
+			if (row_span)
+				*row_span = self->row_span > 1 ? self->row_span : 1;
+			if (column_span)
+				*column_span = self->column_span > 1 ? self->column_span : 1;
+		}
+		textblock->lpVtbl->Release(textblock);
+		return S_OK;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
+		if (button->lpVtbl == &button1_table) {
+			struct button *self = ((struct button1_part *)button)->owner;
+			*row = self->row;
+			*column = self->column;
+			if (row_span)
+				*row_span = self->row_span > 1 ? self->row_span : 1;
+			if (column_span)
+				*column_span = self->column_span > 1 ? self->column_span : 1;
+		}
+		button->lpVtbl->Release(button);
+	}
+	return S_OK;
+}
+
+/* Factories */
+
+enum element_kind { element_grid, element_textblock, element_button, element_row_definition, element_column_definition };
+
+struct element_factory {
+	const IActivationFactoryVtbl *lpVtbl;
+	LONG refs;
+	enum element_kind kind;
+};
+
+static HRESULT WINAPI element_factory_query(IActivationFactory *iface, REFIID iid, void **out)
+{
+	struct element_factory *self = (struct element_factory *)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, &IID_IActivationFactory))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	*out = iface;
+	return S_OK;
+}
+
+static ULONG WINAPI element_factory_addref(IActivationFactory *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct element_factory *)iface)->refs);
+}
+
+static ULONG WINAPI element_factory_release(IActivationFactory *iface)
+{
+	return (ULONG)InterlockedDecrement(&((struct element_factory *)iface)->refs);
+}
+
+static HRESULT WINAPI element_factory_iids(IActivationFactory *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI element_factory_name(IActivationFactory *iface, HSTRING *name)
+{
+	struct element_factory *self = (struct element_factory *)iface;
+	const WCHAR *text = self->kind == element_grid ? grid_class :
+		self->kind == element_textblock ? textblock_class :
+		self->kind == element_button ? button_class :
+		self->kind == element_row_definition ? row_definition_class : column_definition_class;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(text, (UINT32)lstrlenW(text), name);
+}
+
+static HRESULT WINAPI element_factory_trust(IActivationFactory *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI element_factory_activate(IActivationFactory *iface, IInspectable **out)
+{
+	struct element_factory *self = (struct element_factory *)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (self->kind == element_grid) {
+		struct grid *grid = create_grid();
+		if (!grid)
+			return E_OUTOFMEMORY;
+		*out = (IInspectable *)&grid->first;
+	} else if (self->kind == element_textblock) {
+		struct textblock *textblock = create_textblock();
+		if (!textblock)
+			return E_OUTOFMEMORY;
+		*out = (IInspectable *)textblock;
+	} else if (self->kind == element_button) {
+		struct button *button = create_button();
+		if (!button)
+			return E_OUTOFMEMORY;
+		*out = (IInspectable *)&button->first;
+	} else if (self->kind == element_row_definition) {
+		struct row_definition *definition = create_row_definition();
+		if (!definition)
+			return E_OUTOFMEMORY;
+		*out = (IInspectable *)definition;
+	} else {
+		struct column_definition *definition = create_column_definition();
+		if (!definition)
+			return E_OUTOFMEMORY;
+		*out = (IInspectable *)definition;
+	}
+	return S_OK;
+}
+
+static const IActivationFactoryVtbl element_factory_table = {
+	.QueryInterface = element_factory_query,
+	.AddRef = element_factory_addref,
+	.Release = element_factory_release,
+	.GetIids = element_factory_iids,
+	.GetRuntimeClassName = element_factory_name,
+	.GetTrustLevel = element_factory_trust,
+	.ActivateInstance = element_factory_activate,
+};
+
+static struct element_factory grid_factory = {&element_factory_table, 1, element_grid};
+static struct element_factory textblock_factory = {&element_factory_table, 1, element_textblock};
+static struct element_factory button_factory = {&element_factory_table, 1, element_button};
+static struct element_factory row_definition_factory = {&element_factory_table, 1, element_row_definition};
+static struct element_factory column_definition_factory = {&element_factory_table, 1, element_column_definition};
+
+HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out)
+{
+	UINT32 length = 0;
+	const WCHAR *text;
+	struct element_factory *factory;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	text = WindowsGetStringRawBuffer(name, &length);
+	if (same_text(text, length, grid_class))
+		factory = &grid_factory;
+	else if (same_text(text, length, textblock_class))
+		factory = &textblock_factory;
+	else if (same_text(text, length, button_class))
+		factory = &button_factory;
+	else if (same_text(text, length, row_definition_class))
+		factory = &row_definition_factory;
+	else if (same_text(text, length, column_definition_class))
+		factory = &column_definition_factory;
+	else
+		return CLASS_E_CLASSNOTAVAILABLE;
+	InterlockedIncrement(&factory->refs);
+	*out = (IActivationFactory *)factory;
+	return S_OK;
+}

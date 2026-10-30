@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity Name="Raven.Fixture" Publisher="CN=Raven" Version="1.2.3.4"/>
+  <Properties>
+    <DisplayName>Raven package fixture</DisplayName>
+    <PublisherDisplayName>Raven</PublisherDisplayName>
+    <Logo>logo.png</Logo>
+  </Properties>
+  <Resources>
+    <Resource Language="en-US"/>
+  </Resources>
+</Package>

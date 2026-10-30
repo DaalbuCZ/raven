@@ -1,5 +1,6 @@
 #include "exceptions.h"
 #include "providers.h"
+#include "system_exports.h"
 
 #include <iostream>
 #include <optional>
@@ -84,7 +85,26 @@ int main(int argc, char **argv)
 			}
 			check(process.api_arguments(1)[0]==arguments[0],"RTL exception capture changed the pending caller");
 		}
-		std::cout << "Win32/RTL exception capture, DWORD ABI, record bounds and preserved pending callers passed\n";
+		{
+			raven::ModuleSet modules;
+			auto &module = modules.add("kernel32.dll",
+				raven::runtime_provider("kernel32.dll", 0x180000000, raven::system_export_names("kernel32.dll")));
+			raven::LoadedImage *images[] = {&module.loaded};
+			raven::NativeProcess process(images, argv[1], std::chrono::seconds(2));
+			const auto api = modules.resolve({"kernel32.dll", "DelayLoadFailureHook", 0, false, 0});
+			process.add_api_trap(api);
+			const uint64_t arguments[] = {0x1a0000010ULL, 0x1a0000020ULL};
+			check(process.call(api, arguments, std::chrono::seconds(1)).stop == raven::NativeStop::api,
+				"delay-load failure hook did not reach the API boundary");
+			const auto result = raven::native_delay_load_failure(process);
+			check(result.stop == raven::NativeStop::exception && result.value == 0x505U && result.exception_flags == 1,
+				"delay-load failure exception code or flags differ");
+			check(result.instruction == api, "delay-load failure exception address differs");
+			check(result.exception_information == std::vector<uint64_t>{arguments[0], arguments[1]},
+				"delay-load failure parameters differ");
+			check(process.api_arguments(2)[1] == arguments[1], "delay-load failure capture changed the pending caller");
+		}
+		std::cout << "Win32/RTL exception capture, delay-load failure hook, DWORD ABI, record bounds and preserved pending callers passed\n";
 		return 0;
 	} catch (const std::exception &error) {
 		std::cerr << error.what() << '\n';

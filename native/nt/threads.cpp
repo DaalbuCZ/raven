@@ -38,6 +38,11 @@ NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environm
 	main->main = true;
 	threads.push_back(main);
 	running = main.get();
+	memory.set_write_watch_pause([this] {
+		for (const auto &thread : threads)
+			if (thread.get() != running && thread->state != GuestThread::State::done)
+				this->process.pause_thread(thread->snapshot);
+	});
 	// A thread that computes or spins without calling the runtime must not keep the others from running: after a few milliseconds the
 	// guest is interrupted and the next thread gets the processor.
 	// RAVEN_SLICE_MS sets the length of a time slice in milliseconds; zero turns time slicing off.
@@ -59,6 +64,7 @@ NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environm
 
 NativeThreads::~NativeThreads()
 {
+	memory.set_write_watch_pause(nullptr);
 	if (shared_change_listener == wake)
 		shared_change_listener = -1;
 	process.set_time_slicing(std::chrono::milliseconds(0), nullptr, nullptr);
@@ -159,6 +165,7 @@ void NativeThreads::trampoline(unsigned low, unsigned high)
 void NativeThreads::thread_main(GuestThread &thread)
 {
 	uint32_t code = 0;
+	bool detaching = false;
 	try {
 		if (thread.unwinding)
 			throw ThreadExit{0};
@@ -169,10 +176,18 @@ void NativeThreads::thread_main(GuestThread &thread)
 		if (result.stop != NativeStop::returned)
 			throw result;
 		code = uint32_t(result.value);
+		detaching = true;
 		if (notifier)
 			notifier(3);
 	} catch (const ThreadExit &exit) {
 		code = exit.code;
+		if (exit.notify && !detaching && !thread.unwinding && notifier) {
+			try {
+				notifier(3);
+			} catch (...) {
+				pending = std::current_exception();
+			}
+		}
 	} catch (...) {
 		pending = std::current_exception();
 		// RAVEN_TRACE_API names the thread and the error that ends the process from a thread other than the first.
@@ -535,7 +550,7 @@ void NativeThreads::exit_current(uint32_t code)
 void NativeThreads::terminate(const std::shared_ptr<GuestThread> &thread, uint32_t code)
 {
 	if (thread.get() == running)
-		exit_current(code);
+		throw ThreadExit{code, false};
 	finish(*thread, code);
 }
 

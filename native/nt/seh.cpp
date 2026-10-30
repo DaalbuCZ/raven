@@ -870,6 +870,15 @@ void register_exception_api(ApiRegistry &registry, KernelContext &context, Nativ
 		auto record = exceptions->new_record(call.u32(0), call.u32(1) & flag_noncontinuable, context_rip(origin), parameters);
 		exceptions->raise(std::move(record), std::move(origin), [&context] { return native_raise_exception(context.process); });
 	});
+	registry.add("DelayLoadFailureHook", 2, [exceptions, &context](ApiCall &call) {
+		// Windows' default failure hook for a delay load no component hook answered: a noncontinuable exception carrying the library
+		// and procedure names. Runtimes that support an absent optional component, .NET Native among them, catch exactly this code.
+		auto origin = context_from_process(context.process.context());
+		exceptions->raise_stub = context_rip(origin);
+		auto record = exceptions->new_record(0x505U, flag_noncontinuable, context_rip(origin),
+			std::vector<uint64_t>{call[0], call[1]});
+		exceptions->raise(std::move(record), std::move(origin), [&context] { return native_delay_load_failure(context.process); });
+	});
 	registry.add("RtlRaiseException", 1, [exceptions, &context](ApiCall &call) {
 		auto origin = exceptions->caller_context();
 		auto record = call.read(call[0], record_size);

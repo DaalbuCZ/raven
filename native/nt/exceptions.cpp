@@ -44,4 +44,16 @@ NativeResult native_raise_rtl_exception(NativeProcess &process, bool status_only
 	return result;
 }
 
+// KernelBase raises 0x505 with the library and procedure names when a delay load failed and no component hook answered it. Runtimes
+// that treat an optional component's absence as supported catch exactly this code, so the constant and the two parameters are the
+// loader's public contract (observed in KernelBase!DelayLoadFailureHook on Windows 11 25H2).
+NativeResult native_delay_load_failure(NativeProcess &process)
+{
+	const auto arguments = process.api_arguments(2);
+	NativeResult result{NativeStop::exception, 0x505U, process.context().registers.rip - 1, 0};
+	result.exception_flags = 1;
+	result.exception_information = {arguments[0], arguments[1]};
+	return result;
+}
+
 }

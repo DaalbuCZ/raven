@@ -296,6 +296,11 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("GetTimeZoneInformation", 1, [zone_information](ApiCall &call) { zone_information(call, false); });
 	registry.add("GetDynamicTimeZoneInformation", 1, [zone_information](ApiCall &call) { zone_information(call, true); });
+	// shortcut: no Windows time-zone registry catalog exists; add enumeration when that catalog is populated.
+	registry.add("EnumDynamicTimeZoneInformation", 2, [](ApiCall &call) { call.ret(call[1] ? 259 : 87); });
+	registry.add("GetDynamicTimeZoneInformationEffectiveYears", 3, [](ApiCall &call) {
+		call.ret(call[0] && call[1] && call[2] ? 2 : 87);
+	});
 	// The reverse of the call below: a local time becomes UTC by taking the zone's offset off.
 	registry.add("TzSpecificLocalTimeToSystemTime", 3, [](ApiCall &call) {
 		const auto ticks = ticks_from(call.read(call[1], 16));

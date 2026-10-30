@@ -106,6 +106,11 @@ std::span<const std::pair<std::string_view, uint16_t>> system_export_ordinals(st
 
 uint32_t system_export_words(std::string_view dll, std::string_view name)
 {
+	if (dll == "kernel32.dll" || dll == "kernelbase.dll") {
+		if (name == "VirtualAllocFromApp") return 4;
+		if (name == "EnumDynamicTimeZoneInformation") return 2;
+		if (name == "GetDynamicTimeZoneInformationEffectiveYears") return 3;
+	}
 	for (const auto &[library, table] : argument_tables) {
 		if (library != dll)
 			continue;

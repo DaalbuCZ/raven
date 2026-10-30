@@ -998,6 +998,58 @@ uint64_t NativeProcess::map_memory(size_t size, int protection, uint64_t address
 	return mapped;
 }
 
+std::vector<uint64_t> NativeProcess::dirty_pages(uint64_t address, size_t size) const
+{
+	state->require_memory();
+	memory_range(address, size, 0, state->limit());
+	// pread is used rather than a stream: libstdc++ reports a failed read from this zero-length proc file even after lseek succeeds.
+	const std::string path="/proc/"+std::to_string(state->child->pid)+"/pagemap";
+	const int descriptor=::open(path.c_str(),O_RDONLY|O_CLOEXEC);
+	if (descriptor<0)
+		throw std::runtime_error("native write tracking cannot read pagemap");
+	std::vector<uint64_t> dirty;
+	std::array<uint64_t, 512> entries{};
+	for (size_t offset = 0; offset < size;) {
+		const size_t count = std::min(entries.size(), (size - offset) / 4096);
+		const off_t position=off_t((address + offset) / 4096 * 8);
+		ssize_t got=0;
+		while (got<ssize_t(count*8)) {
+			const ssize_t part=pread(descriptor,reinterpret_cast<char *>(entries.data())+got,count*8-size_t(got),position+got);
+			if (part<=0)
+				break;
+			got+=part;
+		}
+		// A hole or an end of mapping stops the read early; those pages hold no soft-dirty bit, so they read as clean.
+		std::fill(entries.begin()+(size_t(got)/8), entries.begin()+count, uint64_t(0));
+		for (size_t index = 0; index < count; ++index)
+			if (entries[index] & (1ULL << 55))
+				dirty.push_back(address + offset + index * 4096);
+		offset += count * 4096;
+	}
+	close(descriptor);
+	return dirty;
+}
+
+void NativeProcess::reset_dirty_pages()
+{
+	state->require_memory();
+	const std::string path="/proc/"+std::to_string(state->child->pid)+"/clear_refs";
+	const int descriptor=::open(path.c_str(),O_WRONLY|O_CLOEXEC);
+	if (descriptor<0)
+		throw std::runtime_error("native write tracking cannot reset soft-dirty state");
+	const bool written=write(descriptor,"4",1)==1;
+	close(descriptor);
+	if (!written)
+		throw std::runtime_error("native write tracking cannot reset soft-dirty state");
+}
+
+void NativeProcess::use_small_pages(uint64_t address, size_t size)
+{
+	memory_range(address, size, 0, state->limit());
+	// A huge PTE has just one soft-dirty bit for 512 Windows pages.
+	memory_syscall(SYS_madvise, address, size, MADV_NOHUGEPAGE);
+}
+
 uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
 {
 	return map_file(descriptor, size, offset, false);

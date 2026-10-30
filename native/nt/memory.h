@@ -7,6 +7,7 @@
 #include <iterator>
 #include <optional>
 #include <span>
+#include <set>
 #include <vector>
 
 namespace raven {
@@ -47,6 +48,7 @@ public:
 	void set_commit_block(uint64_t *block) { commit_block = block; }
 	// Zeroes committed memory, as a block given out again must read when it was asked for zeroed.
 	void clear(uint64_t address, uint64_t size);
+	void set_write_watch_pause(std::function<void()> pause) { pause_writers = std::move(pause); }
 
 private:
 	// The access of every page of a region as runs of equal pages, so a reservation of terabytes costs a few entries.
@@ -98,6 +100,8 @@ private:
 		uint64_t size;
 		uint32_t allocation_protection;
 		PageMap pages;
+		bool write_watch = false;
+		std::set<uint64_t> dirty;
 	};
 	struct Image {
 		uint64_t size;
@@ -123,6 +127,9 @@ private:
 	bool window_holds(uint64_t from, uint64_t to) const;
 	uint64_t *commit_block = nullptr;
 	size_t window_next = 0;
+	std::function<void()> pause_writers;
+	void collect_writes();
+	bool dispatch_write_watch(std::string_view name);
 };
 
 }

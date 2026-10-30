@@ -136,6 +136,7 @@ private:
 		std::map<uint64_t,uint64_t> paints;
 	};
 	std::map<uint32_t,QueueState> queues;
+	std::map<uint32_t,uint32_t> retrieved_times;
 	uint32_t owner(uint64_t window) const;
 	bool queued_for(uint32_t thread) const;
 	// A message sent to a window of another thread waits here until that thread retrieves messages; the sender waits for the result.
