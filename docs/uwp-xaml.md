@@ -1175,6 +1175,54 @@ pages, layout, and rendering through the composition stage.
 - Run the app against the implementation; fix gaps driven by its traces.
 - Not a stage with an independent contract: it is the stress test for 0–6.
 
+Run-through (2026-10-31): a fresh 21k-line traced run established the
+first real wall. Shapr3D.dll asks the `ResourceContext.QualifierValues`
+map for `IObservableMap<String,String>` (the parameterized IID verified
+by computing the RFC 4122 v5 SHA-1 of the pinterface signature, the same
+algorithm that reproduces mingw's precomputed collection GUIDs); the
+engine answered `E_NOINTERFACE`, so .NET Native called the map's
+`Lookup` slot with a GC object as its "key", the exception machinery
+fail-fasted (1004) and the process died. Fixes, all in `resources.c`:
+
+- Real `IObservableMap<String,String>` on the qualifier map —
+  `add_MapChanged`/`remove_MapChanged` with tokens and handler
+  ref-counting; the map never changes, so handlers are held but never
+  invoked, which is Windows' own behavior for a constant map. The
+  QualifierValues getter now returns the observable part (the property's
+  declared type).
+- A real bug underneath: `qualifier_lookup` read `*length` before the
+  same expression's `WindowsGetStringRawBuffer(key, length)` wrote it,
+  so every lookup compared length 0 and answered `E_BOUNDS` — even
+  `Lookup("language")` never worked. In the app the fix makes
+  `Lookup("language")` answer `en-US`.
+- `IWeakReferenceSource`/`IWeakReference` with the real Windows ABI
+  (IInspectable-derived, method at vtable slot 6): .NET Native takes a
+  weak reference on every WinRT object it projects and treats absence
+  as fatal.
+- `ResourceContext.Languages` — a read-only `IVectorView<String>`
+  built from the host's default UI language (`GetUserDefaultUILanguage`/
+  `LCIDToLocaleName`), replacing a bare uncommented `E_NOTIMPL`.
+- Canonical parameterized runtime class names (`IMap`2<String,String>`,
+  `IObservableMap`2…`, full namespace, primitive `String`, no space —
+  the format observed in real `Microsoft.UI.Xaml.dll` statics) and real
+  `GetIids` for the context/map/view/observable.
+
+The run now proceeds: activation → weak reference → QualifierValues →
+MapChanged subscription → `Lookup("language")` = `en-US` → Languages —
+then .NET Native initializes `CultureInfo` for the neutral culture
+`"en"` and fail-fasts when `GetLocaleInfoEx` near-variant queries
+(`LOCALE_SNAME`/`SPARENT`/…, flags like `0x20001010`) meet the host's
+en-US-only NLS. That is the next wall: a wider synthetic-but-consistent
+en dataset in `text_api.cpp`. Also queued by the trace:
+`RoOriginateLanguageException` (host no-op — needed before HRESULT
+failures become survivable in .NET Native's exception machinery),
+apartment-aware marshaling (`IAgileObject`/`IMarshal` requested and
+refused so far), and lifting the weak-reference helper into
+`xaml_internal.h` when Window/Page objects need it. Evidence:
+`launch-stage7-1.log` (pre-fix wall) and `launch-stage7-final.log`
+(post-fix state). `native_mrt_x64`/`_x32` and `native_mrt_manager_x64`/
+`_x32` pin the new surface (codes 60–78).
+
 ## Performance rules
 
 - One GPU compositor; XAML visuals and the 3D viewport composite on the GPU.
