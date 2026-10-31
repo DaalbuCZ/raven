@@ -44,6 +44,7 @@ typedef __x_ABI_CWindows_CFoundation_CIAsyncAction async_action;
 typedef __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler completed_handler;
 
 static const WCHAR window_name[] = L"Windows.UI.Core.CoreWindow";
+static const WCHAR cursor_name[] = L"Windows.UI.Core.CoreCursor";
 static const WCHAR dispatcher_name[] = L"Windows.UI.Core.CoreDispatcher";
 static const WCHAR action_name[] = L"Windows.Foundation.IAsyncAction";
 
@@ -96,6 +97,7 @@ struct window {
 	ULONG work_epoch; /* posts above idle priority since a RunIdleAsync item queued (see dispatcher_run_idle_async) */
 	__x_ABI_CWindows_CSystem_CIDispatcherQueue *system_queue;
 	core_dispatcher *dispatcher;
+	__x_ABI_CWindows_CUI_CCore_CICoreCursor *cursor; /* AddRef'd; NULL until an application puts one: the platform default */
 	raven_core_window_interop interop;
 	struct raven_desktop_window *desktop;
 };
@@ -276,6 +278,277 @@ static const struct raven_core_window_interop_vtable interop_table = {
 	interop_query, interop_addref, interop_release, interop_handle, interop_handled
 };
 
+/* Cursor objects. CoreCursor is a plain runtime class: an activatable "Windows.UI.Core.CoreCursor" whose factory builds a
+ * cursor of a CoreCursorType and whose RoActivateInstance answers the default, the arrow. The window's PointerCursor reads
+ * as that arrow until an application puts one; a NULL put is legal and restores the platform default, so get answers the
+ * same arrow instance again. Every cursor answers the standard 32x32 cursor size the platform uses for the built-in types;
+ * the real ICoreCursor also exposes it as Size, but mingw's windows.ui.core.h declares get_Id/get_Type instead, so the id
+ * the factory received stands in for it here (the default arrow answers 0). CoreCursorType_Custom names a cursor bitmap in
+ * the application package's resources: with no package resources to load from, the factory rejects it. */
+struct cursor {
+	const __x_ABI_CWindows_CUI_CCore_CICoreCursorVtbl *lpVtbl;
+	LONG refs;
+	__x_ABI_CWindows_CUI_CCore_CCoreCursorType type;
+	UINT32 id;
+	BOOL allocated; /* the default arrow is a static instance that never dies */
+};
+
+static HRESULT WINAPI cursor_query(__x_ABI_CWindows_CUI_CCore_CICoreCursor *iface, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreCursor))
+		return E_NOINTERFACE;
+	*out = iface;
+	InterlockedIncrement(&((struct cursor *)iface)->refs);
+	return S_OK;
+}
+
+static ULONG WINAPI cursor_addref(__x_ABI_CWindows_CUI_CCore_CICoreCursor *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct cursor *)iface)->refs);
+}
+
+static ULONG WINAPI cursor_release(__x_ABI_CWindows_CUI_CCore_CICoreCursor *iface)
+{
+	struct cursor *self = (struct cursor *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs && self->allocated) {
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI cursor_iids(__x_ABI_CWindows_CUI_CCore_CICoreCursor *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI cursor_class_name(__x_ABI_CWindows_CUI_CCore_CICoreCursor *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(cursor_name, (UINT32)lstrlenW(cursor_name), name);
+}
+
+static HRESULT WINAPI cursor_trust(__x_ABI_CWindows_CUI_CCore_CICoreCursor *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI cursor_get_id(__x_ABI_CWindows_CUI_CCore_CICoreCursor *iface, UINT32 *value)
+{
+	if (!value)
+		return E_POINTER;
+	*value = ((struct cursor *)iface)->id;
+	return S_OK;
+}
+
+static HRESULT WINAPI cursor_get_type(__x_ABI_CWindows_CUI_CCore_CICoreCursor *iface, __x_ABI_CWindows_CUI_CCore_CCoreCursorType *value)
+{
+	if (!value)
+		return E_POINTER;
+	*value = ((struct cursor *)iface)->type;
+	return S_OK;
+}
+
+static const __x_ABI_CWindows_CUI_CCore_CICoreCursorVtbl cursor_table = {
+	.QueryInterface = cursor_query,
+	.AddRef = cursor_addref,
+	.Release = cursor_release,
+	.GetIids = cursor_iids,
+	.GetRuntimeClassName = cursor_class_name,
+	.GetTrustLevel = cursor_trust,
+	.get_Id = cursor_get_id,
+	.get_Type = cursor_get_type,
+};
+
+static struct cursor default_cursor = {&cursor_table, 1, CoreCursorType_Arrow, 0, FALSE};
+
+/* The type range follows the same contract guard the public header declares the last values under. */
+static __x_ABI_CWindows_CUI_CCore_CCoreCursorType cursor_type_last(void)
+{
+#if WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION >= 0x50000
+	return CoreCursorType_Person;
+#else
+	return CoreCursorType_Wait;
+#endif
+}
+
+static HRESULT cursor_create(__x_ABI_CWindows_CUI_CCore_CCoreCursorType type, UINT32 id, __x_ABI_CWindows_CUI_CCore_CICoreCursor **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (type < CoreCursorType_Arrow || type > cursor_type_last())
+		return E_INVALIDARG;
+	struct cursor *self = ALLOC(sizeof *self);
+	if (!self)
+		return E_OUTOFMEMORY;
+	self->lpVtbl = &cursor_table;
+	self->refs = 1;
+	self->type = type;
+	self->id = id;
+	self->allocated = TRUE;
+	InterlockedIncrement(&raven_xaml_objects);
+	*out = (__x_ABI_CWindows_CUI_CCore_CICoreCursor *)self;
+	return S_OK;
+}
+
+struct cursor_activation {
+	const IActivationFactoryVtbl *lpVtbl;
+	struct cursor_factory *owner;
+};
+
+struct cursor_icf {
+	const __x_ABI_CWindows_CUI_CCore_CICoreCursorFactoryVtbl *lpVtbl;
+	struct cursor_factory *owner;
+};
+
+struct cursor_factory {
+	struct cursor_activation activation;
+	LONG refs;
+	struct cursor_icf factory;
+};
+
+static HRESULT cursor_factory_query(struct cursor_factory *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory)) {
+		InterlockedIncrement(&self->refs);
+		*out = &self->activation;
+		return S_OK;
+	}
+	if (equal_iid(iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreCursorFactory)) {
+		InterlockedIncrement(&self->refs);
+		*out = &self->factory;
+		return S_OK;
+	}
+	return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI cursor_activation_query(IActivationFactory *iface, REFIID iid, void **out)
+{
+	return cursor_factory_query(((struct cursor_activation *)iface)->owner, iid, out);
+}
+
+static ULONG WINAPI cursor_activation_addref(IActivationFactory *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct cursor_activation *)iface)->owner->refs);
+}
+
+static ULONG WINAPI cursor_activation_release(IActivationFactory *iface)
+{
+	return (ULONG)InterlockedDecrement(&((struct cursor_activation *)iface)->owner->refs);
+}
+
+static HRESULT WINAPI cursor_activation_iids(IActivationFactory *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI cursor_activation_class_name(IActivationFactory *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(cursor_name, (UINT32)lstrlenW(cursor_name), name);
+}
+
+static HRESULT WINAPI cursor_activation_trust(IActivationFactory *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI cursor_activation_activate(IActivationFactory *iface, IInspectable **out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	return cursor_create(CoreCursorType_Arrow, 0, (__x_ABI_CWindows_CUI_CCore_CICoreCursor **)out);
+}
+
+static const IActivationFactoryVtbl cursor_activation_table = {
+	.QueryInterface = cursor_activation_query,
+	.AddRef = cursor_activation_addref,
+	.Release = cursor_activation_release,
+	.GetIids = cursor_activation_iids,
+	.GetRuntimeClassName = cursor_activation_class_name,
+	.GetTrustLevel = cursor_activation_trust,
+	.ActivateInstance = cursor_activation_activate,
+};
+
+static HRESULT WINAPI cursor_icf_query(__x_ABI_CWindows_CUI_CCore_CICoreCursorFactory *iface, REFIID iid, void **out)
+{
+	return cursor_factory_query(((struct cursor_icf *)iface)->owner, iid, out);
+}
+
+static ULONG WINAPI cursor_icf_addref(__x_ABI_CWindows_CUI_CCore_CICoreCursorFactory *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct cursor_icf *)iface)->owner->refs);
+}
+
+static ULONG WINAPI cursor_icf_release(__x_ABI_CWindows_CUI_CCore_CICoreCursorFactory *iface)
+{
+	return (ULONG)InterlockedDecrement(&((struct cursor_icf *)iface)->owner->refs);
+}
+
+static HRESULT WINAPI cursor_icf_iids(__x_ABI_CWindows_CUI_CCore_CICoreCursorFactory *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI cursor_icf_class_name(__x_ABI_CWindows_CUI_CCore_CICoreCursorFactory *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(cursor_name, (UINT32)lstrlenW(cursor_name), name);
+}
+
+static HRESULT WINAPI cursor_icf_trust(__x_ABI_CWindows_CUI_CCore_CICoreCursorFactory *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI cursor_icf_create(__x_ABI_CWindows_CUI_CCore_CICoreCursorFactory *iface,
+	__x_ABI_CWindows_CUI_CCore_CCoreCursorType type, UINT32 id, __x_ABI_CWindows_CUI_CCore_CICoreCursor **out)
+{
+	(void)iface;
+	/* CoreCursorType_Custom loads the cursor bitmap the resource id names in the application package; the emulated
+	 * desktop has no package resources to load from, so it stays unsupported. Out-of-range types are rejected with
+	 * E_INVALIDARG by cursor_create. */
+	if (type == CoreCursorType_Custom)
+		return E_NOTIMPL;
+	return cursor_create(type, id, out);
+}
+
+static const __x_ABI_CWindows_CUI_CCore_CICoreCursorFactoryVtbl cursor_icf_table = {
+	.QueryInterface = cursor_icf_query,
+	.AddRef = cursor_icf_addref,
+	.Release = cursor_icf_release,
+	.GetIids = cursor_icf_iids,
+	.GetRuntimeClassName = cursor_icf_class_name,
+	.GetTrustLevel = cursor_icf_trust,
+	.CreateCursor = cursor_icf_create,
+};
+
+static struct cursor_factory cursor_factory_instance = {
+	{&cursor_activation_table, &cursor_factory_instance}, 1, {&cursor_icf_table, &cursor_factory_instance}};
+
 /* Unsupported contracts fail explicitly; every slot follows the public mingw WinRT header. */
 static HRESULT WINAPI window_unsupported_get_AutomationHostProvider(core_window *iface, IInspectable **value)
 {
@@ -303,16 +576,44 @@ static HRESULT WINAPI window_unsupported_put_FlowDirection(core_window *iface, _
 	return E_NOTIMPL;
 }
 
-static HRESULT WINAPI window_unsupported_get_PointerCursor(core_window *iface, __x_ABI_CWindows_CUI_CCore_CICoreCursor **value)
+/* The window's cursor: the arrow instance until an application puts one; a NULL put is legal and means the platform
+ * default, so get answers the same arrow again afterwards. */
+static HRESULT WINAPI window_get_PointerCursor(core_window *iface, __x_ABI_CWindows_CUI_CCore_CICoreCursor **value)
 {
-	if (!value) return E_POINTER;
-	ZeroMemory(value, sizeof *value);
-	return E_NOTIMPL;
+	struct window *self = (struct window *)iface;
+	if (!value)
+		return E_POINTER;
+	*value = NULL;
+	EnterCriticalSection(&self->lock);
+	if (self->closed) {
+		LeaveCriticalSection(&self->lock);
+		return RO_E_CLOSED;
+	}
+	if (self->cursor)
+		*value = self->cursor;
+	else
+		*value = (__x_ABI_CWindows_CUI_CCore_CICoreCursor *)&default_cursor;
+	__x_ABI_CWindows_CUI_CCore_CICoreCursor_AddRef(*value);
+	LeaveCriticalSection(&self->lock);
+	return S_OK;
 }
 
-static HRESULT WINAPI window_unsupported_put_PointerCursor(core_window *iface, __x_ABI_CWindows_CUI_CCore_CICoreCursor *value)
+static HRESULT WINAPI window_put_PointerCursor(core_window *iface, __x_ABI_CWindows_CUI_CCore_CICoreCursor *value)
 {
-	return E_NOTIMPL;
+	struct window *self = (struct window *)iface;
+	EnterCriticalSection(&self->lock);
+	if (self->closed) {
+		LeaveCriticalSection(&self->lock);
+		return RO_E_CLOSED;
+	}
+	if (value)
+		__x_ABI_CWindows_CUI_CCore_CICoreCursor_AddRef(value);
+	__x_ABI_CWindows_CUI_CCore_CICoreCursor *previous = self->cursor;
+	self->cursor = value;
+	LeaveCriticalSection(&self->lock);
+	if (previous)
+		__x_ABI_CWindows_CUI_CCore_CICoreCursor_Release(previous);
+	return S_OK;
 }
 
 static HRESULT WINAPI window_get_PointerPosition(core_window *iface, __x_ABI_CWindows_CFoundation_CPoint *value)
@@ -474,8 +775,8 @@ static const __x_ABI_CWindows_CUI_CCore_CICoreWindowVtbl window_table = {
 	.get_CustomProperties = window_unsupported_get_CustomProperties,
 	.get_FlowDirection = window_unsupported_get_FlowDirection,
 	.put_FlowDirection = window_unsupported_put_FlowDirection,
-	.get_PointerCursor = window_unsupported_get_PointerCursor,
-	.put_PointerCursor = window_unsupported_put_PointerCursor,
+	.get_PointerCursor = window_get_PointerCursor,
+	.put_PointerCursor = window_put_PointerCursor,
 	.get_PointerPosition = window_get_PointerPosition,
 	.GetAsyncKeyState = window_unsupported_GetAsyncKeyState,
 	.GetKeyState = window_unsupported_GetKeyState,
@@ -1254,6 +1555,8 @@ static ULONG WINAPI window_release(core_window *iface)
 		}
 		if (self->dispatcher)
 			dispatcher_release(self->dispatcher);
+		if (self->cursor)
+			__x_ABI_CWindows_CUI_CCore_CICoreCursor_Release(self->cursor);
 		raven_desktop_free(self->desktop);
 		CloseHandle(self->ready);
 		DeleteCriticalSection(&self->lock);
@@ -1561,6 +1864,21 @@ HRESULT raven_window_composition_surface(core_window *iface, HWND *hwnd, float *
 	return S_OK;
 }
 
+/* The cursor class answers by name, the way CoreWindow does at the top of this dispatch: no runtime catalog entry routes
+ * "Windows.UI.Core.CoreCursor" yet (RoGetActivationFactory cannot find it), so the component's own DllGetActivationFactory
+ * is the only path to it until the catalog lists the class. */
+static HRESULT raven_core_cursor_factory(HSTRING name, IActivationFactory **out)
+{
+	UINT32 length = 0;
+	const WCHAR *text = WindowsGetStringRawBuffer(name, &length);
+	if (length != ARRAYSIZE(cursor_name) - 1 ||
+		CompareStringOrdinal(text, (int)length, cursor_name, -1, FALSE) != CSTR_EQUAL)
+		return CLASS_E_CLASSNOTAVAILABLE;
+	InterlockedIncrement(&cursor_factory_instance.refs);
+	*out = (IActivationFactory *)&cursor_factory_instance.activation;
+	return S_OK;
+}
+
 __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActivationFactory **out)
 {
 	UINT32 length = 0;
@@ -1571,7 +1889,9 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 	if (length != ARRAYSIZE(window_name) - 1 ||
 		CompareStringOrdinal(text, (int)length, window_name, -1, FALSE) != CSTR_EQUAL)
 	{
-		HRESULT result = raven_application_factory(name, out);
+		HRESULT result = raven_core_cursor_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_application_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_xaml_application_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)

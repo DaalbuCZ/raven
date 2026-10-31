@@ -9,6 +9,8 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_System
 #include <windows.h>
+#include <winstring.h>
+#include <activation.h>
 #include <windows.ui.core.h>
 #include <windows.ui.input.h>
 #include <windows.devices.input.h>
@@ -97,12 +99,66 @@ static HRESULT WINAPI handler_invoke(handler_interface *iface, ICoreWindow *wind
 		state.retained_args = args; IPointerEventArgs_AddRef(args);
 		state.retained_point = point; IPointerPoint_AddRef(point);
 		state.retained_properties = properties; IPointerPointProperties_AddRef(properties);
+		/* GetIntermediatePoints stays E_NOTIMPL: the desktop input has no history buffer yet (the args snapshot carries
+		 * exactly one point, the CurrentPoint), and the slot lives in the component's desktop window dispatch. */
 	}
 	IPointerPointProperties_Release(properties);
 	IPointerPoint_Release(point);
 	return state.fail_move && event == MOVED ? E_ACCESSDENIED : S_OK;
 }
 static const handler_vtable handler_table = {handler_query, handler_addref, handler_release, handler_invoke};
+
+/* Cursor objects. "Windows.UI.Core.CoreCursor" is cataloged to the component, so the factory resolves the way the
+ * projection resolves any runtime class: through RoGetActivationFactory. */
+static int cursor_checks(ICoreWindow *window)
+{
+	HMODULE combase = LoadLibraryW(L"combase.dll");
+	HRESULT (WINAPI *ro_factory)(HSTRING, REFIID, void **) = combase ?
+		(void *)GetProcAddress(combase, "RoGetActivationFactory") : NULL;
+	if (!ro_factory) return __LINE__;
+	HSTRING name = NULL;
+	static const WCHAR text[] = L"Windows.UI.Core.CoreCursor";
+	if (WindowsCreateString(text, ARRAYSIZE(text) - 1, &name) != S_OK) return __LINE__;
+	ICoreCursorFactory *builder = NULL;
+	if (ro_factory(name, &IID___x_ABI_CWindows_CUI_CCore_CICoreCursorFactory, (void **)&builder) != S_OK || !builder)
+		return __LINE__;
+	IActivationFactory *activation = NULL;
+	if (((IUnknown *)builder)->lpVtbl->QueryInterface((IUnknown *)builder, &IID_IActivationFactory,
+		(void **)&activation) != S_OK || !activation) return __LINE__;
+	/* RoActivateInstance of the class answers the default cursor: the arrow. */
+	ICoreCursor *activated = (void *)1;
+	if (activation->lpVtbl->ActivateInstance(activation, (IInspectable **)&activated) != S_OK || !activated) return __LINE__;
+	CoreCursorType type = CoreCursorType_Custom;
+	if (activated->lpVtbl->get_Type(activated, &type) != S_OK || type != CoreCursorType_Arrow) return __LINE__;
+	activated->lpVtbl->Release(activated);
+	/* The factory builds a cursor of the requested type; an out-of-range type is rejected. */
+	ICoreCursor *hand = NULL;
+	if (builder->lpVtbl->CreateCursor(builder, CoreCursorType_Hand, 0, &hand) != S_OK || !hand) return __LINE__;
+	if (hand->lpVtbl->get_Type(hand, &type) != S_OK || type != CoreCursorType_Hand) return __LINE__;
+	ICoreCursor *bad = (void *)1;
+	if (builder->lpVtbl->CreateCursor(builder, (CoreCursorType)0x40, 0, &bad) != E_INVALIDARG || bad) return __LINE__;
+	/* The window's cursor: the platform default until an application puts one; the put stores the object itself and a
+	 * NULL put restores the default. */
+	ICoreCursor *current = NULL;
+	if (ICoreWindow_get_PointerCursor(window, &current) != S_OK || !current ||
+		ICoreWindow_get_PointerCursor(window, NULL) != E_POINTER) return __LINE__;
+	if (current->lpVtbl->get_Type(current, &type) != S_OK || type != CoreCursorType_Arrow) return __LINE__;
+	ICoreCursor_Release(current);
+	if (ICoreWindow_put_PointerCursor(window, hand) != S_OK) return __LINE__;
+	ICoreCursor *stored = NULL;
+	if (ICoreWindow_get_PointerCursor(window, &stored) != S_OK || stored != hand) return __LINE__; /* the same object */
+	ICoreCursor_Release(stored);
+	if (ICoreWindow_put_PointerCursor(window, NULL) != S_OK) return __LINE__;
+	if (ICoreWindow_get_PointerCursor(window, &stored) != S_OK || !stored) return __LINE__;
+	if (stored->lpVtbl->get_Type(stored, &type) != S_OK || type != CoreCursorType_Arrow) return __LINE__;
+	ICoreCursor_Release(stored);
+	ICoreCursor_Release(hand);
+	builder->lpVtbl->Release(builder);
+	activation->lpVtbl->Release(activation);
+	FreeLibrary(combase);
+	WindowsDeleteString(name);
+	return 0;
+}
 
 static DWORD WINAPI message_clock_worker(void *context)
 {
@@ -119,6 +175,8 @@ int raven_pointer_checks(ICoreWindow *window, ICoreDispatcher *dispatcher, HWND 
 {
 	state.window = window;
 	state.thread = GetCurrentThreadId();
+	int cursor_result = cursor_checks(window);
+	if (cursor_result) return cursor_result;
 	for (int i = 0; i < POINTER_EVENTS; ++i) {
 		state.handlers[i].lpVtbl = &handler_table;
 		state.handlers[i].refs = 1;

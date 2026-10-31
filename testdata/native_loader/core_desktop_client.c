@@ -258,9 +258,11 @@ int raven_entry(void)
 	Rect bounds;
 	if (ICoreWindow_get_Visible(state->window, &visible) != S_OK || visible ||
 		ICoreWindow_get_Bounds(state->window, &bounds) != S_OK || bounds.Width != 800 || bounds.Height != 600) return 7;
+	/* The window's cursor answers the platform default (the arrow) until an application puts one. */
 	ICoreCursor *cursor = (void *)1;
-	if (ICoreWindow_get_PointerCursor(state->window, &cursor) != E_NOTIMPL || cursor ||
+	if (ICoreWindow_get_PointerCursor(state->window, &cursor) != S_OK || !cursor ||
 		ICoreWindow_get_PointerCursor(state->window, NULL) != E_POINTER) return 26;
+	ICoreCursor_Release(cursor);
 	HANDLE other = CreateThread(NULL, 0, wrong_thread, state, 0, NULL);
 	DWORD code;
 	if (!other || WaitForSingleObject(other, 5000) != WAIT_OBJECT_0 || !GetExitCodeThread(other, &code) || code) return 8;
