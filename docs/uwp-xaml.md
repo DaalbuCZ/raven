@@ -604,14 +604,50 @@ built for both.
   (a NULL HSTRING is the empty key), Insert reports replacement and owns
   values, `E_BOUNDS` on missing Lookup/Remove, HasKey/Size/Clear and a
   live `GetView` — handed out as the same object per get and never
-  freed. It does not yet claim the `PropertySet` runtime class name (its
-  GetRuntimeClassName answers the parameterized IMap name) because the
-  class activation is not wired and the current singleton object cannot
-  be honestly instanced. `RunWithActivationFactories` and suspend/resume
+  freed. The singleton now claims the `PropertySet` runtime class; see the
+  PropertySet entry below. `RunWithActivationFactories` and suspend/resume
   stay `E_NOTIMPL` with the missing pieces named in comments.
   `native_core_application_x64`/`_x32` and `native_package_x64`/`_x32`
   cover the no-package `Id` error, the scanner seam, and the full
   property-set round.
+- PropertySet runtime class (2026-10-31, stage 5): the process property set
+  was refactored from a static singleton into per-instance objects — each
+  carries its own `CRITICAL_SECTION`, entry array and reference count, and
+  releasing the last reference disposes the entries, deletes the lock and
+  balances `raven_xaml_objects` for tracked instances. With real instances
+  the engine now claims the class: `Windows.Foundation.Collections.PropertySet`
+  is in the activation catalog, the factory's `ActivateInstance` builds a
+  tracked instance (the class is activatable, it has no statics), and every
+  part — IPropertySet, IMap, IMapView, factory — answers
+  `GetRuntimeClassName` with `Windows.Foundation.Collections.PropertySet`
+  instead of the parameterized IMap name. `CoreApplication.Properties`
+  remains a process-wide instance created once at attach that holds the
+  engine's permanent reference, so `get_Properties` still answers the same
+  pointer every call. The fixtures prove two activated instances are
+  distinct COM identities with isolated maps, and that their refcounts
+  balance to zero while the singleton survives.
+- Control templates (2026-10-31, stage 4): `Windows.UI.Xaml.Controls.
+  ControlTemplate` is a runtime class with the real `IControlTemplate` ABI
+  (TargetType get/put — the real interface carries no content member; the
+  engine-internal root-attach export fills that role), activatable through
+  the catalog. `Control.Template` exists on the button over the real
+  41-member `IControl` vtable (IIDs sourced from the WDK 8.1 IDL, since no
+  mingw/generated header carries them): `put_Template` accepts only engine
+  templates (`E_INVALIDARG` otherwise), re-put replaces, NULL clears, and
+  the Style setter path routes the `"Template"` pair through the same
+  applier with the check-only validation pass kept — a wrong-kind template
+  fails the whole `put_Style` atomically. While a template is applied the
+  template root **is** the rendered visual tree and the stored Content is
+  not rendered (`get_Content` still answers the logical content); the
+  engine's button has no chrome/ContentPresenter, so a template that wants
+  the content shown must place it itself — the ContentPresenter mechanism
+  is future work. No render-path change was needed: the existing
+  `raven_xaml_frame_render_child` hook answers the template root before the
+  content branch, so both measure and paint pick the template tree up
+  through the same call. `native_style_x64`/`_x32` (template applied
+  through a Style, pixel-proved apply/replace/clear) and
+  `native_xaml_controls_x64`/`_x32` (activation, TargetType round-trip,
+  real-vtable assignment, precedence, clear/re-put) cover the increment.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -1100,6 +1136,9 @@ remain passing after the trial implementation was removed.
    text and content so a compiled page builds a real tree.
    Next: apply the remaining node property forms against the element classes,
    and give the tree its layout and rendering path (composition stage).
+   Remaining there: XBF-declared templates through the loader path, and
+   ContentPresenter support so templates can show the control's content
+   (2026-10-31).
 4. Extend DispatcherQueue with standalone controllers and deferred shutdown when
    required by app traces.
 5. ~~Finish pointer history/static access, cursor objects and touch/pen
