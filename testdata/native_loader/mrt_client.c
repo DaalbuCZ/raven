@@ -12,6 +12,8 @@
 #include <windows.h>
 #include <winstring.h>
 #include <activation.h>
+#include <eventtoken.h>
+#include <weakreference.h>
 #include "windows_applicationmodel_resources.h"
 #include "windows_applicationmodel_resources_core.h"
 
@@ -76,6 +78,175 @@ struct fixture_qualifier_view {
 };
 
 DEFINE_GUID(fixture_qualifier_view_iid, 0xb82c58dc, 0x1cc0, 0x53f0, 0xb0, 0xf4, 0x66, 0xef, 0x39, 0xa8, 0x1c, 0xd6);
+
+/* IMap`2<HSTRING,HSTRING>, the map behind QualifierValues. */
+typedef struct fixture_map fixture_map;
+typedef struct fixture_map_vtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(fixture_map *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(fixture_map *This);
+	ULONG (STDMETHODCALLTYPE *Release)(fixture_map *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(fixture_map *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(fixture_map *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(fixture_map *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *Lookup)(fixture_map *This, HSTRING key, HSTRING *value);
+	HRESULT (STDMETHODCALLTYPE *get_Size)(fixture_map *This, UINT32 *value);
+	HRESULT (STDMETHODCALLTYPE *HasKey)(fixture_map *This, HSTRING key, boolean *found);
+	HRESULT (STDMETHODCALLTYPE *GetView)(fixture_map *This, void **view);
+	HRESULT (STDMETHODCALLTYPE *Insert)(fixture_map *This, HSTRING key, HSTRING value, boolean *replaced);
+	HRESULT (STDMETHODCALLTYPE *Remove)(fixture_map *This, HSTRING key);
+	HRESULT (STDMETHODCALLTYPE *Clear)(fixture_map *This);
+	END_INTERFACE
+} fixture_map_vtbl;
+
+struct fixture_map {
+	CONST_VTBL fixture_map_vtbl *lpVtbl;
+};
+
+DEFINE_GUID(fixture_map_iid, 0xf6d1f700, 0x49c2, 0x52ae, 0x81, 0x54, 0x82, 0x6f, 0x99, 0x08, 0x77, 0x3c);
+
+/* IObservableMap<HSTRING,HSTRING>: the QualifierValues property's declared type, carrying the two event methods over
+   IInspectable; the map methods are reached through QueryInterface for IMap`2. */
+typedef struct fixture_observable_map fixture_observable_map;
+typedef struct fixture_observable_map_vtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(fixture_observable_map *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(fixture_observable_map *This);
+	ULONG (STDMETHODCALLTYPE *Release)(fixture_observable_map *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(fixture_observable_map *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(fixture_observable_map *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(fixture_observable_map *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *add_MapChanged)(fixture_observable_map *This, void *handler, EventRegistrationToken *token);
+	HRESULT (STDMETHODCALLTYPE *remove_MapChanged)(fixture_observable_map *This, EventRegistrationToken token);
+	END_INTERFACE
+} fixture_observable_map_vtbl;
+
+struct fixture_observable_map {
+	CONST_VTBL fixture_observable_map_vtbl *lpVtbl;
+};
+
+DEFINE_GUID(fixture_observable_map_iid, 0x1e036276, 0x2f60, 0x55f6, 0xb7, 0xf3, 0xf8, 0x60, 0x79, 0xe6, 0x90, 0x0b);
+
+/* IVectorView`1<String>, the Languages property's declared type. */
+typedef struct fixture_vector_string fixture_vector_string;
+typedef struct fixture_vector_string_vtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(fixture_vector_string *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(fixture_vector_string *This);
+	ULONG (STDMETHODCALLTYPE *Release)(fixture_vector_string *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(fixture_vector_string *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(fixture_vector_string *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(fixture_vector_string *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *GetAt)(fixture_vector_string *This, UINT32 index, HSTRING *value);
+	HRESULT (STDMETHODCALLTYPE *get_Size)(fixture_vector_string *This, UINT32 *value);
+	HRESULT (STDMETHODCALLTYPE *IndexOf)(fixture_vector_string *This, HSTRING element, UINT32 *index, boolean *found);
+	HRESULT (STDMETHODCALLTYPE *GetMany)(fixture_vector_string *This, UINT32 start_index, UINT32 items_size,
+		HSTRING *items, UINT32 *value);
+	END_INTERFACE
+} fixture_vector_string_vtbl;
+
+struct fixture_vector_string {
+	CONST_VTBL fixture_vector_string_vtbl *lpVtbl;
+};
+
+/* The MapChanged handler the fixture subscribes: the component holds it through its AddRef while subscribed. */
+typedef struct fixture_handler fixture_handler;
+typedef struct fixture_handler_vtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(fixture_handler *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(fixture_handler *This);
+	ULONG (STDMETHODCALLTYPE *Release)(fixture_handler *This);
+	HRESULT (STDMETHODCALLTYPE *Invoke)(fixture_handler *This, void *sender, void *args);
+	END_INTERFACE
+} fixture_handler_vtbl;
+
+struct fixture_handler {
+	CONST_VTBL fixture_handler_vtbl *lpVtbl;
+	ULONG refs;
+	ULONG invoked;
+};
+
+DEFINE_GUID(fixture_handler_iid, 0x6a1a6b3b, 0x0f2e, 0x5b3a, 0x9a, 0x1c, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88);
+
+static HRESULT WINAPI fixture_handler_query(fixture_handler *This, REFIID riid, void **object)
+{
+	if (!object) return E_POINTER;
+	*object = NULL;
+	if (!IsEqualIID(riid, &IID_IUnknown) && !IsEqualIID(riid, &IID_IInspectable) && !IsEqualIID(riid, &fixture_handler_iid))
+		return E_NOINTERFACE;
+	*object = This;
+	This->lpVtbl->AddRef(This);
+	return S_OK;
+}
+
+static ULONG WINAPI fixture_handler_addref(fixture_handler *This) { return InterlockedIncrement((LONG *)&This->refs); }
+
+static ULONG WINAPI fixture_handler_release(fixture_handler *This)
+{
+	ULONG refs = InterlockedDecrement((LONG *)&This->refs);
+	if (!refs) HeapFree(GetProcessHeap(), 0, This);
+	return refs;
+}
+
+static HRESULT WINAPI fixture_handler_invoke(fixture_handler *This, void *sender, void *args)
+{
+	(void)sender; (void)args;
+	++This->invoked;
+	return S_OK;
+}
+
+static const fixture_handler_vtbl fixture_handler_vtbl_table = {
+	fixture_handler_query, fixture_handler_addref, fixture_handler_release, fixture_handler_invoke};
+
+/* IWeakReferenceSource and IWeakReference with the Windows ABI: mingw's weakreference.h models them IUnknown-only, but the
+   interfaces derive IInspectable and the one method of each sits at vtable slot 6. */
+typedef struct fixture_weak_ref fixture_weak_ref;
+typedef struct fixture_weak_source fixture_weak_source;
+typedef struct fixture_weak_source_vtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(fixture_weak_source *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(fixture_weak_source *This);
+	ULONG (STDMETHODCALLTYPE *Release)(fixture_weak_source *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(fixture_weak_source *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(fixture_weak_source *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(fixture_weak_source *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *GetWeakReference)(fixture_weak_source *This, fixture_weak_ref **reference);
+	END_INTERFACE
+} fixture_weak_source_vtbl;
+
+struct fixture_weak_source {
+	CONST_VTBL fixture_weak_source_vtbl *lpVtbl;
+};
+
+typedef struct fixture_weak_ref_vtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(fixture_weak_ref *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(fixture_weak_ref *This);
+	ULONG (STDMETHODCALLTYPE *Release)(fixture_weak_ref *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(fixture_weak_ref *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(fixture_weak_ref *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(fixture_weak_ref *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *Resolve)(fixture_weak_ref *This, REFIID iid, IInspectable **object);
+	END_INTERFACE
+} fixture_weak_ref_vtbl;
+
+struct fixture_weak_ref {
+	CONST_VTBL fixture_weak_ref_vtbl *lpVtbl;
+};
+
+DEFINE_GUID(fixture_weak_source_iid, 0x00000038, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+DEFINE_GUID(fixture_weak_ref_iid, 0x00000037, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+
+/* The handler the component sees is a heap object of the handler shape, freed after the unsubscribe below. */
+static fixture_handler *fixture_handler_create(void)
+{
+	fixture_handler *handler = (fixture_handler *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *handler);
+	if (!handler)
+		return NULL;
+	handler->lpVtbl = (fixture_handler_vtbl *)&fixture_handler_vtbl_table;
+	handler->refs = 1;
+	return handler;
+}
 
 #ifndef E_BOUNDS
 #define E_BOUNDS ((HRESULT)0x8000000b)
@@ -357,6 +528,68 @@ int raven_entry(void)
 	candidate = NULL;
 	named->lpVtbl->Release(named);
 	named = NULL;
+	/* QualifierValues is the observable map of qualifiers: the runtime's interface dispatch subscribes MapChanged on it, the
+	   XAML resource read looks the language up, and the projection takes a weak reference to the context. */
+	{
+		fixture_observable_map *observable = NULL;
+		fixture_map *values = NULL;
+		fixture_handler *handler = fixture_handler_create();
+		fixture_vector_string *languages = NULL;
+		fixture_weak_source *weak_source = NULL;
+		fixture_weak_ref *weak = NULL;
+		context_i *resolved = NULL;
+		HSTRING key = NULL, value = NULL, language = NULL;
+		EventRegistrationToken token;
+		if (!handler) return 60;
+		if (context->lpVtbl->get_QualifierValues(context, (uint64_t)(uintptr_t)&observable) != S_OK || !observable) return 61;
+		if (observable->lpVtbl->QueryInterface(observable, &fixture_map_iid, (void **)&values) != S_OK || !values) return 62;
+		/* the language qualifier answers from the host's default UI language, and a key the map does not hold answers
+		   the documented miss */
+		if (WindowsCreateString(L"language", 8, &key) != S_OK || !key) return 63;
+		if (values->lpVtbl->Lookup(values, key, &value) != S_OK || !value) return 64;
+		if (!same_text(value, L"en-US")) return 65;
+		WindowsDeleteString(value);
+		value = NULL;
+		WindowsDeleteString(key);
+		key = NULL;
+		if (values->lpVtbl->Lookup(values, greeting_key, &value) != E_BOUNDS || value) return 66;
+		/* the subscription answers a token, holds the handler while it is subscribed, and the removal takes it back */
+		if (observable->lpVtbl->add_MapChanged(observable, handler, &token) != S_OK || !token.value) return 67;
+		if (handler->refs != 2) return 68; /* the map holds the handler while it is subscribed */
+		if (observable->lpVtbl->remove_MapChanged(observable, token) != S_OK) return 69;
+		if (handler->refs != 1) return 70; /* the removal released the map's reference */
+		/* the context answers the weak reference the projection takes, and the weak reference resolves to the context */
+		if (context->lpVtbl->QueryInterface(context, &fixture_weak_source_iid, (void **)&weak_source) != S_OK ||
+			!weak_source) return 71;
+		if (weak_source->lpVtbl->GetWeakReference(weak_source, &weak) != S_OK || !weak) return 72;
+		if (weak->lpVtbl->Resolve(weak, &IID__x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContext,
+			(IInspectable **)&resolved) != S_OK || !resolved) return 73;
+		resolved->lpVtbl->Release(resolved);
+		resolved = NULL;
+		weak->lpVtbl->Release(weak);
+		weak = NULL;
+		weak_source->lpVtbl->Release(weak_source);
+		weak_source = NULL;
+		/* Languages is the read-only view over the host's default UI language */
+		if (context->lpVtbl->get_Languages(context, (uint64_t)(uintptr_t)&languages) != S_OK || !languages) return 74;
+		if (languages->lpVtbl->get_Size(languages, &size) != S_OK || size != 1) return 75;
+		if (languages->lpVtbl->GetAt(languages, 0, &language) != S_OK || !language) return 76;
+		if (!WindowsGetStringLen(language)) return 77;
+		WindowsDeleteString(language);
+		language = NULL;
+		if (languages->lpVtbl->GetAt(languages, 1, &language) != E_BOUNDS || language) return 78;
+		WindowsDeleteString(language);
+		language = NULL;
+		/* the view is its own IUnknown: the release through it is the last reference */
+		languages->lpVtbl->Release(languages);
+		languages = NULL;
+		observable->lpVtbl->Release(observable);
+		observable = NULL;
+		values->lpVtbl->Release(values);
+		values = NULL;
+		fixture_handler_release(handler);
+		handler = NULL;
+	}
 	context->lpVtbl->Release(context);
 	context = NULL;
 	context_statics->lpVtbl->Release(context_statics);

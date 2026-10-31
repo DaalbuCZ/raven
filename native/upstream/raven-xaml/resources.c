@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include <windows.foundation.h>
+#include <weakreference.h>
 #include "windows_applicationmodel_resources.h"
 
 typedef __x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContext resource_context;
@@ -40,6 +41,24 @@ static HRESULT inspectable_trust(TrustLevel *level)
 	return S_OK;
 }
 
+/* GetIids answers the interfaces the object really implements, never an empty list: .NET Native walks it to resolve the
+ * parameterized interfaces of a projected object. */
+static HRESULT static_iids(const IID *list, ULONG size, ULONG *count, IID **iids)
+{
+	IID *copy;
+	if (!count || !iids)
+		return E_POINTER;
+	*count = 0;
+	*iids = NULL;
+	copy = (IID *)HeapAlloc(GetProcessHeap(), 0, size * sizeof *copy);
+	if (!copy)
+		return E_OUTOFMEMORY;
+	memcpy(copy, list, size * sizeof *copy);
+	*count = size;
+	*iids = copy;
+	return S_OK;
+}
+
 static HRESULT runtime_class_name(HSTRING *name)
 {
 	if (!name)
@@ -63,6 +82,189 @@ static int equal_iid(REFIID left, const IID *right)
 	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2, uint64_t a3) \
 	{ (void)This; (void)a1; (void)a2; (void)a3;return E_NOTIMPL; }
 
+/* Weak references: .NET Native takes IWeakReferenceSource on every WinRT object it projects (RoWeakReference-like lifetime
+ * management) and treats its absence on a context as a hard error. The source is a part of the owning object; the reference it
+ * hands out resolves through the owner's own QueryInterface while the owner's reference count is live, and answers a null
+ * interface once it is not. The owner is expected to zero its weak part when it frees itself, so a stale reference cannot resolve. */
+typedef HRESULT (WINAPI *weak_query_fn)(void *owner, REFIID iid, void **out);
+
+/* mingw's weakreference.h models both interfaces as IUnknown-only; the Windows ABI derives them from IInspectable, with the
+ * one method at vtable slot 6, which is the layout .NET Native was compiled against. */
+struct weak_source_vtbl {
+	HRESULT (WINAPI *QueryInterface)(IWeakReferenceSource *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(IWeakReferenceSource *);
+	ULONG (WINAPI *Release)(IWeakReferenceSource *);
+	HRESULT (WINAPI *GetIids)(IWeakReferenceSource *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(IWeakReferenceSource *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(IWeakReferenceSource *, TrustLevel *);
+	HRESULT (WINAPI *GetWeakReference)(IWeakReferenceSource *, IWeakReference **);
+};
+
+struct weak_source {
+	const struct weak_source_vtbl *lpVtbl;
+	void *owner;
+	LONG *owner_refs;
+	weak_query_fn owner_query;
+};
+
+struct weak_ref_vtbl {
+	HRESULT (WINAPI *QueryInterface)(IWeakReference *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(IWeakReference *);
+	ULONG (WINAPI *Release)(IWeakReference *);
+	HRESULT (WINAPI *GetIids)(IWeakReference *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(IWeakReference *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(IWeakReference *, TrustLevel *);
+	HRESULT (WINAPI *Resolve)(IWeakReference *, REFIID, IInspectable **);
+};
+
+struct weak_ref {
+	const struct weak_ref_vtbl *lpVtbl;
+	void *owner;
+	LONG *owner_refs;
+	weak_query_fn owner_query;
+};
+
+static HRESULT WINAPI weak_source_query(IWeakReferenceSource *iface, REFIID iid, void **out)
+{
+	struct weak_source *self = (struct weak_source *)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID_IWeakReferenceSource))
+		return E_NOINTERFACE;
+	InterlockedIncrement(self->owner_refs);
+	*out = iface;
+	return S_OK;
+}
+
+static ULONG WINAPI weak_source_addref(IWeakReferenceSource *iface)
+{
+	return (ULONG)InterlockedIncrement(((struct weak_source *)iface)->owner_refs);
+}
+
+static ULONG WINAPI weak_source_release(IWeakReferenceSource *iface)
+{
+	return (ULONG)InterlockedDecrement(((struct weak_source *)iface)->owner_refs);
+}
+
+static HRESULT WINAPI weak_source_iids(IWeakReferenceSource *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI weak_source_name(IWeakReferenceSource *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	/* The source is a part of the owner; the owner's own class name answers GetRuntimeClassName through its QueryInterface. */
+	return E_NOTIMPL; /* not observed: callers read the class name from the object, not from this part */
+}
+
+static HRESULT WINAPI weak_source_trust(IWeakReferenceSource *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static const struct weak_ref_vtbl weak_ref_table;
+
+static HRESULT WINAPI weak_source_get_weak_reference(IWeakReferenceSource *iface, IWeakReference **out)
+{
+	struct weak_source *self = (struct weak_source *)iface;
+	struct weak_ref *reference;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	reference = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *reference);
+	if (!reference)
+		return E_OUTOFMEMORY;
+	reference->lpVtbl = (const struct weak_ref_vtbl *)&weak_ref_table;
+	reference->owner = self->owner;
+	reference->owner_refs = self->owner_refs;
+	reference->owner_query = self->owner_query;
+	InterlockedIncrement(self->owner_refs);
+	*out = (IWeakReference *)reference;
+	return S_OK;
+}
+
+static const struct weak_source_vtbl weak_source_table = {
+	.QueryInterface = weak_source_query, .AddRef = weak_source_addref, .Release = weak_source_release,
+	.GetIids = weak_source_iids, .GetRuntimeClassName = weak_source_name, .GetTrustLevel = weak_source_trust,
+	.GetWeakReference = weak_source_get_weak_reference,
+};
+
+static HRESULT WINAPI weak_ref_query(IWeakReference *iface, REFIID iid, void **out)
+{
+	struct weak_ref *self = (struct weak_ref *)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, &IID_IWeakReference))
+		return E_NOINTERFACE;
+	InterlockedIncrement(self->owner_refs);
+	*out = iface;
+	return S_OK;
+}
+
+static ULONG WINAPI weak_ref_addref(IWeakReference *iface)
+{
+	return (ULONG)InterlockedIncrement(((struct weak_ref *)iface)->owner_refs);
+}
+
+static ULONG WINAPI weak_ref_release(IWeakReference *iface)
+{
+	struct weak_ref *self = (struct weak_ref *)iface;
+	const LONG refs = InterlockedDecrement(self->owner_refs);
+	if (!refs) {
+		self->owner = NULL;
+		self->owner_refs = NULL;
+		self->owner_query = NULL;
+		HeapFree(GetProcessHeap(), 0, self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI weak_ref_iids(IWeakReference *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI weak_ref_name(IWeakReference *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return E_NOTIMPL; /* not observed: see weak_source_name */
+}
+
+static HRESULT WINAPI weak_ref_trust(IWeakReference *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI weak_ref_resolve(IWeakReference *iface, REFIID iid, IInspectable **out)
+{
+	struct weak_ref *self = (struct weak_ref *)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!self->owner_query || !self->owner_refs || *self->owner_refs <= 0)
+		return S_OK; /* the owner is gone: a weak resolution answers null, not an error */
+	return self->owner_query(self->owner, iid, (void **)out);
+}
+
+static const struct weak_ref_vtbl weak_ref_table = {
+	.QueryInterface = weak_ref_query, .AddRef = weak_ref_addref, .Release = weak_ref_release,
+	.GetIids = weak_ref_iids, .GetRuntimeClassName = weak_ref_name, .GetTrustLevel = weak_ref_trust,
+	.Resolve = weak_ref_resolve,
+};
+
 struct factory;
 struct context;
 
@@ -84,6 +286,7 @@ struct factory {
 struct context {
 	const __x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContextVtbl *lpVtbl;
 	LONG refs;
+	struct weak_source weak;
 };
 
 static HRESULT factory_query(struct factory *self, REFIID iid, void **out)
@@ -199,6 +402,170 @@ static const __x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceConte
 	.put_Languages = context_put_languages,
 };
 
+/* ResourceContext.Languages: the UI language list .NET Native reads after it subscribes to qualifier changes; a bare E_NOTIMPL
+ * ends the application's resource initialization. The list is the host's default UI language, read-only: Windows answers put with
+ * S_OK and no carry-over because the context is not yet configurable. */
+DEFINE_GUID(IID___FIVectorView_1_HSTRING_local, 0x2f13c006, 0xa03a, 0x5f69, 0xb0, 0x90, 0x75, 0xa4, 0x3e, 0x33, 0x42, 0x3e);
+#define lang_list_iid IID___FIVectorView_1_HSTRING
+
+struct language_list {
+	const __FIVectorView_1_HSTRINGVtbl *lpVtbl;
+	LONG refs;
+	HSTRING language;
+	struct weak_source weak;
+};
+
+static const WCHAR *language_list_value(void)
+{
+	static WCHAR name[LOCALE_NAME_MAX_LENGTH];
+	if (!name[0]) {
+		int length = LCIDToLocaleName((LCID)(uintptr_t)GetUserDefaultUILanguage(), name, LOCALE_NAME_MAX_LENGTH, 0);
+		if (!length)
+			lstrcpynW(name, L"en-US", LOCALE_NAME_MAX_LENGTH);
+	}
+	return name;
+}
+
+static HRESULT WINAPI lang_query(__FIVectorView_1_HSTRING *iface, REFIID iid, void **out)
+{
+	struct language_list *self = (struct language_list *)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IWeakReferenceSource))
+		*out = &self->weak;
+	else if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID___FIVectorView_1_HSTRING))
+		*out = iface;
+	else
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	return S_OK;
+}
+
+static ULONG WINAPI lang_addref(__FIVectorView_1_HSTRING *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct language_list *)iface)->refs);
+}
+
+static ULONG WINAPI lang_release(__FIVectorView_1_HSTRING *iface)
+{
+	struct language_list *self = (struct language_list *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->language)
+			WindowsDeleteString(self->language);
+		HeapFree(GetProcessHeap(), 0, self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI lang_iids(__FIVectorView_1_HSTRING *iface, ULONG *count, IID **iids)
+{
+	static const IID list[] = { IID___FIVectorView_1_HSTRING };
+	(void)iface;
+	return static_iids(list, (ULONG)ARRAYSIZE(list), count, iids);
+}
+
+static HRESULT WINAPI lang_name(__FIVectorView_1_HSTRING *iface, HSTRING *name)
+{
+	static const WCHAR list_name_text[] = L"Windows.Foundation.Collections.IVectorView`1<String>";
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(list_name_text, (UINT32)lstrlenW(list_name_text), name);
+}
+
+static HRESULT WINAPI lang_trust(__FIVectorView_1_HSTRING *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT language_read(HSTRING *out)
+{
+	const WCHAR *text = language_list_value();
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	return WindowsCreateString(text, (UINT32)lstrlenW(text), out);
+}
+
+static HRESULT WINAPI lang_get_at(__FIVectorView_1_HSTRING *iface, UINT32 index, HSTRING *out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	if (index)
+		return 0x8000000bU; /* E_BOUNDS: the list holds exactly the default UI language */
+	return language_read(out);
+}
+
+static HRESULT WINAPI lang_size(__FIVectorView_1_HSTRING *iface, UINT32 *size)
+{
+	(void)iface;
+	if (!size)
+		return E_POINTER;
+	*size = 1;
+	return S_OK;
+}
+
+static HRESULT WINAPI lang_index_of(__FIVectorView_1_HSTRING *iface, HSTRING value, UINT32 *index, boolean *found)
+{
+	UINT32 other_length = 0;
+	const WCHAR *text = value ? WindowsGetStringRawBuffer(value, &other_length) : NULL;
+	(void)iface;
+	if (!index || !found)
+		return E_POINTER;
+	*found = FALSE;
+	*index = 0;
+	if (text) {
+		const WCHAR *own = language_list_value();
+		if (CompareStringOrdinal(text, (int)other_length, own, -1, FALSE) == CSTR_EQUAL)
+			*found = TRUE;
+	}
+	return S_OK;
+}
+
+static HRESULT WINAPI lang_get_many(__FIVectorView_1_HSTRING *iface, UINT32 start, UINT32 items_size, HSTRING *items,
+	UINT32 *count)
+{
+	(void)iface;
+	if (!items || !count)
+		return E_POINTER;
+	*count = 0;
+	if (start)
+		return 0x8000000bU; /* E_BOUNDS */
+	if (!items_size)
+		return S_OK;
+	if (language_read(items))
+		return S_OK;
+	*count = 1;
+	return S_OK;
+}
+
+static const __FIVectorView_1_HSTRINGVtbl language_table = {
+	.QueryInterface = lang_query, .AddRef = lang_addref, .Release = lang_release,
+	.GetIids = lang_iids, .GetRuntimeClassName = lang_name, .GetTrustLevel = lang_trust,
+	.GetAt = lang_get_at, .get_Size = lang_size, .IndexOf = lang_index_of, .GetMany = lang_get_many,
+};
+
+static struct language_list *create_language_list(void)
+{
+	struct language_list *list = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *list);
+	if (!list)
+		return NULL;
+	list->lpVtbl = &language_table;
+	list->refs = 1;
+	list->weak.lpVtbl = &weak_source_table;
+	list->weak.owner = list;
+	list->weak.owner_refs = &list->refs;
+	list->weak.owner_query = (weak_query_fn)lang_query;
+	InterlockedIncrement(&raven_xaml_objects);
+	return list;
+}
+
 static struct context *create_context(void)
 {
 	struct context *context = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *context);
@@ -206,6 +573,10 @@ static struct context *create_context(void)
 		return NULL;
 	context->lpVtbl = &context_table;
 	context->refs = 1;
+	context->weak.lpVtbl = &weak_source_table;
+	context->weak.owner = context;
+	context->weak.owner_refs = &context->refs;
+	context->weak.owner_query = (weak_query_fn)context_query;
 	InterlockedIncrement(&raven_xaml_objects);
 	return context;
 }
@@ -215,6 +586,12 @@ static HRESULT WINAPI context_query(resource_context *iface, REFIID iid, void **
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
+	if (equal_iid(iid, &IID_IWeakReferenceSource)) {
+		struct context *self = (struct context *)iface;
+		InterlockedIncrement(&self->refs);
+		*out = &self->weak;
+		return S_OK;
+	}
 	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
 		!equal_iid(iid, &IID__x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContext))
 		return E_NOINTERFACE;
@@ -241,8 +618,11 @@ static ULONG WINAPI context_release(resource_context *iface)
 
 static HRESULT WINAPI context_iids(resource_context *iface, ULONG *count, IID **iids)
 {
+	static const IID list[] = {
+		IID__x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContext,
+	};
 	(void)iface;
-	return inspectable_iids(count, iids);
+	return static_iids(list, (ULONG)ARRAYSIZE(list), count, iids);
 }
 
 static HRESULT WINAPI context_name(resource_context *iface, HSTRING *name)
@@ -259,7 +639,46 @@ static HRESULT WINAPI context_trust(resource_context *iface, TrustLevel *level)
 
 /* The qualifier and language collections need their generic interfaces; no observed startup path reads them yet. */
 /* The qualifier map XAML reads before it resolves resources: the host's language, scale and contrast, which are the values a
- * resource context starts with. The map is read-only: insertion, removal and clearing answer E_NOTIMPL. */
+ * resource context starts with. The map is read-only and constant: insertion, removal and clearing answer E_NOTIMPL, and because
+ * no entry ever changes, MapChanged handlers are accepted and stored but never raised. .NET Native subscribes through
+ * IObservableMap<HSTRING,HSTRING> right after it acquires QualifierValues, so the interface must answer or the runtime's
+ * interface dispatch misfires and it fail-fasts. The instantiation IID below is the RFC 4122 version-5 UUID (SHA-1) of the
+ * instance signature "pinterface({65df2bf5-bf39-41b5-aebc-5a9d865e472b};string;string)" under the WinRT namespace
+ * 11f47ad5-7b73-42c0-abae-878b1e16adee; the same computation reproduces the precomputed GUIDs of mingw's windows.foundation.h
+ * for IMap`2, IMapView`2, IObservableMap`2<HSTRING,IInspectable> and IIterable`1<HSTRING>. */
+DEFINE_GUID(IID___FIObservableMap_2_HSTRING_HSTRING, 0x1e036276, 0x2f60, 0x55f6, 0xb7, 0xf3, 0xf8, 0x60, 0x79, 0xe6, 0x90, 0x0b);
+
+typedef struct __FIObservableMap_2_HSTRING_HSTRING __FIObservableMap_2_HSTRING_HSTRING;
+typedef struct __FIMapChangedEventHandler_2_HSTRING_HSTRING __FIMapChangedEventHandler_2_HSTRING_HSTRING;
+
+/* IMapChangedEventHandler<HSTRING,HSTRING>: the delegate a subscriber passes. The map never changes, so Invoke is declared for
+ * layout only and is never called. */
+typedef struct __FIMapChangedEventHandler_2_HSTRING_HSTRINGVtbl {
+	HRESULT (WINAPI *QueryInterface)(__FIMapChangedEventHandler_2_HSTRING_HSTRING *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(__FIMapChangedEventHandler_2_HSTRING_HSTRING *);
+	ULONG (WINAPI *Release)(__FIMapChangedEventHandler_2_HSTRING_HSTRING *);
+	HRESULT (WINAPI *Invoke)(__FIMapChangedEventHandler_2_HSTRING_HSTRING *,
+		__FIObservableMap_2_HSTRING_HSTRING *, __FIMapChangedEventArgs_1_HSTRING *);
+} __FIMapChangedEventHandler_2_HSTRING_HSTRINGVtbl;
+
+struct __FIMapChangedEventHandler_2_HSTRING_HSTRING {
+	CONST_VTBL __FIMapChangedEventHandler_2_HSTRING_HSTRINGVtbl *lpVtbl;
+};
+
+/* The IObservableMap<HSTRING,HSTRING> interface carries only its two event methods over IInspectable; the map methods are
+ * reached through QueryInterface for IMap`2, exactly as the Windows runtime class does. */
+typedef struct __FIObservableMap_2_HSTRING_HSTRINGVtbl {
+	HRESULT (WINAPI *QueryInterface)(__FIObservableMap_2_HSTRING_HSTRING *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(__FIObservableMap_2_HSTRING_HSTRING *);
+	ULONG (WINAPI *Release)(__FIObservableMap_2_HSTRING_HSTRING *);
+	HRESULT (WINAPI *GetIids)(__FIObservableMap_2_HSTRING_HSTRING *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(__FIObservableMap_2_HSTRING_HSTRING *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(__FIObservableMap_2_HSTRING_HSTRING *, TrustLevel *);
+	HRESULT (WINAPI *add_MapChanged)(__FIObservableMap_2_HSTRING_HSTRING *, __FIMapChangedEventHandler_2_HSTRING_HSTRING *,
+		EventRegistrationToken *);
+	HRESULT (WINAPI *remove_MapChanged)(__FIObservableMap_2_HSTRING_HSTRING *, EventRegistrationToken);
+} __FIObservableMap_2_HSTRING_HSTRINGVtbl;
+
 struct qualifiers;
 
 struct qualifier_view {
@@ -267,10 +686,25 @@ struct qualifier_view {
 	struct qualifiers *owner;
 };
 
+struct qualifier_observable {
+	const __FIObservableMap_2_HSTRING_HSTRINGVtbl *lpVtbl;
+	struct qualifiers *owner;
+};
+
+struct qualifier_subscription {
+	LONGLONG token;
+	__FIMapChangedEventHandler_2_HSTRING_HSTRING *handler;
+};
+
 struct qualifiers {
 	const __FIMap_2_HSTRING_HSTRINGVtbl *lpVtbl;
 	LONG refs;
 	struct qualifier_view view;
+	struct qualifier_observable observable;
+	struct weak_source weak;
+	struct qualifier_subscription *subscriptions;
+	size_t subscription_count, subscription_capacity;
+	LONGLONG next_token;
 };
 
 typedef struct qualifier_value { const WCHAR *name, *value; } qualifier_value;
@@ -293,11 +727,15 @@ static const WCHAR *match_qualifier(const WCHAR *text, UINT32 length)
 
 static const WCHAR *qualifier_lookup(HSTRING key, UINT32 *length)
 {
+	const WCHAR *text;
 	if (!key) {
 		*length = 0;
 		return NULL;
 	}
-	return match_qualifier(WindowsGetStringRawBuffer(key, length), *length);
+	/* the buffer and its length must be read before the length is passed on: the argument expression *length would be
+	 * evaluated before the call writes through it */
+	text = WindowsGetStringRawBuffer(key, length);
+	return match_qualifier(text, *length);
 }
 
 static HRESULT qualifier_read(HSTRING key, HSTRING *out)
@@ -388,6 +826,17 @@ static HRESULT WINAPI view_has_key(__FIMapView_2_HSTRING_HSTRING *iface, HSTRING
 static HRESULT WINAPI view_split(__FIMapView_2_HSTRING_HSTRING *iface, __FIMapView_2_HSTRING_HSTRING **first,
 	__FIMapView_2_HSTRING_HSTRING **second);
 
+static HRESULT WINAPI observable_query(__FIObservableMap_2_HSTRING_HSTRING *iface, REFIID iid, void **out);
+static ULONG WINAPI observable_addref(__FIObservableMap_2_HSTRING_HSTRING *iface);
+static ULONG WINAPI observable_release(__FIObservableMap_2_HSTRING_HSTRING *iface);
+static HRESULT WINAPI observable_iids(__FIObservableMap_2_HSTRING_HSTRING *iface, ULONG *count, IID **iids);
+static HRESULT WINAPI observable_name(__FIObservableMap_2_HSTRING_HSTRING *iface, HSTRING *name);
+static HRESULT WINAPI observable_trust(__FIObservableMap_2_HSTRING_HSTRING *iface, TrustLevel *level);
+static HRESULT WINAPI observable_add_map_changed(__FIObservableMap_2_HSTRING_HSTRING *iface,
+	__FIMapChangedEventHandler_2_HSTRING_HSTRING *handler, EventRegistrationToken *token);
+static HRESULT WINAPI observable_remove_map_changed(__FIObservableMap_2_HSTRING_HSTRING *iface,
+	EventRegistrationToken token);
+
 static const __FIMap_2_HSTRING_HSTRINGVtbl map_table = {
 	.QueryInterface = map_query, .AddRef = map_addref, .Release = map_release,
 	.GetIids = map_iids, .GetRuntimeClassName = map_name, .GetTrustLevel = map_trust,
@@ -401,17 +850,27 @@ static const __FIMapView_2_HSTRING_HSTRINGVtbl view_table = {
 	.Lookup = view_lookup, .get_Size = view_size, .HasKey = view_has_key, .Split = view_split,
 };
 
+static const __FIObservableMap_2_HSTRING_HSTRINGVtbl observable_table = {
+	.QueryInterface = observable_query, .AddRef = observable_addref, .Release = observable_release,
+	.GetIids = observable_iids, .GetRuntimeClassName = observable_name, .GetTrustLevel = observable_trust,
+	.add_MapChanged = observable_add_map_changed, .remove_MapChanged = observable_remove_map_changed,
+};
+
 static HRESULT WINAPI map_query(__FIMap_2_HSTRING_HSTRING *iface, REFIID iid, void **out)
 {
 	struct qualifiers *self = (struct qualifiers *)iface;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+	if (equal_iid(iid, &IID_IWeakReferenceSource)) {
+		*out = &self->weak;
+	} else if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
 		equal_iid(iid, &IID___FIMap_2_HSTRING_HSTRING))
 		*out = iface;
 	else if (equal_iid(iid, &IID___FIMapView_2_HSTRING_HSTRING))
 		*out = &self->view;
+	else if (equal_iid(iid, &IID___FIObservableMap_2_HSTRING_HSTRING))
+		*out = &self->observable;
 	else
 		return E_NOINTERFACE;
 	map_addref(iface);
@@ -428,6 +887,13 @@ static ULONG WINAPI map_release(__FIMap_2_HSTRING_HSTRING *iface)
 	struct qualifiers *self = (struct qualifiers *)iface;
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		for (size_t index = 0; index < self->subscription_count; ++index) {
+			__FIMapChangedEventHandler_2_HSTRING_HSTRING *handler = self->subscriptions[index].handler;
+			if (handler)
+				handler->lpVtbl->Release(handler);
+		}
+		if (self->subscriptions)
+			HeapFree(GetProcessHeap(), 0, self->subscriptions);
 		HeapFree(GetProcessHeap(), 0, self);
 		InterlockedDecrement(&raven_xaml_objects);
 	}
@@ -436,13 +902,18 @@ static ULONG WINAPI map_release(__FIMap_2_HSTRING_HSTRING *iface)
 
 static HRESULT WINAPI map_iids(__FIMap_2_HSTRING_HSTRING *iface, ULONG *count, IID **iids)
 {
+	static const IID list[] = {
+		IID___FIMap_2_HSTRING_HSTRING,
+		IID___FIMapView_2_HSTRING_HSTRING,
+		IID___FIObservableMap_2_HSTRING_HSTRING,
+	};
 	(void)iface;
-	return inspectable_iids(count, iids);
+	return static_iids(list, (ULONG)ARRAYSIZE(list), count, iids);
 }
 
 static HRESULT WINAPI map_name(__FIMap_2_HSTRING_HSTRING *iface, HSTRING *name)
 {
-	static const WCHAR map_name_text[] = L"Windows.Foundation.Collections.IMap`2<Windows.Foundation.HSTRING,Windows.Foundation.HSTRING>";
+	static const WCHAR map_name_text[] = L"Windows.Foundation.Collections.IMap`2<String,String>";
 	(void)iface;
 	if (!name)
 		return E_POINTER;
@@ -473,13 +944,18 @@ static ULONG WINAPI view_release(__FIMapView_2_HSTRING_HSTRING *iface)
 
 static HRESULT WINAPI view_iids(__FIMapView_2_HSTRING_HSTRING *iface, ULONG *count, IID **iids)
 {
+	static const IID list[] = {
+		IID___FIMapView_2_HSTRING_HSTRING,
+		IID___FIMap_2_HSTRING_HSTRING,
+		IID___FIObservableMap_2_HSTRING_HSTRING,
+	};
 	(void)iface;
-	return inspectable_iids(count, iids);
+	return static_iids(list, (ULONG)ARRAYSIZE(list), count, iids);
 }
 
 static HRESULT WINAPI view_name(__FIMapView_2_HSTRING_HSTRING *iface, HSTRING *name)
 {
-	static const WCHAR view_name_text[] = L"Windows.Foundation.Collections.IMapView`2<Windows.Foundation.HSTRING,Windows.Foundation.HSTRING>";
+	static const WCHAR view_name_text[] = L"Windows.Foundation.Collections.IMapView`2<String,String>";
 	(void)iface;
 	if (!name)
 		return E_POINTER;
@@ -536,11 +1012,117 @@ static HRESULT WINAPI view_query(__FIMapView_2_HSTRING_HSTRING *iface, REFIID ii
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+	if (equal_iid(iid, &IID_IWeakReferenceSource))
+		*out = &self->weak;
+	else if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
 		equal_iid(iid, &IID___FIMapView_2_HSTRING_HSTRING))
 		*out = iface;
 	else if (equal_iid(iid, &IID___FIMap_2_HSTRING_HSTRING))
 		*out = self;
+	else if (equal_iid(iid, &IID___FIObservableMap_2_HSTRING_HSTRING))
+		*out = &self->observable;
+	else
+		return E_NOINTERFACE;
+	qualifier_addref(self);
+	return S_OK;
+}
+
+static ULONG WINAPI observable_addref(__FIObservableMap_2_HSTRING_HSTRING *iface)
+{
+	return qualifier_addref(((struct qualifier_observable *)iface)->owner);
+}
+
+static ULONG WINAPI observable_release(__FIObservableMap_2_HSTRING_HSTRING *iface)
+{
+	return map_release((__FIMap_2_HSTRING_HSTRING *)((struct qualifier_observable *)iface)->owner);
+}
+
+static HRESULT WINAPI observable_iids(__FIObservableMap_2_HSTRING_HSTRING *iface, ULONG *count, IID **iids)
+{
+	static const IID list[] = {
+		IID___FIObservableMap_2_HSTRING_HSTRING,
+		IID___FIMap_2_HSTRING_HSTRING,
+		IID___FIMapView_2_HSTRING_HSTRING,
+	};
+	(void)iface;
+	return static_iids(list, (ULONG)ARRAYSIZE(list), count, iids);
+}
+
+static HRESULT WINAPI observable_name(__FIObservableMap_2_HSTRING_HSTRING *iface, HSTRING *name)
+{
+	static const WCHAR observable_name_text[] = L"Windows.Foundation.Collections.IObservableMap`2<String,String>";
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(observable_name_text, (UINT32)lstrlenW(observable_name_text), name);
+}
+
+static HRESULT WINAPI observable_trust(__FIObservableMap_2_HSTRING_HSTRING *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI observable_add_map_changed(__FIObservableMap_2_HSTRING_HSTRING *iface,
+	__FIMapChangedEventHandler_2_HSTRING_HSTRING *handler, EventRegistrationToken *token)
+{
+	struct qualifiers *self = ((struct qualifier_observable *)iface)->owner;
+	if (!token)
+		return E_POINTER;
+	if (!handler)
+		return E_INVALIDARG;
+	if (self->subscription_count == self->subscription_capacity) {
+		const size_t capacity = self->subscription_capacity ? self->subscription_capacity * 2 : 4;
+		struct qualifier_subscription *grown = self->subscriptions
+			? (struct qualifier_subscription *)HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, self->subscriptions,
+				capacity * sizeof *grown)
+			: (struct qualifier_subscription *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, capacity * sizeof *grown);
+		if (!grown) {
+			return E_OUTOFMEMORY;
+		}
+		self->subscriptions = grown;
+		self->subscription_capacity = capacity;
+	}
+	handler->lpVtbl->AddRef(handler);
+	self->subscriptions[self->subscription_count].token = ++self->next_token;
+	self->subscriptions[self->subscription_count].handler = handler;
+	++self->subscription_count;
+	token->value = self->next_token;
+	return S_OK;
+}
+
+static HRESULT WINAPI observable_remove_map_changed(__FIObservableMap_2_HSTRING_HSTRING *iface,
+	EventRegistrationToken token)
+{
+	struct qualifiers *self = ((struct qualifier_observable *)iface)->owner;
+	for (size_t index = 0; index < self->subscription_count; ++index) {
+		if (self->subscriptions[index].token != token.value)
+			continue;
+		__FIMapChangedEventHandler_2_HSTRING_HSTRING *handler = self->subscriptions[index].handler;
+		self->subscriptions[index] = self->subscriptions[self->subscription_count - 1];
+		--self->subscription_count;
+		if (handler)
+			handler->lpVtbl->Release(handler);
+		break;
+	}
+	return S_OK;
+}
+
+static HRESULT WINAPI observable_query(__FIObservableMap_2_HSTRING_HSTRING *iface, REFIID iid, void **out)
+{
+	struct qualifiers *self = ((struct qualifier_observable *)iface)->owner;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IWeakReferenceSource))
+		*out = &self->weak;
+	else if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID___FIObservableMap_2_HSTRING_HSTRING))
+		*out = iface;
+	else if (equal_iid(iid, &IID___FIMap_2_HSTRING_HSTRING))
+		*out = self;
+	else if (equal_iid(iid, &IID___FIMapView_2_HSTRING_HSTRING))
+		*out = &self->view;
 	else
 		return E_NOINTERFACE;
 	qualifier_addref(self);
@@ -556,6 +1138,12 @@ static struct qualifiers *create_qualifiers(void)
 	map->refs = 1;
 	map->view.lpVtbl = &view_table;
 	map->view.owner = map;
+	map->observable.lpVtbl = &observable_table;
+	map->observable.owner = map;
+	map->weak.lpVtbl = &weak_source_table;
+	map->weak.owner = map;
+	map->weak.owner_refs = &map->refs;
+	map->weak.owner_query = (weak_query_fn)map_query;
 	InterlockedIncrement(&raven_xaml_objects);
 	return map;
 }
@@ -568,7 +1156,9 @@ static HRESULT WINAPI context_qualifiers(resource_context *iface, uint64_t out)
 		return E_POINTER;
 	if (!(map = create_qualifiers()))
 		return E_OUTOFMEMORY;
-	*(void **)(uintptr_t)out = map;
+	/* QualifierValues is declared as IObservableMap<HSTRING,HSTRING>: the caller receives the observable part and reaches the
+	 * map methods through its QueryInterface. */
+	*(void **)(uintptr_t)out = &map->observable;
 	return S_OK;
 }
 
@@ -606,10 +1196,14 @@ static HRESULT WINAPI context_clone(resource_context *iface, uint64_t out)
 
 static HRESULT WINAPI context_languages(resource_context *iface, uint64_t out)
 {
+	struct language_list *list;
 	(void)iface;
-	(void)out;
-
-	return E_NOTIMPL;
+	if (!out)
+		return E_POINTER;
+	if (!(list = create_language_list()))
+		return E_OUTOFMEMORY;
+	*(void **)(uintptr_t)out = list;
+	return S_OK;
 }
 
 static HRESULT WINAPI context_put_languages(resource_context *iface, uint64_t list)
