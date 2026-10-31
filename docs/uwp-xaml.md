@@ -520,6 +520,47 @@ built for both.
   pairs read back through `raven_style_setter_count`/`_at`, the defaults
   rendering, attach re-putting the same engine object, the explicit
   override and the clear.
+- DependencyProperty (2026-10-31, stage 4): `Windows.UI.Xaml.DependencyProperty`
+  is a runtime class of the component — a statics-only class like the real
+  one, activation faults `ActivateInstance` and the factory answers
+  `IDependencyPropertyStatics` (`get_UnsetValue` hands out one
+  identity-stable per-process sentinel; `Register` with a hand-rolled
+  `IPropertyMetadata` default creates the property, a duplicate
+  (owner, name) `E_INVALIDARG`, the same name under another owner
+  registers, `RegisterAttached` `E_NOTIMPL` since no attached-property
+  store exists). The real `IDependencyProperty` ABI is exactly one member,
+  `GetMetadata` (the projection's Name/TypeName/OwnerType getters are not
+  in the surface), so the metadata reads go through the engine-internal
+  interop part instead of pretending. A Setter now carries a
+  DependencyProperty (`put_Property`/`get_Property`, engine DPs only) and
+  at application time the DP's registered name flows into the very same
+  (name-string, value) pair store `put_Style` walks — so a DP setter
+  renders exactly like a name setter and the applier is untouched; the
+  no-revert and unknown-name conventions carry over. The catalog routes
+  the class name to the component.
+  `native_style_x64`/`_x32` drive registration, the metadata round-trips,
+  the duplicate/attached contracts, UnsetValue stability, the Setter
+  property round-trip, and the rendered pixel through a DP setter.
+- PointerDevice statics (2026-10-31, stage 4): `Windows.Devices.Input.
+  PointerDevice` answers `IPointerDeviceStatics` through the activation
+  chain (the factory part faults `ActivateInstance` — the real class has
+  no default activation): `GetPointerDevices` returns an owning
+  `IVectorView<PointerDevice>` snapshot over a once-built catalog from
+  the host's own enumeration (`GetRawInputDeviceList` for mice, user32
+  `GetPointerDevices` with a raw-input HID digitizer fallback for
+  touch/pen), and the engine mouse is appended even when the host lists
+  nothing, because the engine synthesizes mouse input and
+  `GetPointerDevice(1)` must always resolve. `GetPointerDevice` answers
+  only id 1 — the id every event reports — and `E_INVALIDARG` for an
+  unknown id. The instance object grew its honest per-device state (a
+  mouse is never integrated, `MaxContacts` 1, the desktop rects), and
+  `SupportedUsages` stays `E_NOTIMPL`: the emulated mouse is a Win32
+  cursor device with no HID report descriptor, so there is no usage
+  collection to answer.
+  `native_core_desktop_x64`/`_x32` check the catalog through both the
+  engine-internal export and `RoGetActivationFactory`, the mouse's COM
+  identity against the event-verified device, the documented values,
+  view bounds/GetMany/IndexOf and a full refcount ledger.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -1011,9 +1052,9 @@ remain passing after the trial implementation was removed.
 4. Extend DispatcherQueue with standalone controllers and deferred shutdown when
    required by app traces.
 5. ~~Finish pointer history/static access, cursor objects and touch/pen
-   delivery as native input sources permit.~~ Pointer history and the
-   CoreCursor/`PointerCursor` objects are done (2026-10-31); remaining:
-   static pointer access and touch/pen delivery as native input sources
-   permit.
+   delivery as native input sources permit.~~ Pointer history, the
+   CoreCursor/`PointerCursor` objects and the `PointerDevice` statics are
+   done (2026-10-31); remaining: touch/pen delivery as native input
+   sources permit.
 6. Extend application startup with manifest identity/entry-point data and
    `RunWithActivationFactories` as the app's startup path requires.
