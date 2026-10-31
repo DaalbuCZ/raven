@@ -38,6 +38,17 @@ static const struct stable_property_entry properties[] = {
 	 * comment in xaml_elements.c). Index verified against scripts/xbf-stable-indices.json's numbering convention
 	 * (property index == array position). */
 	{525, L"ContentTemplate"},
+	/* ContentControl.ContentTemplate: the same member name on the content-control owner. The engine's dispatch applies
+	 * "ContentTemplate" by simple name, so this resolves end-to-end only where the store accepts it — an engine
+	 * ContentPresenter; a real ContentControl (Button) answers the skip convention (S_FALSE) and the loader moves on.
+	 * Index verified against the same convention (properties[833] == "ContentControl_ContentTemplate"). */
+	{833, L"ContentTemplate"},
+	/* TextElement.FontSize and TextElement.Foreground: the attached text properties a real document carries on the
+	 * text elements. The engine's float and text dispatches apply "FontSize" and "Foreground" by simple name, so both
+	 * resolve end-to-end on the engine's text element (TextBlock); an element without the text storage answers the
+	 * skip convention. Indices verified against the same convention (properties[251]/[255]). */
+	{251, L"FontSize"},
+	{255, L"Foreground"},
 	{1047, L"CacheSize"},
 	{832, L"Content"},
 	{2408, L"Content"},

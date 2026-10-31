@@ -329,6 +329,117 @@ static size_t build_tree_document(unsigned char *doc)
 	return 203;
 }
 
+/* A TextBlock whose text properties all arrive by stable index: TextElement.FontSize (251) as a float constant and
+ * TextElement.Foreground (255) as the named-colour string, beside the established TextBlock.Text (800). The empty
+ * metadata section forces every reference through the stable table. The engine's float and text dispatches apply
+ * "FontSize" and "Foreground" by simple name, so the loader resolves both on the TextBlock. */
+static size_t build_text_document(unsigned char *doc)
+{
+	for (size_t index = 0; index < 206; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 8, 38);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	put32(doc, 164, 38);
+	/* create TextBlock (stable 396) */
+	doc[168] = 0x14;
+	doc[169] = (unsigned char)(396 & 0xff);
+	doc[170] = (unsigned char)((396 >> 8) | 0x80);
+	/* TextElement.FontSize (stable 251) = 21.5f */
+	doc[171] = 0x1a;
+	doc[172] = (unsigned char)(251 & 0xff);
+	doc[173] = (unsigned char)((251 >> 8) | 0x80);
+	doc[174] = 0x03;
+	put32(doc, 175, 0x41ac0000); /* the IEEE-754 bits of 21.5f, the float constant kind */
+	/* TextElement.Foreground (stable 255) = "Red", a colour the engine's named-colour path knows */
+	doc[179] = 0x1a;
+	doc[180] = (unsigned char)(255 & 0xff);
+	doc[181] = (unsigned char)((255 >> 8) | 0x80);
+	doc[182] = 0x09;
+	put32(doc, 183, 3);
+	doc[187] = 'R'; doc[189] = 'e'; doc[191] = 'd';
+	/* TextBlock.Text (stable 800) = "Hi" */
+	doc[193] = 0x1a;
+	doc[194] = (unsigned char)(800 & 0xff);
+	doc[195] = (unsigned char)((800 >> 8) | 0x80);
+	doc[196] = 0x09;
+	put32(doc, 197, 2);
+	doc[201] = 'H'; doc[203] = 'i';
+	doc[205] = 0x02;
+	return 206;
+}
+
+/* A presenter carrying its content template by stable index alone: a Grid (442) holds one ContentPresenter (296) under
+ * Panel.Children (648), and the presenter's ContentControl.ContentTemplate (833 — the content-control owner of the
+ * member the presenter store accepts) names a ControlTemplate (191) whose root is a TextBlock (396) with Text (800).
+ * The loader defers the template application to the template scope's pop, so the presenter stores the finished tree. */
+static size_t build_content_template_document(unsigned char *doc)
+{
+	for (size_t index = 0; index < 200; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 8, 32);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	put32(doc, 164, 32);
+	/* create Grid (stable 442) */
+	doc[168] = 0x14;
+	doc[169] = (unsigned char)(442 & 0xff);
+	doc[170] = (unsigned char)((442 >> 8) | 0x80);
+	/* Panel.Children (stable 648) pending */
+	doc[171] = 0x07;
+	doc[172] = (unsigned char)(648 & 0xff);
+	doc[173] = (unsigned char)((648 >> 8) | 0x80);
+	/* create ContentPresenter (stable 296) as the child */
+	doc[174] = 0x14;
+	doc[175] = (unsigned char)(296 & 0xff);
+	doc[176] = (unsigned char)((296 >> 8) | 0x80);
+	/* ContentControl.ContentTemplate (stable 833) pending */
+	doc[177] = 0x07;
+	doc[178] = (unsigned char)(833 & 0xff);
+	doc[179] = (unsigned char)((833 >> 8) | 0x80);
+	/* create ControlTemplate (stable 191): the template scope opens with the deferred application to the presenter */
+	doc[180] = 0x14;
+	doc[181] = (unsigned char)(191 & 0xff);
+	doc[182] = (unsigned char)((191 >> 8) | 0x80);
+	/* create TextBlock (stable 396): the template root */
+	doc[183] = 0x14;
+	doc[184] = (unsigned char)(396 & 0xff);
+	doc[185] = (unsigned char)((396 >> 8) | 0x80);
+	/* TextBlock.Text (stable 800) = "T" */
+	doc[186] = 0x1a;
+	doc[187] = (unsigned char)(800 & 0xff);
+	doc[188] = (unsigned char)((800 >> 8) | 0x80);
+	doc[189] = 0x09;
+	put32(doc, 190, 1);
+	doc[194] = 'T';
+	/* close the TextBlock scope, the template scope (the deferred application fires here), the presenter and the grid */
+	doc[196] = 0x02;
+	doc[197] = 0x02;
+	doc[198] = 0x02;
+	doc[199] = 0x02;
+	return 200;
+}
+
 /* A document whose own metadata table names an application page: the loader resolves it through the application's metadata
  * provider, not through a framework table. */
 static size_t build_provider_document(unsigned char *doc)
@@ -1275,6 +1386,110 @@ int raven_entry(void)
 		content_child = NULL;
 		presenter->lpVtbl->Release(presenter);
 		loaded_button->lpVtbl->Release(loaded_button);
+	}
+
+	/* Stable-index text properties: a TextBlock built entirely through the stable table — the type (396) and the
+	 * TextElement.FontSize (251) and TextElement.Foreground (255) members a real document carries on its text
+	 * elements. The font size readback proves the float dispatch applied the stable-named "FontSize"; the text
+	 * readback proves the document came through; the Foreground colour lands in the engine's text storage the render
+	 * walk reads (the same path the registered TextBlock.Foreground 788 uses — the colour has no public readback). */
+	{
+		unsigned char text_fixture[206];
+		IInspectable *text_root = NULL;
+		textblock1 *fixture_textblock = NULL;
+		HSTRING fixture_text_value = NULL;
+		float fixture_font_size = 0.0f;
+		HRESULT text_doc_status = load(text_fixture, (uint32_t)build_text_document(text_fixture), &text_root);
+		if (text_doc_status != S_OK || !text_root)
+			return 4000 + (int)(text_doc_status & 0xfff);
+		if (text_root->lpVtbl->QueryInterface(text_root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+			(void **)&fixture_textblock) != S_OK || !fixture_textblock) return 4001;
+		if (fixture_textblock->lpVtbl->get_FontSize(fixture_textblock, (uint64_t)(uintptr_t)&fixture_font_size) != S_OK)
+			return 4002;
+		if (fixture_font_size != 21.5f) return 4003;
+		if (fixture_textblock->lpVtbl->get_Text(fixture_textblock, (uint64_t)(uintptr_t)&fixture_text_value) != S_OK ||
+			!fixture_text_value || !same(fixture_text_value, L"Hi", 2)) return 4004;
+		WindowsDeleteString(fixture_text_value);
+		fixture_textblock->lpVtbl->Release(fixture_textblock);
+		text_root->lpVtbl->Release(text_root);
+	}
+
+	/* Stable-index content template: the presenter inside the grid carries ContentControl.ContentTemplate (833) naming
+	 * a ControlTemplate (191) whose root TextBlock the presenter store accepted at the template scope's pop. The
+	 * readback seam proves the stored template's identity and root, and a non-presenter element answers the skip
+	 * convention the registration comment states. */
+	{
+		typedef HRESULT (*get_content_template_function)(IInspectable *, IInspectable **);
+		typedef HRESULT (*template_root_read_function2)(IInspectable *, IInspectable **);
+		get_content_template_function get_content_template = NULL;
+		template_root_read_function2 read_template_root2 = NULL;
+		HMODULE engine = LoadLibraryW(L"raven-xaml.dll");
+		unsigned char presenter_fixture[200];
+		IInspectable *presenter_root = NULL, *stored_template = NULL, *stored_root_child = NULL, *grid_object2 = NULL;
+		panel1 *presenter_panel = NULL;
+		void *presenter_children = NULL;
+		struct fixture_vector *presenter_vector = NULL;
+		IInspectable *presenter_object = NULL;
+		HSTRING presenter_class_name = NULL;
+		textblock1 *stored_textblock = NULL;
+		UINT32 presenter_child_count = 0;
+		static const WCHAR presenter_class2[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
+		if (!engine) return 4100;
+		get_content_template = (get_content_template_function)GetProcAddress(engine, "raven_xaml_element_get_content_template");
+		read_template_root2 = (template_root_read_function2)GetProcAddress(engine, "raven_xaml_control_template_root");
+		if (!get_content_template || !read_template_root2) return 4101;
+		HRESULT presenter_doc_status = load(presenter_fixture, (uint32_t)build_content_template_document(presenter_fixture),
+			&presenter_root);
+		if (presenter_doc_status != S_OK || !presenter_root)
+			return 4102 + (int)(presenter_doc_status & 0xfff);
+		/* the root is itself the grid (no page wraps it) and the presenter is its single child */
+		if (presenter_root->lpVtbl->QueryInterface(presenter_root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+			(void **)&presenter_panel) != S_OK || !presenter_panel) return 4103;
+		grid_object2 = presenter_root;
+		grid_object2->lpVtbl->AddRef(grid_object2);
+		if (presenter_panel->lpVtbl->get_Children(presenter_panel, (uint64_t)(uintptr_t)&presenter_children) != S_OK ||
+			!presenter_children) return 4106;
+		presenter_vector = (struct fixture_vector *)presenter_children;
+		if (presenter_vector->lpVtbl->get_Size(presenter_vector, &presenter_child_count) != S_OK ||
+			presenter_child_count != 1) return 4107;
+		if (presenter_vector->lpVtbl->GetAt(presenter_vector, 0, &presenter_object) != S_OK || !presenter_object)
+			return 4108;
+		if (presenter_object->lpVtbl->GetRuntimeClassName(presenter_object, &presenter_class_name) != S_OK ||
+			!presenter_class_name) return 4109;
+		if (!same(presenter_class_name, presenter_class2, ARRAYSIZE(presenter_class2) - 1)) {
+			WindowsDeleteString(presenter_class_name);
+			return 4110;
+		}
+		WindowsDeleteString(presenter_class_name);
+		/* the stored template: identity and root the deferred application left on the presenter */
+		if (get_content_template(presenter_object, &stored_template) != S_OK || !stored_template) return 4111;
+		{
+			void *template_iface2 = NULL;
+			if (stored_template->lpVtbl->QueryInterface(stored_template,
+				&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, &template_iface2) != S_OK ||
+				!template_iface2) return 4112;
+			((IUnknown *)template_iface2)->lpVtbl->Release((IUnknown *)template_iface2);
+		}
+		if (read_template_root2(stored_template, &stored_root_child) != S_OK || !stored_root_child) return 4113;
+		if (stored_root_child->lpVtbl->QueryInterface(stored_root_child,
+			&IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock, (void **)&stored_textblock) != S_OK ||
+			!stored_textblock) return 4114;
+		{
+			HSTRING stored_text_value = NULL;
+			if (stored_textblock->lpVtbl->get_Text(stored_textblock, (uint64_t)(uintptr_t)&stored_text_value) != S_OK ||
+				!stored_text_value || !same(stored_text_value, L"T", 1)) return 4115;
+			WindowsDeleteString(stored_text_value);
+		}
+		stored_textblock->lpVtbl->Release(stored_textblock);
+		stored_root_child->lpVtbl->Release(stored_root_child);
+		stored_template->lpVtbl->Release(stored_template);
+		/* the skip convention: a grid is not a presenter, so the store answers S_FALSE for it */
+		if (get_content_template(grid_object2, &stored_template) != S_FALSE) return 4116;
+		presenter_vector->lpVtbl->Release(presenter_vector);
+		presenter_panel->lpVtbl->Release(presenter_panel);
+		grid_object2->lpVtbl->Release(grid_object2);
+		presenter_object->lpVtbl->Release(presenter_object);
+		presenter_root->lpVtbl->Release(presenter_root);
 	}
 
 	/* The application metadata provider: the fixture composes its provider onto the XAML Application object, the loader
