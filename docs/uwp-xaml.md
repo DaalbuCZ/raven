@@ -404,9 +404,18 @@ built for both.
   and FromElement give one peer per element per process (a registry keyed by
   the element pointer, holding its own reference; the creation's refcount
   lifecycle was fixed — the peer started at zero and died on the first
-  release). `native_automation_x64`/`_x32` verify peer identity, Owner, the
-  name precedence, GetPattern, content/control flags, the composable factory,
-  and the ownerless peer answering no name.
+  release). The button's peer serves the Invoke pattern (2026-10-31):
+  `GetPattern` hands an `IInvokeProvider` (the interface generated from the
+  winmd into `windows_ui_xaml_automation_provider.h`) whose `Invoke` raises
+  the button's `Click` through the button's own raise, independent of the
+  click mode the way the real `ButtonAutomationPeer.Invoke` calls `OnClick`,
+  synchronously inside the call; peers of other element kinds keep the empty
+  pattern answer, and the x:Name loader path stores names on buttons so the
+  name readback answers. `native_automation_x64`/`_x32` verify peer identity,
+  Owner, the name precedence, GetPattern (the text peers' empty set, the
+  button's Invoke and nothing else), the Invoke-raises-Click round twice,
+  content/control flags, the composable factory, and the ownerless peer
+  answering no name.
 - Pointer input routing (2026-10-28, stage 4's routing begun): the element
   classes answer `IUIElement` (ABI generated from the winmd — the seven
   pointer event pairs with token revocation are real, plus
@@ -423,6 +432,21 @@ built for both.
   `native_xaml_input_x64`/`_x32` inject desktop mouse messages on the interop
   HWND and assert enter/exit, press transitions, exactly one Click on-button
   and none off-button, failure isolation and revocation.
+- Routed-event bubbling (2026-10-31, stage 4): after the target's own
+  delivery, `PointerPressed`, `PointerReleased` and `PointerWheelChanged`
+  bubble — each ancestor's instance handlers run immediate-parent-first up
+  to the root, while the element behavior stays target-only, so a button
+  under an ancestor's pressed handler still clicks exactly once. The press,
+  wheel and fresh-target releases bubble through the recorded containment
+  chain (reverse paint order — the flat geometry standing in for ancestry),
+  a release of a pressed element that still hovers bubbles through its
+  hover-set chain, and one that no longer hovers is delivered alone. An
+  application handler cannot stop the pass: the routed arguments are the
+  CoreWindow's snapshot and carry no `Handled`. Entered, exited, moved and
+  capture-lost keep their single-element delivery. The input fixture's
+  order log asserts child-parent-grandparent per event kind, the
+  click-once round, the not-hovered release and the non-bubbling hover
+  events.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
