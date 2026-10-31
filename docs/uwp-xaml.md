@@ -140,10 +140,16 @@ built for both.
   otherwise; `Properties` is a process-wide property set with real
   `IMap<HSTRING, IInspectable>` semantics (content-compared string keys,
   live view), not yet claiming the `PropertySet` runtime class name since
-  its activation is not wired. Direct view-source
-  startup has empty `Load` entry point, launch arguments and tile ID, and no
-  splash screen. Manifest-driven activation and additional activation-argument
-  interfaces remain for stage 5.
+  its activation is not wired (see the PropertySet entry — claimed
+  2026-10-31). Direct view-source
+  startup has an empty `Load` entry point unless the process carries a
+  manifest `EntryPoint`, which then travels to `Load` as its argument
+  (2026-10-31); launch arguments and tile ID stay empty, and there is no
+  splash screen. `RunWithActivationFactories` remains for stage 5; the
+  manifest `EntryPoint` class name itself is not activated by the
+  component — it names the guest's own Application subclass, resolved
+  through the guest's `IXamlMetadataProvider`, so the factory chain keeps
+  answering `CLASS_E_CLASSNOTAVAILABLE` for it.
 - Desktop CoreWindow: each UI thread owns an initially hidden 800×600 client
   HWND. `Activate` shows and focuses it; `Close`, host `WM_CLOSE` and thread
   teardown destroy it. `ICoreWindowInterop` provides the HWND and one-byte
@@ -636,18 +642,49 @@ built for both.
   templates (`E_INVALIDARG` otherwise), re-put replaces, NULL clears, and
   the Style setter path routes the `"Template"` pair through the same
   applier with the check-only validation pass kept — a wrong-kind template
-  fails the whole `put_Style` atomically. While a template is applied the
-  template root **is** the rendered visual tree and the stored Content is
-  not rendered (`get_Content` still answers the logical content); the
-  engine's button has no chrome/ContentPresenter, so a template that wants
-  the content shown must place it itself — the ContentPresenter mechanism
-  is future work. No render-path change was needed: the existing
-  `raven_xaml_frame_render_child` hook answers the template root before the
-  content branch, so both measure and paint pick the template tree up
-  through the same call. `native_style_x64`/`_x32` (template applied
+  fails the whole `put_Style` atomically. While a template without a
+  ContentPresenter is applied the template root **is** the rendered visual
+  tree and the stored Content is not rendered (`get_Content` still answers
+  the logical content); with a ContentPresenter in the tree, the templated
+  control's logical Content shows inside the template (see the
+  ContentPresenter entry below). No render-path change was needed: the
+  existing `raven_xaml_frame_render_child` hook answers the template root
+  before the content branch, so both measure and paint pick the template
+  tree up through the same call. `native_style_x64`/`_x32` (template applied
   through a Style, pixel-proved apply/replace/clear) and
   `native_xaml_controls_x64`/`_x32` (activation, TargetType round-trip,
   real-vtable assignment, precedence, clear/re-put) cover the increment.
+- XBF-declared templates (2026-10-31, stage 3): the loader's node walker
+  already hands nested element values to properties (that is how
+  `Grid.Children` and `Content` ride), so templates needed only a small
+  hook: the loader recognizes engine ControlTemplate objects, opens a
+  template scope that defers the pending property application until the
+  scope pops (a template is created before its root element, but the
+  control must store it only after the root is attached — a failed
+  application fails the document, an unwind never half-applies), and the
+  next object created under that scope becomes its root via the
+  engine-internal `put_root`. `create_known` resolves the document-named
+  `ControlTemplate` and `ContentPresenter` classes through the engine
+  factories, since the stable type table does not yet carry them — real
+  app XBFs referencing them by stable index still fail until the tables
+  grow the entries. The wiring fixed a real bug: the element set-object
+  path short-circuited `S_FALSE` for any name other than Children/Content,
+  so "Template" never reached the elements dispatch. Covered in
+  `native_xaml_controls_x64`/`_x32` (hand-built XBF: Button with content,
+  a template root grid holding a presenter, template identity, presenter
+  answering the button's content).
+- ContentPresenter (2026-10-31, stage 4): a deliberately narrow element —
+  class name and content resolution only, no `IContentPresenter` surface,
+  no framework-element properties, not in the runtime catalog (activation
+  is engine-internal). It binds a non-owning back-pointer to its templated
+  parent when a button stores a template; the old root is unbound first,
+  so replace/clear can never leave a dangling binding, and a retained
+  presenter after a clear answers no content. At measure/render it
+  resolves the templated parent's Content through the same
+  `raven_xaml_frame_render_child` hook chain. Pixel-proved in
+  `native_style_x64`/`_x32`: a red template root with a presenter shows
+  the button's green content inside it, and clearing falls back to
+  rendering the content directly.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -1136,9 +1173,10 @@ remain passing after the trial implementation was removed.
    text and content so a compiled page builds a real tree.
    Next: apply the remaining node property forms against the element classes,
    and give the tree its layout and rendering path (composition stage).
-   Remaining there: XBF-declared templates through the loader path, and
-   ContentPresenter support so templates can show the control's content
-   (2026-10-31).
+   XBF-declared templates through the loader path and ContentPresenter
+   support landed the same day (see those entries); remaining there:
+   stable-index references in the type/property tables, and generalizing
+   the presenter beyond the button path.
 4. Extend DispatcherQueue with standalone controllers and deferred shutdown when
    required by app traces.
 5. ~~Finish pointer history/static access, cursor objects and touch/pen
@@ -1152,5 +1190,18 @@ remain passing after the trial implementation was removed.
    and `RunWithActivationFactories` as the app's startup path requires.~~
    Partially done (2026-10-31): `CoreApplication.Id` reads the manifest's
    application id and `Properties` is a real process property set;
-   remaining: `RunWithActivationFactories`, manifest-driven activation
-   and the additional activation-argument interfaces.
+   remaining: `RunWithActivationFactories`. Manifest-driven activation is
+   as far as the emulated desktop honestly reaches (2026-10-31): the
+   manifest `EntryPoint` travels to `IFrameworkView::Load` as the launch
+   argument, but the entry-point class name itself is not activated by the
+   component — it names the guest's own Application subclass, served
+   through the guest's `IXamlMetadataProvider`, and no packaged guest
+   process exists to probe host activation with. The launch-args interfaces
+   that exist (`IActivatedEventArgs`, `ILaunchActivatedEventArgs`) are
+   implemented; `IBackgroundActivatedEventArgs` was refused — no
+   background activation is delivered.
+   Remaining there too: XBF-declared templates referencing
+   `Control.Template`/`ControlTemplate`/`ContentPresenter` by *stable
+   index* need entries in the stable property/type tables
+   (scripts/xbf-stable-indices.json) — only document-table references
+   resolve today (2026-10-31).
