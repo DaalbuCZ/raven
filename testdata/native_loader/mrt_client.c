@@ -583,6 +583,39 @@ int raven_entry(void)
 		/* the view is its own IUnknown: the release through it is the last reference */
 		languages->lpVtbl->Release(languages);
 		languages = NULL;
+		/* the context and the qualifier map are free-threaded — the context is stateless, the map's subscription list
+		   is locked — so both answer the IAgileObject marker the runtime asks before it crosses apartments */
+		{
+			IUnknown *agile = NULL;
+			context_i *clone = NULL;
+			fixture_weak_source *clone_weak_source = NULL;
+			fixture_weak_ref *clone_weak = NULL;
+			if (context->lpVtbl->QueryInterface(context, &IID_IAgileObject, (void **)&agile) != S_OK || !agile) return 79;
+			agile->lpVtbl->Release(agile);
+			agile = NULL;
+			if (observable->lpVtbl->QueryInterface(observable, &IID_IAgileObject, (void **)&agile) != S_OK || !agile) return 80;
+			agile->lpVtbl->Release(agile);
+			agile = NULL;
+			/* a weak reference outlives its owner: the clone dies with the only strong references and the later
+			   resolution answers the documented null, never an error or a dangling pointer */
+			if (context->lpVtbl->Clone(context, (uint64_t)(uintptr_t)&clone) != S_OK || !clone) return 81;
+			if (clone->lpVtbl->QueryInterface(clone, &fixture_weak_source_iid, (void **)&clone_weak_source) != S_OK ||
+				!clone_weak_source) return 82;
+			if (clone_weak_source->lpVtbl->GetWeakReference(clone_weak_source, &clone_weak) != S_OK || !clone_weak) return 83;
+			/* the reference object itself is agile: fixed state, interlocked refcount */
+			if (clone_weak->lpVtbl->QueryInterface(clone_weak, &IID_IAgileObject, (void **)&agile) != S_OK || !agile) return 84;
+			agile->lpVtbl->Release(agile);
+			agile = NULL;
+			clone->lpVtbl->Release(clone);
+			clone = NULL;
+			clone_weak_source->lpVtbl->Release(clone_weak_source);
+			clone_weak_source = NULL;
+			if (clone_weak->lpVtbl->Resolve(clone_weak,
+				&IID__x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContext,
+				(IInspectable **)&resolved) != S_OK || resolved) return 85;
+			clone_weak->lpVtbl->Release(clone_weak);
+			clone_weak = NULL;
+		}
 		observable->lpVtbl->Release(observable);
 		observable = NULL;
 		values->lpVtbl->Release(values);

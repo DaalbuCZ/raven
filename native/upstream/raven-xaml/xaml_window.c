@@ -77,6 +77,9 @@ struct xaml_window {
 	struct window3_part third;
 	struct window4_part fourth;
 	LONG refs;
+	/* .NET Native takes a weak reference on every WinRT object it projects and treats its absence as a hard error; the
+	 * shared helper (xaml_internal.h) embeds the source part here and the window disconnects it on release. */
+	struct raven_weak_source weak;
 	HSTRING name;
 	core_window *core;
 	IInspectable *content;
@@ -84,7 +87,7 @@ struct xaml_window {
 	boolean closed;
 };
 
-static HRESULT window_query(struct xaml_window *self, REFIID iid, void **out);
+static HRESULT WINAPI window_query(struct xaml_window *self, REFIID iid, void **out);
 static ULONG window_addref(struct xaml_window *self);
 static ULONG window_release(struct xaml_window *self);
 
@@ -107,12 +110,16 @@ PART_BOILERPLATE(window2_part, xaml_window2, IWindow2)
 PART_BOILERPLATE(window3_part, xaml_window3, IWindow3)
 PART_BOILERPLATE(window4_part, xaml_window4, IWindow4)
 
-static HRESULT window_query(struct xaml_window *self, REFIID iid, void **out)
+/* WINAPI so the weak-reference helper can reach it through its function-pointer type on x86 (the two conventions differ
+ * there); the parts call it directly as before. */
+static HRESULT WINAPI window_query(struct xaml_window *self, REFIID iid, void **out)
 {
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+	if (equal_iid(iid, &IID_IWeakReferenceSource))
+		*out = &self->weak;
+	else if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
 		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIWindow))
 		*out = &self->first;
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIWindow2))
@@ -122,6 +129,10 @@ static HRESULT window_query(struct xaml_window *self, REFIID iid, void **out)
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIWindow4))
 		*out = &self->fourth;
 	else
+		/* IAgileObject stays refused: the window is thread-affine — Window.Current is the calling UI thread's object
+		 * and its name, content and visibility are touched on that thread without a lock — so the marker would claim a
+		 * thread safety the window does not have. IMarshal is not implemented anywhere in the component
+		 * (xaml_internal.h); the traced Shapr3D run survives the refusal. */
 		return E_NOINTERFACE;
 	window_addref(self);
 	return S_OK;
@@ -136,6 +147,7 @@ static ULONG window_release(struct xaml_window *self)
 {
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		raven_weak_source_disconnect(&self->weak);
 		if (self->name)
 			WindowsDeleteString(self->name);
 		if (self->content)
@@ -362,7 +374,9 @@ static struct xaml_window *create_window(void)
 	window->fourth.lpVtbl = &window4_table;
 	window->fourth.owner = window;
 	window->refs = 1;
+	raven_weak_source_init(&window->weak, window, &window->refs, (raven_weak_query_fn)window_query);
 	if (FAILED(raven_current_window(&window->core)) || !window->core) {
+		raven_weak_source_disconnect(&window->weak);
 		FREE(window);
 		return NULL;
 	}

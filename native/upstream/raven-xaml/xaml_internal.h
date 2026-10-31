@@ -8,8 +8,46 @@
 #include <windows.h>
 #include <stdint.h>
 #include <activation.h>
+#include <weakreference.h>
 #include <windows.ui.core.h>
 #include <windows.system.h>
+
+/* ---- Weak references (implemented in resources.c, shared by every object .NET Native projects) ----
+ *
+ * .NET Native takes IWeakReferenceSource on every WinRT object it projects and treats its absence as a hard error, so the
+ * source is a part any owner can embed. The source's IUnknown and lifetime are the owner's; the reference it hands out is a
+ * standalone object over a shared target block that holds no reference on the owner: the owner calls
+ * raven_weak_source_disconnect from its release path as it frees itself, and a resolution after that answers a null
+ * interface — the documented weak contract. A resolution racing the owner's destruction is the caller's synchronization
+ * failure, as in Windows.
+ *
+ * IMarshal is not implemented anywhere in the component: honest apartment marshaling needs cross-apartment invocation
+ * infrastructure the engine does not have. Objects answer the IAgileObject marker only where they are genuinely
+ * free-threaded (each QI path states its thread-safety justification) and refuse it where they are thread-affine; the
+ * traced Shapr3D run survives both refusals. */
+typedef HRESULT (WINAPI *raven_weak_query_fn)(void *owner, REFIID iid, void **out);
+
+/* mingw's weakreference.h models both interfaces as IUnknown-only; the Windows ABI derives them from IInspectable, with the
+ * one method at vtable slot 6, which is the layout .NET Native is compiled against. */
+struct raven_weak_source_vtbl {
+	HRESULT (WINAPI *QueryInterface)(IWeakReferenceSource *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(IWeakReferenceSource *);
+	ULONG (WINAPI *Release)(IWeakReferenceSource *);
+	HRESULT (WINAPI *GetIids)(IWeakReferenceSource *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(IWeakReferenceSource *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(IWeakReferenceSource *, TrustLevel *);
+	HRESULT (WINAPI *GetWeakReference)(IWeakReferenceSource *, IWeakReference **);
+};
+
+struct raven_weak_source {
+	const struct raven_weak_source_vtbl *lpVtbl;
+	void *target;
+};
+
+/* the owner embeds the part, gives it its refcount and its QueryInterface, and disconnects it exactly once on release */
+void raven_weak_source_init(struct raven_weak_source *weak, void *owner, LONG *owner_refs, raven_weak_query_fn owner_query);
+void raven_weak_source_disconnect(struct raven_weak_source *weak);
+extern const struct raven_weak_source_vtbl raven_weak_source_table;
 
 /* The composition interfaces the rendering bridge passes between modules; only pointers appear here. */
 typedef struct __x_ABI_CWindows_CUI_CComposition_CICompositor __x_ABI_CWindows_CUI_CComposition_CICompositor;

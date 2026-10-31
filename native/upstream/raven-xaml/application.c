@@ -70,11 +70,21 @@ struct application_view {
 	LONG refs;
 	ICoreWindow *window;
 	struct raven_event_list activated;
+	/* .NET Native takes a weak reference on every WinRT object it projects and treats its absence as a hard error; the
+	 * shared helper (xaml_internal.h) embeds the source part here and the view disconnects it on release. */
+	struct raven_weak_source weak;
 };
 static HRESULT WINAPI view_query(ICoreApplicationView *iface, REFIID iid, void **out)
 {
 	if (!out) return E_POINTER;
 	*out = NULL;
+	/* The view is thread-affine — it wraps the calling UI thread's CoreWindow and its events fire on that thread — so the
+	 * IAgileObject marker stays refused; IMarshal is not implemented anywhere in the component (xaml_internal.h). */
+	if (IsEqualIID(iid, &IID_IWeakReferenceSource)) {
+		*out = &((struct application_view *)iface)->weak;
+		InterlockedIncrement(&((struct application_view *)iface)->refs);
+		return S_OK;
+	}
 	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IInspectable) && !IsEqualIID(iid, &IID_ICoreApplicationView))
 		return E_NOINTERFACE;
 	*out = iface;
@@ -90,6 +100,7 @@ static ULONG WINAPI view_release(ICoreApplicationView *iface)
 	struct application_view *self = (void *)iface;
 	LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		raven_weak_source_disconnect(&self->weak);
 		raven_event_close(&self->activated);
 		DeleteCriticalSection(&self->activated.lock);
 		ICoreWindow_Release(self->window);
@@ -300,6 +311,15 @@ static LONG factory_refs = 1;
 static IActivationFactory activation_factory;
 static ICoreApplication application;
 static ICoreApplicationExit application_exit;
+/* the weak source the runtime takes on the singleton; the target is created at DLL attach and never disconnects, because
+ * CoreApplication lives for the process the way its factory does */
+static struct raven_weak_source core_application_weak;
+static HRESULT factory_query(REFIID iid, void **out);
+static HRESULT WINAPI core_application_weak_query(void *owner, REFIID iid, void **out)
+{
+	(void)owner;
+	return factory_query(iid, out);
+}
 static HRESULT factory_query(REFIID iid, void **out)
 {
 	if (!out) return E_POINTER;
@@ -308,6 +328,12 @@ static HRESULT factory_query(REFIID iid, void **out)
 		*out = &activation_factory;
 	else if (IsEqualIID(iid, &IID_ICoreApplication)) *out = &application;
 	else if (IsEqualIID(iid, &IID_ICoreApplicationExit)) *out = &application_exit;
+	else if (IsEqualIID(iid, &IID_IWeakReferenceSource)) *out = &core_application_weak;
+	else if (IsEqualIID(iid, &IID_IAgileObject))
+		/* Agile: the singleton is stateless over interlocked/lock-guarded startup state (Run synchronizes through
+		 * application_lock and atomics), it outlives every reference, so its interfaces are callable from any
+		 * apartment. IMarshal stays unimplemented (xaml_internal.h). */
+		*out = &application;
 	else return E_NOINTERFACE;
 	InterlockedIncrement(&factory_refs);
 	return S_OK;
@@ -360,6 +386,8 @@ struct property_set_object {
 	struct property_entry *entries;
 	UINT32 count;
 	UINT32 capacity;
+	/* the weak source .NET Native takes on every projected WinRT object (xaml_internal.h) */
+	struct raven_weak_source weak;
 };
 static struct property_set_object *property_set_properties;
 
@@ -394,10 +422,14 @@ static ULONG property_addref(struct property_set_object *self)
 	return InterlockedIncrement(&self->refs);
 }
 static void property_entry_dispose(struct property_entry *entry);
+/* WINAPI so the weak-reference helper can reach it through its function-pointer type on x86 (the two conventions differ
+ * there); the parts call it directly as before. */
+static HRESULT WINAPI property_query(struct property_set_object *self, REFIID iid, void **out);
 static ULONG property_release(struct property_set_object *self)
 {
 	ULONG remaining = InterlockedDecrement(&self->refs);
 	if (!remaining) {
+		raven_weak_source_disconnect(&self->weak);
 		for (UINT32 i = 0; i < self->count; ++i)
 			property_entry_dispose(&self->entries[i]);
 		if (self->entries) FREE(self->entries);
@@ -407,17 +439,24 @@ static ULONG property_release(struct property_set_object *self)
 	}
 	return remaining;
 }
-static HRESULT property_query(struct property_set_object *self, REFIID iid, void **out)
+static HRESULT WINAPI property_query(struct property_set_object *self, REFIID iid, void **out)
 {
 	if (!out) return E_POINTER;
 	*out = NULL;
-	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) ||
+	if (IsEqualIID(iid, &IID_IWeakReferenceSource)) {
+		*out = &self->weak;
+	} else if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) ||
 		IsEqualIID(iid, &IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet))
 		*out = &self->base;
 	else if (IsEqualIID(iid, &IID___FIMap_2_HSTRING_IInspectable))
 		*out = &self->map;
 	else if (IsEqualIID(iid, &IID___FIMapView_2_HSTRING_IInspectable))
 		*out = &self->view;
+	else if (IsEqualIID(iid, &IID_IAgileObject))
+		/* Agile: every member guards the entry array with the instance's critical section, the reference count is
+		 * interlocked and no field is read outside the lock, so the set is genuinely free-threaded. IMarshal stays
+		 * unimplemented (xaml_internal.h). */
+		*out = &self->base;
 	else
 		return E_NOINTERFACE;
 	property_addref(self);
@@ -641,6 +680,7 @@ static HRESULT property_set_create(struct property_set_object **out, BOOL tracke
 	self->count = 0;
 	self->capacity = 0;
 	InitializeCriticalSection(&self->lock);
+	raven_weak_source_init(&self->weak, self, &self->refs, (raven_weak_query_fn)property_query);
 	if (tracked) InterlockedIncrement(&raven_xaml_objects);
 	*out = self;
 	return S_OK;
@@ -810,6 +850,7 @@ static HRESULT WINAPI app_run(ICoreApplication *iface, IFrameworkViewSource *sou
 	view->iface.lpVtbl = &view_table;
 	view->refs = 1;
 	InitializeCriticalSection(&view->activated.lock);
+	raven_weak_source_init(&view->weak, view, &view->refs, (raven_weak_query_fn)view_query);
 	InterlockedIncrement(&raven_xaml_objects);
 	session->view = view;
 	if (!TlsSetValue(session_tls, session)) {
@@ -925,6 +966,7 @@ BOOL raven_application_notify(DWORD reason, void *reserved)
 		if (session_tls == TLS_OUT_OF_INDEXES) return FALSE;
 		InitializeCriticalSection(&application_lock);
 		InitializeCriticalSection(&exiting.lock);
+		raven_weak_source_init(&core_application_weak, &application, &factory_refs, core_application_weak_query);
 		/* the process-wide Properties instance is created once here and holds its own reference for the engine's life */
 		if (FAILED(property_set_create(&property_set_properties, FALSE))) {
 			DeleteCriticalSection(&exiting.lock);

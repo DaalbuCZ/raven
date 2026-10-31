@@ -82,32 +82,21 @@ static int equal_iid(REFIID left, const IID *right)
 	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2, uint64_t a3) \
 	{ (void)This; (void)a1; (void)a2; (void)a3;return E_NOTIMPL; }
 
-/* Weak references: .NET Native takes IWeakReferenceSource on every WinRT object it projects (RoWeakReference-like lifetime
- * management) and treats its absence on a context as a hard error. The source is a part of the owning object; the reference it
- * hands out resolves through the owner's own QueryInterface while the owner's reference count is live, and answers a null
- * interface once it is not. The owner is expected to zero its weak part when it frees itself, so a stale reference cannot resolve. */
-typedef HRESULT (WINAPI *weak_query_fn)(void *owner, REFIID iid, void **out);
-
-/* mingw's weakreference.h models both interfaces as IUnknown-only; the Windows ABI derives them from IInspectable, with the
- * one method at vtable slot 6, which is the layout .NET Native was compiled against. */
-struct weak_source_vtbl {
-	HRESULT (WINAPI *QueryInterface)(IWeakReferenceSource *, REFIID, void **);
-	ULONG (WINAPI *AddRef)(IWeakReferenceSource *);
-	ULONG (WINAPI *Release)(IWeakReferenceSource *);
-	HRESULT (WINAPI *GetIids)(IWeakReferenceSource *, ULONG *, IID **);
-	HRESULT (WINAPI *GetRuntimeClassName)(IWeakReferenceSource *, HSTRING *);
-	HRESULT (WINAPI *GetTrustLevel)(IWeakReferenceSource *, TrustLevel *);
-	HRESULT (WINAPI *GetWeakReference)(IWeakReferenceSource *, IWeakReference **);
-};
-
-struct weak_source {
-	const struct weak_source_vtbl *lpVtbl;
+/* Weak references: the helper lifted into xaml_internal.h, implemented here. The source part's IUnknown and lifetime are the
+ * owner's; the reference it hands out resolves through the owner's own QueryInterface while the owner lives and answers a null
+ * interface once it does not — the reference holds no reference on the owner, so it never keeps it alive and never dangles into
+ * it after the owner's disconnect. */
+struct raven_weak_target {
+	LONG refs; /* one for the owner's embedded weak part, one per live weak reference */
 	void *owner;
 	LONG *owner_refs;
-	weak_query_fn owner_query;
+	raven_weak_query_fn owner_query;
 };
 
-struct weak_ref_vtbl {
+static const struct raven_weak_ref_vtbl raven_weak_ref_table;
+
+/* the standalone reference object .NET Native resolves; its state is fixed at creation and its refcount is its own */
+struct raven_weak_ref_vtbl {
 	HRESULT (WINAPI *QueryInterface)(IWeakReference *, REFIID, void **);
 	ULONG (WINAPI *AddRef)(IWeakReference *);
 	ULONG (WINAPI *Release)(IWeakReference *);
@@ -117,35 +106,71 @@ struct weak_ref_vtbl {
 	HRESULT (WINAPI *Resolve)(IWeakReference *, REFIID, IInspectable **);
 };
 
-struct weak_ref {
-	const struct weak_ref_vtbl *lpVtbl;
-	void *owner;
-	LONG *owner_refs;
-	weak_query_fn owner_query;
+struct raven_weak_ref {
+	const struct raven_weak_ref_vtbl *lpVtbl;
+	struct raven_weak_target *target;
+	LONG refs;
 };
+
+void raven_weak_source_init(struct raven_weak_source *weak, void *owner, LONG *owner_refs, raven_weak_query_fn owner_query)
+{
+	struct raven_weak_target *target;
+	weak->lpVtbl = &raven_weak_source_table;
+	weak->target = NULL;
+	target = (struct raven_weak_target *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *target);
+	if (!target)
+		return; /* a part without a target answers every weak ask with a refusal rather than a dangling resolution */
+	target->refs = 1;
+	target->owner = owner;
+	target->owner_refs = owner_refs;
+	target->owner_query = owner_query;
+	weak->target = target;
+}
+
+void raven_weak_source_disconnect(struct raven_weak_source *weak)
+{
+	struct raven_weak_target *target = (struct raven_weak_target *)weak->target;
+	if (!target)
+		return;
+	weak->target = NULL;
+	/* the owner is freeing itself: a later resolution must answer null, never reach the owner's memory */
+	target->owner = NULL;
+	target->owner_refs = NULL;
+	target->owner_query = NULL;
+	if (!InterlockedDecrement(&target->refs))
+		HeapFree(GetProcessHeap(), 0, target);
+}
 
 static HRESULT WINAPI weak_source_query(IWeakReferenceSource *iface, REFIID iid, void **out)
 {
-	struct weak_source *self = (struct weak_source *)iface;
+	struct raven_weak_source *self = (struct raven_weak_source *)iface;
+	struct raven_weak_target *target = (struct raven_weak_target *)self->target;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
-		!equal_iid(iid, &IID_IWeakReferenceSource))
-		return E_NOINTERFACE;
-	InterlockedIncrement(self->owner_refs);
-	*out = iface;
-	return S_OK;
+	if (!target || !target->owner)
+		return E_NOINTERFACE; /* the part is only used while the owner lives, so this is unreachable in practice */
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID_IWeakReferenceSource)) {
+		InterlockedIncrement(target->owner_refs);
+		*out = iface;
+		return S_OK;
+	}
+	if (equal_iid(iid, &IID_IAgileObject)) {
+		/* the marker follows the owner: an agile owner answers through its own query, a thread-affine one refuses */
+		return target->owner_query(target->owner, iid, out);
+	}
+	return E_NOINTERFACE;
 }
 
 static ULONG WINAPI weak_source_addref(IWeakReferenceSource *iface)
 {
-	return (ULONG)InterlockedIncrement(((struct weak_source *)iface)->owner_refs);
+	return (ULONG)InterlockedIncrement(((struct raven_weak_target *)((struct raven_weak_source *)iface)->target)->owner_refs);
 }
 
 static ULONG WINAPI weak_source_release(IWeakReferenceSource *iface)
 {
-	return (ULONG)InterlockedDecrement(((struct weak_source *)iface)->owner_refs);
+	return (ULONG)InterlockedDecrement(((struct raven_weak_target *)((struct raven_weak_source *)iface)->target)->owner_refs);
 }
 
 static HRESULT WINAPI weak_source_iids(IWeakReferenceSource *iface, ULONG *count, IID **iids)
@@ -169,59 +194,64 @@ static HRESULT WINAPI weak_source_trust(IWeakReferenceSource *iface, TrustLevel 
 	return inspectable_trust(level);
 }
 
-static const struct weak_ref_vtbl weak_ref_table;
-
 static HRESULT WINAPI weak_source_get_weak_reference(IWeakReferenceSource *iface, IWeakReference **out)
 {
-	struct weak_source *self = (struct weak_source *)iface;
-	struct weak_ref *reference;
+	struct raven_weak_source *self = (struct raven_weak_source *)iface;
+	struct raven_weak_target *target = (struct raven_weak_target *)self->target;
+	struct raven_weak_ref *reference;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	reference = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *reference);
+	if (!target || !target->owner)
+		return E_NOTIMPL; /* the owner disconnected: nothing left to reference weakly */
+	reference = (struct raven_weak_ref *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *reference);
 	if (!reference)
 		return E_OUTOFMEMORY;
-	reference->lpVtbl = (const struct weak_ref_vtbl *)&weak_ref_table;
-	reference->owner = self->owner;
-	reference->owner_refs = self->owner_refs;
-	reference->owner_query = self->owner_query;
-	InterlockedIncrement(self->owner_refs);
+	reference->lpVtbl = &raven_weak_ref_table;
+	reference->target = target;
+	reference->refs = 1;
+	InterlockedIncrement(&target->refs);
+	InterlockedIncrement(&raven_xaml_objects);
 	*out = (IWeakReference *)reference;
 	return S_OK;
 }
 
-static const struct weak_source_vtbl weak_source_table = {
-	.QueryInterface = weak_source_query, .AddRef = weak_source_addref, .Release = weak_source_release,
-	.GetIids = weak_source_iids, .GetRuntimeClassName = weak_source_name, .GetTrustLevel = weak_source_trust,
-	.GetWeakReference = weak_source_get_weak_reference,
+const struct raven_weak_source_vtbl raven_weak_source_table = {
+	weak_source_query, weak_source_addref, weak_source_release,
+	weak_source_iids, weak_source_name, weak_source_trust,
+	weak_source_get_weak_reference,
 };
 
 static HRESULT WINAPI weak_ref_query(IWeakReference *iface, REFIID iid, void **out)
 {
-	struct weak_ref *self = (struct weak_ref *)iface;
+	struct raven_weak_ref *self = (struct raven_weak_ref *)iface;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, &IID_IWeakReference))
+	/* the reference object itself is agile: its target block is fixed at creation, its refcount is interlocked, and
+	 * Resolve only reads the disconnected-checked target — the owner's own agility is a separate question its
+	 * QueryInterface answers */
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID_IWeakReference) && !equal_iid(iid, &IID_IAgileObject))
 		return E_NOINTERFACE;
-	InterlockedIncrement(self->owner_refs);
+	InterlockedIncrement(&self->refs);
 	*out = iface;
 	return S_OK;
 }
 
 static ULONG WINAPI weak_ref_addref(IWeakReference *iface)
 {
-	return (ULONG)InterlockedIncrement(((struct weak_ref *)iface)->owner_refs);
+	return (ULONG)InterlockedIncrement(&((struct raven_weak_ref *)iface)->refs);
 }
 
 static ULONG WINAPI weak_ref_release(IWeakReference *iface)
 {
-	struct weak_ref *self = (struct weak_ref *)iface;
-	const LONG refs = InterlockedDecrement(self->owner_refs);
+	struct raven_weak_ref *self = (struct raven_weak_ref *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
-		self->owner = NULL;
-		self->owner_refs = NULL;
-		self->owner_query = NULL;
+		struct raven_weak_target *target = (struct raven_weak_target *)self->target;
+		if (target && !InterlockedDecrement(&target->refs))
+			HeapFree(GetProcessHeap(), 0, target);
 		HeapFree(GetProcessHeap(), 0, self);
 		InterlockedDecrement(&raven_xaml_objects);
 	}
@@ -250,19 +280,20 @@ static HRESULT WINAPI weak_ref_trust(IWeakReference *iface, TrustLevel *level)
 
 static HRESULT WINAPI weak_ref_resolve(IWeakReference *iface, REFIID iid, IInspectable **out)
 {
-	struct weak_ref *self = (struct weak_ref *)iface;
+	struct raven_weak_ref *self = (struct raven_weak_ref *)iface;
+	struct raven_weak_target *target = (struct raven_weak_target *)self->target;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (!self->owner_query || !self->owner_refs || *self->owner_refs <= 0)
+	if (!target || !target->owner || !target->owner_refs || *target->owner_refs <= 0)
 		return S_OK; /* the owner is gone: a weak resolution answers null, not an error */
-	return self->owner_query(self->owner, iid, (void **)out);
+	return target->owner_query(target->owner, iid, (void **)out);
 }
 
-static const struct weak_ref_vtbl weak_ref_table = {
-	.QueryInterface = weak_ref_query, .AddRef = weak_ref_addref, .Release = weak_ref_release,
-	.GetIids = weak_ref_iids, .GetRuntimeClassName = weak_ref_name, .GetTrustLevel = weak_ref_trust,
-	.Resolve = weak_ref_resolve,
+static const struct raven_weak_ref_vtbl raven_weak_ref_table = {
+	weak_ref_query, weak_ref_addref, weak_ref_release,
+	weak_ref_iids, weak_ref_name, weak_ref_trust,
+	weak_ref_resolve,
 };
 
 struct factory;
@@ -286,7 +317,7 @@ struct factory {
 struct context {
 	const __x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContextVtbl *lpVtbl;
 	LONG refs;
-	struct weak_source weak;
+	struct raven_weak_source weak;
 };
 
 static HRESULT factory_query(struct factory *self, REFIID iid, void **out)
@@ -412,7 +443,7 @@ struct language_list {
 	const __FIVectorView_1_HSTRINGVtbl *lpVtbl;
 	LONG refs;
 	HSTRING language;
-	struct weak_source weak;
+	struct raven_weak_source weak;
 };
 
 static const WCHAR *language_list_value(void)
@@ -438,6 +469,8 @@ static HRESULT WINAPI lang_query(__FIVectorView_1_HSTRING *iface, REFIID iid, vo
 		equal_iid(iid, &IID___FIVectorView_1_HSTRING))
 		*out = iface;
 	else
+		/* IAgileObject stays refused: the lazily built locale name behind the list is written without synchronization,
+		 * so the list is not free-threaded and the marker would claim a thread safety it does not have */
 		return E_NOINTERFACE;
 	InterlockedIncrement(&self->refs);
 	return S_OK;
@@ -453,6 +486,7 @@ static ULONG WINAPI lang_release(__FIVectorView_1_HSTRING *iface)
 	struct language_list *self = (struct language_list *)iface;
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		raven_weak_source_disconnect(&self->weak);
 		if (self->language)
 			WindowsDeleteString(self->language);
 		HeapFree(GetProcessHeap(), 0, self);
@@ -558,10 +592,7 @@ static struct language_list *create_language_list(void)
 		return NULL;
 	list->lpVtbl = &language_table;
 	list->refs = 1;
-	list->weak.lpVtbl = &weak_source_table;
-	list->weak.owner = list;
-	list->weak.owner_refs = &list->refs;
-	list->weak.owner_query = (weak_query_fn)lang_query;
+	raven_weak_source_init(&list->weak, list, &list->refs, (raven_weak_query_fn)lang_query);
 	InterlockedIncrement(&raven_xaml_objects);
 	return list;
 }
@@ -573,10 +604,7 @@ static struct context *create_context(void)
 		return NULL;
 	context->lpVtbl = &context_table;
 	context->refs = 1;
-	context->weak.lpVtbl = &weak_source_table;
-	context->weak.owner = context;
-	context->weak.owner_refs = &context->refs;
-	context->weak.owner_query = (weak_query_fn)context_query;
+	raven_weak_source_init(&context->weak, context, &context->refs, (raven_weak_query_fn)context_query);
 	InterlockedIncrement(&raven_xaml_objects);
 	return context;
 }
@@ -592,12 +620,17 @@ static HRESULT WINAPI context_query(resource_context *iface, REFIID iid, void **
 		*out = &self->weak;
 		return S_OK;
 	}
-	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
-		!equal_iid(iid, &IID__x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContext))
-		return E_NOINTERFACE;
-	InterlockedIncrement(&((struct context *)iface)->refs);
-	*out = iface;
-	return S_OK;
+	/* Agile: the context holds no mutable state — every member is a no-op or allocates a fresh object, the qualifier
+	 * values are a static read-only table and the reference count is interlocked — so any thread may call it and no
+	 * cross-apartment marshaling is ever needed for it. IMarshal stays unimplemented (see xaml_internal.h). */
+	if (equal_iid(iid, &IID_IAgileObject) ||
+		equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID__x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContext)) {
+		InterlockedIncrement(&((struct context *)iface)->refs);
+		*out = iface;
+		return S_OK;
+	}
+	return E_NOINTERFACE;
 }
 
 static ULONG WINAPI context_addref(resource_context *iface)
@@ -610,6 +643,7 @@ static ULONG WINAPI context_release(resource_context *iface)
 	struct context *self = (struct context *)iface;
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		raven_weak_source_disconnect(&self->weak);
 		HeapFree(GetProcessHeap(), 0, self);
 		InterlockedDecrement(&raven_xaml_objects);
 	}
@@ -701,7 +735,10 @@ struct qualifiers {
 	LONG refs;
 	struct qualifier_view view;
 	struct qualifier_observable observable;
-	struct weak_source weak;
+	struct raven_weak_source weak;
+	/* the subscription list is the map's only mutable state; the critical section is what lets the map answer the
+	 * IAgileObject marker honestly */
+	CRITICAL_SECTION lock;
 	struct qualifier_subscription *subscriptions;
 	size_t subscription_count, subscription_capacity;
 	LONGLONG next_token;
@@ -871,6 +908,12 @@ static HRESULT WINAPI map_query(__FIMap_2_HSTRING_HSTRING *iface, REFIID iid, vo
 		*out = &self->view;
 	else if (equal_iid(iid, &IID___FIObservableMap_2_HSTRING_HSTRING))
 		*out = &self->observable;
+	else if (equal_iid(iid, &IID_IAgileObject))
+		/* Agile: the map is read-only over a static qualifier table, its reference count is interlocked and its one
+		 * mutable structure — the MapChanged subscription list — is guarded by the map's critical section, so every
+		 * member is callable from any apartment and no cross-apartment marshaling is ever needed. IMarshal stays
+		 * unimplemented (see xaml_internal.h). */
+		*out = iface;
 	else
 		return E_NOINTERFACE;
 	map_addref(iface);
@@ -887,6 +930,8 @@ static ULONG WINAPI map_release(__FIMap_2_HSTRING_HSTRING *iface)
 	struct qualifiers *self = (struct qualifiers *)iface;
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		raven_weak_source_disconnect(&self->weak);
+		EnterCriticalSection(&self->lock);
 		for (size_t index = 0; index < self->subscription_count; ++index) {
 			__FIMapChangedEventHandler_2_HSTRING_HSTRING *handler = self->subscriptions[index].handler;
 			if (handler)
@@ -894,6 +939,8 @@ static ULONG WINAPI map_release(__FIMap_2_HSTRING_HSTRING *iface)
 		}
 		if (self->subscriptions)
 			HeapFree(GetProcessHeap(), 0, self->subscriptions);
+		LeaveCriticalSection(&self->lock);
+		DeleteCriticalSection(&self->lock);
 		HeapFree(GetProcessHeap(), 0, self);
 		InterlockedDecrement(&raven_xaml_objects);
 	}
@@ -1021,6 +1068,9 @@ static HRESULT WINAPI view_query(__FIMapView_2_HSTRING_HSTRING *iface, REFIID ii
 		*out = self;
 	else if (equal_iid(iid, &IID___FIObservableMap_2_HSTRING_HSTRING))
 		*out = &self->observable;
+	else if (equal_iid(iid, &IID_IAgileObject))
+		/* agile through the owner map: see map_query for the thread-safety justification */
+		*out = iface;
 	else
 		return E_NOINTERFACE;
 	qualifier_addref(self);
@@ -1071,6 +1121,7 @@ static HRESULT WINAPI observable_add_map_changed(__FIObservableMap_2_HSTRING_HST
 		return E_POINTER;
 	if (!handler)
 		return E_INVALIDARG;
+	EnterCriticalSection(&self->lock);
 	if (self->subscription_count == self->subscription_capacity) {
 		const size_t capacity = self->subscription_capacity ? self->subscription_capacity * 2 : 4;
 		struct qualifier_subscription *grown = self->subscriptions
@@ -1078,6 +1129,7 @@ static HRESULT WINAPI observable_add_map_changed(__FIObservableMap_2_HSTRING_HST
 				capacity * sizeof *grown)
 			: (struct qualifier_subscription *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, capacity * sizeof *grown);
 		if (!grown) {
+			LeaveCriticalSection(&self->lock);
 			return E_OUTOFMEMORY;
 		}
 		self->subscriptions = grown;
@@ -1088,6 +1140,7 @@ static HRESULT WINAPI observable_add_map_changed(__FIObservableMap_2_HSTRING_HST
 	self->subscriptions[self->subscription_count].handler = handler;
 	++self->subscription_count;
 	token->value = self->next_token;
+	LeaveCriticalSection(&self->lock);
 	return S_OK;
 }
 
@@ -1095,6 +1148,7 @@ static HRESULT WINAPI observable_remove_map_changed(__FIObservableMap_2_HSTRING_
 	EventRegistrationToken token)
 {
 	struct qualifiers *self = ((struct qualifier_observable *)iface)->owner;
+	EnterCriticalSection(&self->lock);
 	for (size_t index = 0; index < self->subscription_count; ++index) {
 		if (self->subscriptions[index].token != token.value)
 			continue;
@@ -1105,6 +1159,7 @@ static HRESULT WINAPI observable_remove_map_changed(__FIObservableMap_2_HSTRING_
 			handler->lpVtbl->Release(handler);
 		break;
 	}
+	LeaveCriticalSection(&self->lock);
 	return S_OK;
 }
 
@@ -1123,6 +1178,9 @@ static HRESULT WINAPI observable_query(__FIObservableMap_2_HSTRING_HSTRING *ifac
 		*out = self;
 	else if (equal_iid(iid, &IID___FIMapView_2_HSTRING_HSTRING))
 		*out = &self->view;
+	else if (equal_iid(iid, &IID_IAgileObject))
+		/* agile through the owner map: see map_query for the thread-safety justification */
+		*out = iface;
 	else
 		return E_NOINTERFACE;
 	qualifier_addref(self);
@@ -1140,10 +1198,8 @@ static struct qualifiers *create_qualifiers(void)
 	map->view.owner = map;
 	map->observable.lpVtbl = &observable_table;
 	map->observable.owner = map;
-	map->weak.lpVtbl = &weak_source_table;
-	map->weak.owner = map;
-	map->weak.owner_refs = &map->refs;
-	map->weak.owner_query = (weak_query_fn)map_query;
+	raven_weak_source_init(&map->weak, map, &map->refs, (raven_weak_query_fn)map_query);
+	InitializeCriticalSection(&map->lock);
 	InterlockedIncrement(&raven_xaml_objects);
 	return map;
 }
