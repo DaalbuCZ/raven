@@ -23,6 +23,8 @@
 #include "desktop_window.h"
 #include "dispatcher_queue.h"
 #include "corewindow_interop.h"
+#include "xaml_styles.h" /* the DependencyProperty statics entry the chain below reaches */
+#include "pointer.h" /* the PointerDevice statics entry the chain below reaches */
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
@@ -1910,6 +1912,8 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 			result = raven_storage_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_style_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_dependency_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_automation_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)

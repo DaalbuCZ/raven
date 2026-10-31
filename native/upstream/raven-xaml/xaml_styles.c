@@ -11,11 +11,14 @@
  * part-struct shape the ResourceDictionary uses for its map. A Setter answers ISetter (its default), ISetter2 and
  * ISetterBase; the object is one COM identity and every part answers for the others.
  *
- * DependencyProperty is not implemented yet, so a Setter cannot carry a real property: ISetter.put_Property answers
- * E_NOTIMPL at its exact signature, and the engine addresses setters by their property NAME through
- * raven_style_add_setter, which stores (property-name string, value IInspectable) pairs. The Value property is real:
- * put_Value takes the value as an IInspectable and get_Value hands it back, so a Setter created through the factory
- * already round-trips its value.
+ * DependencyProperty is implemented in this file: IDependencyPropertyStatics.Register stores the registration metadata
+ * and hands out immutable IDependencyProperty objects (the real single-member interface plus the engine-internal
+ * raven_dependency_property_interop metadata readers), and ISetter.put_Property takes one — the DP's registered name
+ * becomes the stored (property-name string, value IInspectable) pair, so a DP setter applies through the same pair store
+ * the name-string setters use. RegisterAttached, GetMetadata and the attached-property stage stay unimplemented and
+ * answer E_NOTIMPL at their exact signatures; the class is statics-only and its factory's ActivateInstance faults. The
+ * Value property is real: put_Value takes the value as an IInspectable and get_Value hands it back, so a Setter created
+ * through the factory already round-trips its value.
  *
  * What applies: an element's put_Style (xaml_elements.c) runs the style's setters against the element's OWN storage
  * through raven_style_apply below — the BasedOn chain's setters first, the style's own after, so the derived style's
@@ -25,8 +28,9 @@
  * lands; a property the element has no storage for is skipped, because without DependencyProperty the engine cannot tell
  * a name it does not store from one it will.
  *
- * What still does not: ControlTemplate application and the template stage, real DependencyProperty setters (a Setter
- * carries a name string, not a property reference), style merging — the engine re-applies the chain at put time instead
+ * What still does not: ControlTemplate application and the template stage, the attached-property stage, per-object
+ * GetMetadata, TargetType checking (a DP's owner is recorded but the application matches the registered NAME only), style
+ * merging — the engine re-applies the chain at put time instead
  * of building a merged setter list, and a Setter appended to an already-applied style does not re-apply (put_Style is
  * the application point; raven_style_add_setter only re-renders). The TargetType is stored and round-tripped but not
  * checked against the element the style is put on.
@@ -107,6 +111,519 @@ static void store_name(HSTRING *slot, const WCHAR *text, UINT32 length)
 #define STUB1_SET(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) \
 	{ (void)This; (void)a1; return E_NOTIMPL; }
 
+/* The DependencyProperty.
+ *
+ * Windows.UI.Xaml.DependencyProperty is a statics-only class (the real runtimeclass carries no activatable attribute): the
+ * objects come only from IDependencyPropertyStatics.Register, which the real vtable orders as get_UnsetValue, Register,
+ * RegisterAttached. The real class surface is exactly ONE interface, IDependencyProperty, with exactly ONE member,
+ * GetMetadata — the Name, TypeName and OwnerType readings the projections offer are NOT in the ABI, so the engine's
+ * metadata readers sit on the internal raven_dependency_property_interop part (xaml_styles.h) the object answers next to
+ * the real interface, and the TypeName readings hand the registered property and owner types back as the struct, the
+ * Style's TargetType convention, rather than through IReference<TypeName>: that box's IID needs the TypeName struct's
+ * metadata GUID in its signature and no source available to the engine carries the GUID (the mingw and SDK headers declare
+ * the struct with none; no winmd is in tree), so the box could not be the real one.
+ *
+ * What is real: registration stores the name, the property and owner TypeNames as they arrived and the default value the
+ * IPropertyMetadata carried (read through its real get_DefaultValue), answers duplicates with E_INVALIDARG as the real
+ * contract does, and hands the registered name to the Setter that takes the property — a DP setter applies through the
+ * same (name, value) pair store the name-string setters use.
+ *
+ * What still does not: GetMetadata answers E_NOTIMPL at its exact signature — per-object metadata means an IPropertyMetadata
+ * the engine has no property system to attach to; RegisterAttached answers E_NOTIMPL — there is no attached-property store
+ * to register into; a DP's owner is recorded but NOT checked at application (the name drives the setter, TargetType
+ * checking stays unimplemented), so a Button-owned DP set on a text block applies to the name the same way. */
+
+static const WCHAR dependency_property_class[] = L"Windows.UI.Xaml.DependencyProperty";
+
+struct dp_object {
+	const __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyVtbl *lpVtbl;
+	struct { const struct raven_dependency_property_interop_vtbl *lpVtbl; } interop; /* the part the QI hands out */
+	LONG refs;
+	/* The registration as it arrived: the name the pair store addresses the property by, the property and owner
+	 * TypeNames (the name string duplicated, the kind as registered) and the default value the metadata carried. The
+	 * object is immutable after creation. */
+	HSTRING name;
+	HSTRING type_name;
+	INT32 type_kind;
+	HSTRING owner_name;
+	INT32 owner_kind;
+	IInspectable *default_value;
+};
+
+static ULONG dp_addref_any(struct dp_object *self)
+{
+	return (ULONG)InterlockedIncrement(&self->refs);
+}
+
+static ULONG dp_release_any(struct dp_object *self)
+{
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->name)
+			WindowsDeleteString(self->name);
+		if (self->type_name)
+			WindowsDeleteString(self->type_name);
+		if (self->owner_name)
+			WindowsDeleteString(self->owner_name);
+		if (self->default_value)
+			self->default_value->lpVtbl->Release(self->default_value);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT dp_query_any(struct dp_object *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CIDependencyProperty))
+		*out = self;
+	else if (equal_iid(iid, &raven_dependency_property_interop_iid))
+		*out = &self->interop;
+	else
+		return E_NOINTERFACE;
+	dp_addref_any(self);
+	return S_OK;
+}
+
+/* The default part is the object itself; the interop part answers for it as one COM object. */
+static HRESULT WINAPI dp_interop_query(struct raven_dependency_property_interop *This, REFIID iid, void **out)
+{
+	return dp_query_any((struct dp_object *)((char *)This - offsetof(struct dp_object, interop)), iid, out);
+}
+
+static ULONG WINAPI dp_interop_addref(struct raven_dependency_property_interop *This)
+{
+	return dp_addref_any((struct dp_object *)((char *)This - offsetof(struct dp_object, interop)));
+}
+
+static ULONG WINAPI dp_interop_release(struct raven_dependency_property_interop *This)
+{
+	return dp_release_any((struct dp_object *)((char *)This - offsetof(struct dp_object, interop)));
+}
+
+static HRESULT WINAPI dp_query(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *This, REFIID iid, void **out)
+{
+	return dp_query_any((struct dp_object *)This, iid, out);
+}
+
+static ULONG WINAPI dp_addref(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *This)
+{
+	return dp_addref_any((struct dp_object *)This);
+}
+
+static ULONG WINAPI dp_release(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *This)
+{
+	return dp_release_any((struct dp_object *)This);
+}
+
+static HRESULT WINAPI dp_iids(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *This, ULONG *count, IID **iids)
+{
+	(void)This;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI dp_name(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *This, HSTRING *name)
+{
+	(void)This;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(dependency_property_class, (UINT32)lstrlenW(dependency_property_class), name);
+}
+
+static HRESULT WINAPI dp_trust(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *This, TrustLevel *level)
+{
+	(void)This;
+	return inspectable_trust(level);
+}
+
+/* GetMetadata: the real member, unanswered — a per-object metadata query needs the live property system this engine does
+ * not have (see the section comment). */
+static HRESULT WINAPI dp_get_metadata(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *This,
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName type, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result)
+{
+	(void)This;
+	(void)type;
+	if (result)
+		*result = NULL;
+	return E_NOTIMPL;
+}
+
+static const __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyVtbl dp_property_table = {
+	.QueryInterface = dp_query,
+	.AddRef = dp_addref,
+	.Release = dp_release,
+	.GetIids = dp_iids,
+	.GetRuntimeClassName = dp_name,
+	.GetTrustLevel = dp_trust,
+	.GetMetadata = dp_get_metadata,
+};
+
+static HRESULT WINAPI dp_interop_name(struct raven_dependency_property_interop *This, HSTRING *name)
+{
+	struct dp_object *self = (struct dp_object *)((char *)This - offsetof(struct dp_object, interop));
+	if (!name)
+		return E_POINTER;
+	*name = NULL;
+	return WindowsDuplicateString(self->name, name);
+}
+
+/* The registered TypeName handed back as the struct: a duplicate of the stored name and the kind as registered, the way
+ * the style's get_TargetType does. */
+static HRESULT WINAPI dp_interop_type(struct raven_dependency_property_interop *This,
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName *value)
+{
+	struct dp_object *self = (struct dp_object *)((char *)This - offsetof(struct dp_object, interop));
+	if (!value)
+		return E_POINTER;
+	value->Name = NULL;
+	if (self->type_name)
+		WindowsDuplicateString(self->type_name, &value->Name);
+	value->Kind = (__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeKind)self->type_kind;
+	return S_OK;
+}
+
+static HRESULT WINAPI dp_interop_owner(struct raven_dependency_property_interop *This,
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName *value)
+{
+	struct dp_object *self = (struct dp_object *)((char *)This - offsetof(struct dp_object, interop));
+	if (!value)
+		return E_POINTER;
+	value->Name = NULL;
+	if (self->owner_name)
+		WindowsDuplicateString(self->owner_name, &value->Name);
+	value->Kind = (__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeKind)self->owner_kind;
+	return S_OK;
+}
+
+static HRESULT WINAPI dp_interop_default(struct raven_dependency_property_interop *This, IInspectable **value)
+{
+	struct dp_object *self = (struct dp_object *)((char *)This - offsetof(struct dp_object, interop));
+	if (!value)
+		return E_POINTER;
+	*value = self->default_value;
+	if (*value)
+		(*value)->lpVtbl->AddRef(*value);
+	return S_OK;
+}
+
+static const struct raven_dependency_property_interop_vtbl dp_interop_table = {
+	dp_interop_query, dp_interop_addref, dp_interop_release,
+	dp_interop_name, dp_interop_type, dp_interop_owner, dp_interop_default,
+};
+
+/* The object behind an IInspectable reference, when it is an engine DependencyProperty: the QI reaches the one part and
+ * the vtable check tells the engine's own class from a caller's implementation, the way style_of does. */
+static struct dp_object *dp_of(IInspectable *object)
+{
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp = NULL;
+	if (!object || FAILED(object->lpVtbl->QueryInterface(object, &IID___x_ABI_CWindows_CUI_CXaml_CIDependencyProperty,
+		(void **)&dp)) || !dp)
+		return NULL;
+	struct dp_object *self = NULL;
+	if (dp->lpVtbl == &dp_property_table)
+		self = (struct dp_object *)dp;
+	dp->lpVtbl->Release(dp);
+	return self;
+}
+
+/* The registration store: the (owner, name) pairs registered in this process, for the duplicate contract. The objects
+ * live for the component's lifetime — a registered property is engine state the way the authored defaults are — so the
+ * store holds each DP's own reference and nothing tears it down. */
+static struct dp_object **dp_registry;
+static UINT32 dp_registry_count, dp_registry_capacity;
+
+static struct dp_object *dp_create(const WCHAR *name, UINT32 name_length, const WCHAR *type, UINT32 type_length,
+	INT32 type_kind, const WCHAR *owner, UINT32 owner_length, INT32 owner_kind, IInspectable *default_value)
+{
+	struct dp_object *self = ALLOC(sizeof *self);
+	if (!self)
+		return NULL;
+	self->lpVtbl = &dp_property_table;
+	self->interop.lpVtbl = &dp_interop_table;
+	self->refs = 1;
+	if (WindowsCreateString(name, name_length, &self->name) != S_OK ||
+		WindowsCreateString(type, type_length, &self->type_name) != S_OK ||
+		WindowsCreateString(owner, owner_length, &self->owner_name) != S_OK) {
+		dp_release_any(self);
+		return NULL;
+	}
+	self->type_kind = type_kind;
+	self->owner_kind = owner_kind;
+	if (default_value) {
+		default_value->lpVtbl->AddRef(default_value);
+		self->default_value = default_value;
+	}
+	InterlockedIncrement(&raven_xaml_objects);
+	return self;
+}
+
+static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName property_type,
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName owner_type, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *metadata,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty **out)
+{
+	UINT32 name_length = 0, type_length = 0, owner_length = 0;
+	const WCHAR *name_text = WindowsGetStringRawBuffer(name, &name_length);
+	const WCHAR *type_text = property_type.Name ? WindowsGetStringRawBuffer(property_type.Name, &type_length) : NULL;
+	const WCHAR *owner_text = owner_type.Name ? WindowsGetStringRawBuffer(owner_type.Name, &owner_length) : NULL;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	/* The duplicate contract needs an owner: a registration without the owner name or the property name cannot be told
+	 * apart from another, so it is not accepted. */
+	if (!name_text || !name_length || !type_text || !type_length || !owner_text || !owner_length)
+		return E_INVALIDARG;
+	for (UINT32 index = 0; index < dp_registry_count; ++index) {
+		struct dp_object *registered = dp_registry[index];
+		UINT32 length = 0;
+		const WCHAR *text = WindowsGetStringRawBuffer(registered->name, &length);
+		if (length != name_length ||
+			CompareStringOrdinal(text, (int)length, name_text, (int)name_length, FALSE) != CSTR_EQUAL)
+			continue;
+		text = WindowsGetStringRawBuffer(registered->owner_name, &length);
+		if (length == owner_length &&
+			CompareStringOrdinal(text, (int)length, owner_text, (int)owner_length, FALSE) == CSTR_EQUAL)
+			return E_INVALIDARG; /* the real (owner, name) duplicate contract */
+	}
+	/* The default value comes from the metadata's real DefaultValue; metadata that does not answer IPropertyMetadata is
+	 * not PropertyMetadata and is refused rather than silently defaulted. */
+	IInspectable *default_value = NULL;
+	if (metadata) {
+		if (metadata->lpVtbl->QueryInterface(metadata, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata,
+			(void **)&metadata) != S_OK)
+			return E_INVALIDARG;
+		HRESULT result = metadata->lpVtbl->get_DefaultValue(metadata, &default_value);
+		metadata->lpVtbl->Release(metadata);
+		if (FAILED(result)) {
+			if (default_value)
+				default_value->lpVtbl->Release(default_value);
+			return result;
+		}
+	}
+	struct dp_object *self = dp_create(name_text, name_length, type_text, type_length,
+		(INT32)property_type.Kind, owner_text, owner_length, (INT32)owner_type.Kind, default_value);
+	if (default_value)
+		default_value->lpVtbl->Release(default_value);
+	if (!self)
+		return E_OUTOFMEMORY;
+	if (dp_registry_count == dp_registry_capacity) {
+		const UINT32 capacity = dp_registry_capacity ? dp_registry_capacity * 2 : 4;
+		struct dp_object **entries = ALLOC((size_t)capacity * sizeof *entries);
+		if (!entries) {
+			dp_release_any(self);
+			return E_OUTOFMEMORY;
+		}
+		if (dp_registry) {
+			for (UINT32 index = 0; index < dp_registry_count; ++index)
+				entries[index] = dp_registry[index];
+			FREE(dp_registry);
+		}
+		dp_registry = entries;
+		dp_registry_capacity = capacity;
+	}
+	dp_registry[dp_registry_count++] = self;
+	*out = (__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *)self;
+	return S_OK;
+}
+
+/* The UnsetValue sentinel: one object per process, identity-stable across the get_UnsetValue calls, so a value compared
+ * by COM identity against it means "no value" the way the real sentinel does. The real sentinel's runtime class is
+ * internal to the XAML framework and the public metadata does not name it; the engine's answers the class its statics
+ * own. */
+static const WCHAR unset_class[] = L"Windows.UI.Xaml.DependencyProperty";
+static LONG dp_unset_refs;
+
+static HRESULT WINAPI dp_unset_query(IInspectable *This, REFIID iid, void **out)
+{
+	(void)This;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&dp_unset_refs);
+	*out = This;
+	return S_OK;
+}
+
+static ULONG WINAPI dp_unset_addref(IInspectable *This)
+{
+	(void)This;
+	return (ULONG)InterlockedIncrement(&dp_unset_refs);
+}
+
+static ULONG WINAPI dp_unset_release(IInspectable *This)
+{
+	(void)This;
+	return (ULONG)InterlockedDecrement(&dp_unset_refs);
+}
+
+static HRESULT WINAPI dp_unset_iids(IInspectable *This, ULONG *count, IID **iids)
+{ (void)This; return inspectable_iids(count, iids); }
+static HRESULT WINAPI dp_unset_trust(IInspectable *This, TrustLevel *level)
+{ (void)This; return inspectable_trust(level); }
+
+static HRESULT WINAPI dp_unset_class_name(IInspectable *This, HSTRING *name)
+{
+	(void)This;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(unset_class, (UINT32)lstrlenW(unset_class), name);
+}
+
+static const IInspectableVtbl dp_unset_table = {
+	dp_unset_query, dp_unset_addref, dp_unset_release, dp_unset_iids, dp_unset_class_name, dp_unset_trust,
+};
+
+static struct { const IInspectableVtbl *lpVtbl; } dp_unset_instance = {&dp_unset_table};
+
+/* The statics: the factory-shaped object the activation chain hands out for the class name. DependencyProperty is a
+ * statics-only class — the real runtimeclass carries no activatable attribute and no factory interface — so the object
+ * carries the IActivationFactory part the activation plumbing demands (its ActivateInstance faults: there is no default
+ * constructor to run) and the IDependencyPropertyStatics part the callers QI for, one COM identity like the memory
+ * manager's statics. */
+struct dp_factory {
+	struct { const IActivationFactoryVtbl *lpVtbl; } activation;
+	struct { const __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStaticsVtbl *lpVtbl; } statics;
+	LONG refs;
+};
+
+static HRESULT dp_factory_query_any(struct dp_factory *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory))
+		*out = &self->activation;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics))
+		*out = &self->statics;
+	else
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	return S_OK;
+}
+
+/* Every part answers for the factory as one COM object; the owner comes from the part's own offset, because only the
+ * activation part sits at the struct's front — a part pointer cast to the factory lands its refs past the field. */
+#define DP_FACTORY_PART(part, iface, prefix) \
+	static HRESULT WINAPI prefix##_query(iface *This, REFIID iid, void **out) \
+	{ return dp_factory_query_any((struct dp_factory *)((char *)This - offsetof(struct dp_factory, part)), iid, out); } \
+	static ULONG WINAPI prefix##_addref(iface *This) \
+	{ return (ULONG)InterlockedIncrement(&((struct dp_factory *)((char *)This - \
+		offsetof(struct dp_factory, part)))->refs); } \
+	static ULONG WINAPI prefix##_release(iface *This) \
+	{ return (ULONG)InterlockedDecrement(&((struct dp_factory *)((char *)This - \
+		offsetof(struct dp_factory, part)))->refs); } \
+	static HRESULT WINAPI prefix##_iids(iface *This, ULONG *count, IID **iids) \
+	{ (void)This; return inspectable_iids(count, iids); } \
+	static HRESULT WINAPI prefix##_name(iface *This, HSTRING *name) \
+	{ (void)This; if (!name) return E_POINTER; \
+	  return WindowsCreateString(dependency_property_class, (UINT32)lstrlenW(dependency_property_class), name); } \
+	static HRESULT WINAPI prefix##_trust(iface *This, TrustLevel *level) \
+	{ (void)This; return inspectable_trust(level); }
+
+DP_FACTORY_PART(activation, IActivationFactory, dp_activation)
+DP_FACTORY_PART(statics, __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics, dp_statics)
+
+/* ActivateInstance: the class has no default constructor (statics-only); instances come only from Register. */
+static HRESULT WINAPI dp_activation_activate(IActivationFactory *iface, IInspectable **out)
+{
+	(void)iface;
+	if (out)
+		*out = NULL;
+	return E_NOTIMPL;
+}
+
+static const IActivationFactoryVtbl dp_activation_table = {
+	.QueryInterface = dp_activation_query,
+	.AddRef = dp_activation_addref,
+	.Release = dp_activation_release,
+	.GetIids = dp_activation_iids,
+	.GetRuntimeClassName = dp_activation_name,
+	.GetTrustLevel = dp_activation_trust,
+	.ActivateInstance = dp_activation_activate,
+};
+
+static HRESULT WINAPI dp_statics_unset(__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics *This, IInspectable **value)
+{
+	(void)This;
+	if (!value)
+		return E_POINTER;
+	*value = (IInspectable *)&dp_unset_instance;
+	dp_unset_addref(*value);
+	return S_OK;
+}
+
+static HRESULT WINAPI dp_statics_register(__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics *This, HSTRING name,
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName property_type,
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName owner_type, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *metadata,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty **out)
+{
+	(void)This;
+	return dp_register(name, property_type, owner_type, metadata, out);
+}
+
+/* RegisterAttached: there is no attached-property store to register into — the engine reads no attached value anywhere —
+ * so the slot answers the documented failure at its exact signature instead of handing out a property nothing can store. */
+static HRESULT WINAPI dp_statics_register_attached(__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics *This,
+	HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName property_type,
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName owner_type, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *metadata,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty **out)
+{
+	(void)This;
+	(void)name;
+	(void)property_type;
+	(void)owner_type;
+	(void)metadata;
+	if (out)
+		*out = NULL;
+	return E_NOTIMPL;
+}
+
+static const __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStaticsVtbl dp_statics_table = {
+	.QueryInterface = dp_statics_query,
+	.AddRef = dp_statics_addref,
+	.Release = dp_statics_release,
+	.GetIids = dp_statics_iids,
+	.GetRuntimeClassName = dp_statics_name,
+	.GetTrustLevel = dp_statics_trust,
+	.get_UnsetValue = dp_statics_unset,
+	.Register = dp_statics_register,
+	.RegisterAttached = dp_statics_register_attached,
+};
+
+static struct dp_factory dp_factory_instance = {
+	{&dp_activation_table}, {&dp_statics_table}, 1,
+};
+
+HRESULT raven_dependency_factory(HSTRING name, IActivationFactory **out)
+{
+	UINT32 length = 0;
+	const WCHAR *text;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	text = WindowsGetStringRawBuffer(name, &length);
+	if (!same_text(text, length, dependency_property_class))
+		return CLASS_E_CLASSNOTAVAILABLE;
+	InterlockedIncrement(&dp_factory_instance.refs);
+	*out = (IActivationFactory *)&dp_factory_instance.activation;
+	return S_OK;
+}
+
+__declspec(dllexport) HRESULT raven_xaml_dependency_statics(
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = (__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics *)&dp_factory_instance.statics;
+	dp_statics_addref(*out);
+	return S_OK;
+}
+
 /* The Setter */
 
 struct setter_object;
@@ -120,9 +637,11 @@ struct setter_object {
 	struct setterbase_part base;
 	LONG refs;
 	BOOL sealed;
-	/* The property NAME the engine addresses the setter by; a real DependencyProperty reference arrives with the
-	 * dependency-property stage, and until then ISetter.put_Property answers E_NOTIMPL. */
+	/* The property NAME the engine addresses the setter by — either the name raven_style_add_setter stored directly or
+	 * the name the DependencyProperty in `dp` was registered under, which put_Property copies here, so the put_Style
+	 * application walks a DP setter through the very same (name, value) pair store and needs no second path. */
 	HSTRING property;
+	struct dp_object *dp;
 	IInspectable *value;
 };
 
@@ -137,6 +656,8 @@ static ULONG setter_release_any(struct setter_object *self)
 	if (!refs) {
 		if (self->property)
 			WindowsDeleteString(self->property);
+		if (self->dp)
+			dp_release_any(self->dp);
 		if (self->value)
 			self->value->lpVtbl->Release(self->value);
 		FREE(self);
@@ -213,9 +734,48 @@ static HRESULT WINAPI setter_trust(__x_ABI_CWindows_CUI_CXaml_CISetter *iface, T
 	return inspectable_trust(level);
 }
 
-/* Property takes a DependencyProperty, which the engine has not yet; the name path is raven_style_add_setter. */
-STUB1(__x_ABI_CWindows_CUI_CXaml_CISetter, setter_property)
-STUB1_SET(__x_ABI_CWindows_CUI_CXaml_CISetter, setter_put_property)
+/* Property takes the DependencyProperty the setter is addressed by. The engine's own DP is required — a foreign
+ * IDependencyProperty implementation carries no registration the engine could read a property name from — and taking it
+ * copies the DP's registered name into the stored pair, where the application reads it. The DP reference is owned. A NULL
+ * put clears the DP but leaves the name it contributed: the engine re-applies on put and does not revert, so the pair the
+ * application walks stays what the last put made it, the put_Style convention. */
+static HRESULT WINAPI setter_property(__x_ABI_CWindows_CUI_CXaml_CISetter *This, uint64_t out)
+{
+	struct setter_object *self = (struct setter_object *)This;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = self->dp;
+	if (self->dp)
+		dp_addref_any(self->dp);
+	return S_OK;
+}
+
+static HRESULT WINAPI setter_put_property(__x_ABI_CWindows_CUI_CXaml_CISetter *This, uint64_t value)
+{
+	struct setter_object *self = (struct setter_object *)This;
+	IInspectable *candidate = (IInspectable *)(uintptr_t)value;
+	struct dp_object *dp = candidate ? dp_of(candidate) : NULL;
+	if (self->sealed)
+		return E_INVALIDARG;
+	if (candidate && !dp)
+		return E_INVALIDARG;
+	if (dp) {
+		UINT32 length = 0;
+		const WCHAR *name = WindowsGetStringRawBuffer(dp->name, &length);
+		HSTRING stored = NULL;
+		if (WindowsCreateString(name, length, &stored) != S_OK)
+			return E_OUTOFMEMORY;
+		if (self->property)
+			WindowsDeleteString(self->property);
+		self->property = stored;
+		dp_addref_any(dp);
+	}
+	if (self->dp)
+		dp_release_any(self->dp);
+	self->dp = dp;
+	raven_render_changed();
+	return S_OK;
+}
 
 static HRESULT WINAPI setter_value(__x_ABI_CWindows_CUI_CXaml_CISetter *iface, uint64_t out)
 {
@@ -912,6 +1472,117 @@ static const __x_ABI_CWindows_CUI_CXaml_CIStyleFactoryVtbl style_factory_table =
 
 static struct style_factory factory_instance = {&activation_table, &style_factory_table, 1};
 
+/* The Setter factory: the real Setter runtimeclass is activatable (a default constructor and, for the parameterized form,
+ * ISetterFactory.CreateInstance), so the engine answers the class name with a factory of its own. The setters it builds
+ * carry no property until put_Property takes a DependencyProperty, and none of the stored pairs exist until the name
+ * arrives — put_Property or raven_style_add_setter. Style's factory above stays Style-only, so each class name answers
+ * with a factory of its own class name. */
+struct setter_factory {
+	struct { const IActivationFactoryVtbl *lpVtbl; } activation;
+	struct { const __x_ABI_CWindows_CUI_CXaml_CISetterFactoryVtbl *lpVtbl; } setter;
+	LONG refs;
+};
+
+static HRESULT setter_factory_query_any(struct setter_factory *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory))
+		*out = &self->activation;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CISetterFactory))
+		*out = &self->setter;
+	else
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	return S_OK;
+}
+
+/* The same one-COM-object rule as the style factory's parts: the owner comes from the part's own offset, only the
+ * activation part sits at the struct's front. */
+#define SETTER_FACTORY_PART(part, iface, prefix) \
+	static HRESULT WINAPI prefix##_query(iface *This, REFIID iid, void **out) \
+	{ return setter_factory_query_any((struct setter_factory *)((char *)This - \
+		offsetof(struct setter_factory, part)), iid, out); } \
+	static ULONG WINAPI prefix##_addref(iface *This) \
+	{ return (ULONG)InterlockedIncrement(&((struct setter_factory *)((char *)This - \
+		offsetof(struct setter_factory, part)))->refs); } \
+	static ULONG WINAPI prefix##_release(iface *This) \
+	{ return (ULONG)InterlockedDecrement(&((struct setter_factory *)((char *)This - \
+		offsetof(struct setter_factory, part)))->refs); } \
+	static HRESULT WINAPI prefix##_iids(iface *This, ULONG *count, IID **iids) \
+	{ (void)This; return inspectable_iids(count, iids); } \
+	static HRESULT WINAPI prefix##_name(iface *This, HSTRING *name) \
+	{ (void)This; if (!name) return E_POINTER; \
+	  return WindowsCreateString(setter_class, (UINT32)lstrlenW(setter_class), name); } \
+	static HRESULT WINAPI prefix##_trust(iface *This, TrustLevel *level) \
+	{ (void)This; return inspectable_trust(level); }
+
+SETTER_FACTORY_PART(activation, IActivationFactory, setter_activation)
+SETTER_FACTORY_PART(setter, __x_ABI_CWindows_CUI_CXaml_CISetterFactory, setter_sf)
+
+static HRESULT WINAPI setter_activation_activate(IActivationFactory *iface, IInspectable **out)
+{
+	(void)iface;
+	struct setter_object *setter;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	setter = create_setter(NULL, 0, NULL);
+	if (!setter)
+		return E_OUTOFMEMORY;
+	*out = (IInspectable *)setter;
+	return S_OK;
+}
+
+static const IActivationFactoryVtbl setter_activation_table = {
+	.QueryInterface = setter_activation_query,
+	.AddRef = setter_activation_addref,
+	.Release = setter_activation_release,
+	.GetIids = setter_activation_iids,
+	.GetRuntimeClassName = setter_activation_name,
+	.GetTrustLevel = setter_activation_trust,
+	.ActivateInstance = setter_activation_activate,
+};
+
+/* The parameterized constructor the real ISetterFactory carries: Setter(targetProperty, value). The property must be an
+ * engine DependencyProperty — a foreign one carries no registration the engine could read a name from; the value may be
+ * NULL, the shape an unset Value round-trips. */
+static HRESULT WINAPI setter_factory_create(__x_ABI_CWindows_CUI_CXaml_CISetterFactory *iface, uint64_t property,
+	uint64_t value, uint64_t out)
+{
+	struct setter_object *setter;
+	HRESULT result;
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = NULL;
+	setter = create_setter(NULL, 0, NULL);
+	if (!setter)
+		return E_OUTOFMEMORY;
+	result = setter_put_property((__x_ABI_CWindows_CUI_CXaml_CISetter *)setter, property);
+	if (SUCCEEDED(result))
+		result = setter_put_value((__x_ABI_CWindows_CUI_CXaml_CISetter *)setter, value);
+	if (FAILED(result)) {
+		setter_release_any(setter);
+		return result;
+	}
+	*(void **)(uintptr_t)out = setter;
+	return S_OK;
+}
+
+static const __x_ABI_CWindows_CUI_CXaml_CISetterFactoryVtbl setter_factory_table = {
+	.QueryInterface = setter_sf_query,
+	.AddRef = setter_sf_addref,
+	.Release = setter_sf_release,
+	.GetIids = setter_sf_iids,
+	.GetRuntimeClassName = setter_sf_name,
+	.GetTrustLevel = setter_sf_trust,
+	.CreateInstance = setter_factory_create,
+};
+
+static struct setter_factory setter_factory_instance = {{&setter_activation_table}, {&setter_factory_table}, 1};
+
 HRESULT raven_style_factory(HSTRING name, IActivationFactory **out)
 {
 	UINT32 length = 0;
@@ -920,11 +1591,17 @@ HRESULT raven_style_factory(HSTRING name, IActivationFactory **out)
 		return E_POINTER;
 	*out = NULL;
 	text = WindowsGetStringRawBuffer(name, &length);
-	if (!same_text(text, length, style_class))
-		return CLASS_E_CLASSNOTAVAILABLE;
-	InterlockedIncrement(&factory_instance.refs);
-	*out = (IActivationFactory *)&factory_instance;
-	return S_OK;
+	if (same_text(text, length, style_class)) {
+		InterlockedIncrement(&factory_instance.refs);
+		*out = (IActivationFactory *)&factory_instance;
+		return S_OK;
+	}
+	if (same_text(text, length, setter_class)) {
+		InterlockedIncrement(&setter_factory_instance.refs);
+		*out = (IActivationFactory *)&setter_factory_instance.activation;
+		return S_OK;
+	}
+	return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 /* The engine-internal surface xaml_styles.h declares. */
@@ -1012,6 +1689,23 @@ __declspec(dllexport) HRESULT raven_style_setter_at(IInspectable *style, UINT32 
 		++position;
 	}
 	return E_BOUNDS;
+}
+
+/* A fresh engine Setter, the answer of the Setter factory's ActivateInstance: the runtime catalog does not list the Setter
+ * class yet either, so the style fixture reaches this through GetProcAddress the way it reaches the other engine-internal
+ * exports; the activation path answers the same object once the entry lands. The setter carries no property and no pair
+ * until put_Property or raven_style_add_setter fills one. */
+__declspec(dllexport) HRESULT raven_xaml_setter_create(IInspectable **out)
+{
+	struct setter_object *setter;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	setter = create_setter(NULL, 0, NULL);
+	if (!setter)
+		return E_OUTOFMEMORY;
+	*out = (IInspectable *)setter;
+	return S_OK;
 }
 
 /* The chain application the element's put_Style drives. The callback receives every stored setter pair — the BasedOn

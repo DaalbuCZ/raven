@@ -18,7 +18,14 @@
  * round last: a fresh control the engine attached its default to answers get_Style with an engine Style whose setter
  * pairs carry the authored values (the button's transparent Background, the text block's FontSize 14 and black
  * Foreground), the defaults render through the same pipeline a put drives, an explicit put_Style overrides the default
- * and get_Style answers the app's style, and put_Style(NULL) clears as before without reverting. Freestanding C like the
+ * and get_Style answers the app's style, and put_Style(NULL) clears as before without reverting. The DependencyProperty
+ * stage runs after those: the statics come through the engine-internal export and through RoGetActivationFactory (the
+ * cataloged class name resolves the same singleton), two DPs register with defaults carried on hand-rolled
+ * IPropertyMetadata objects, the metadata readers round-trip name, TypeName, OwnerType and the default value's identity,
+ * the duplicate (owner, name) contract refuses, the same name under another owner registers, RegisterAttached answers
+ * E_NOTIMPL, UnsetValue is one identity-stable sentinel, and a Setter carrying a DP applies through put_Style to the same
+ * pixels the name-string setters reach — the DP's registered name flowing into the same (name, value) pair store, read
+ * back through setter_count/setter_at. Freestanding C like the
  * other guests: hand-rolled COM, no CRT beyond the freestanding one the build links. */
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID
@@ -35,6 +42,7 @@
 #include "windows_ui_xaml_dictionary.h"
 #include "windows_ui_xaml_elements.h"
 #include "windows_ui_xaml_style.h"
+#include "xaml_styles.h" /* the DependencyProperty interfaces, IIDs and the engine-internal interop part */
 #include "windows_ui_xaml_window.h"
 
 typedef __x_ABI_CWindows_CUI_CXaml_CIStyle style_i;
@@ -52,6 +60,12 @@ typedef __FIReference_1_DOUBLE boxed_number_i;
 typedef __FIReference_1_DOUBLEVtbl boxed_number_i_vtbl;
 typedef __FIVector_1_Windows__CUI__CXaml__CSetterBase setter_vector_i;
 typedef __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName type_name_s;
+typedef __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty dp_i;
+typedef __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics dp_statics_i;
+typedef __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata metadata_i;
+typedef __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataVtbl metadata_i_vtbl;
+typedef __x_ABI_CWindows_CUI_CXaml_CISetter setter_i;
+typedef raven_dependency_property_interop dp_interop_i;
 
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
@@ -64,6 +78,8 @@ typedef HRESULT (*get_style_function)(IInspectable *, IInspectable **);
 typedef HRESULT (*default_attach_function)(IInspectable *);
 typedef HRESULT (*setter_count_function)(IInspectable *, UINT32 *);
 typedef HRESULT (*setter_at_function)(IInspectable *, UINT32, const WCHAR **, UINT32 *, IInspectable **);
+typedef HRESULT (*dependency_statics_function)(dp_statics_i **);
+typedef HRESULT (*setter_create_function)(IInspectable **);
 
 static int same_text(HSTRING value, const WCHAR *expected)
 {
@@ -349,6 +365,143 @@ static struct fixture_number *make_number(double value)
 	return self;
 }
 
+/* A hand-rolled IPropertyMetadata: the object a DependencyProperty registration takes its default value from, built the
+ * way the boxes above are hand-rolled IReference`1 — the increment implements DependencyProperty, not PropertyMetadata,
+ * and the engine reads only get_DefaultValue through the real IID. */
+struct fixture_metadata;
+struct fixture_metadata_part {
+	const metadata_i_vtbl *lpVtbl;
+	struct fixture_metadata *owner;
+};
+struct fixture_metadata {
+	const IInspectableVtbl *lpVtbl;
+	struct fixture_metadata_part part;
+	LONG refs;
+	IInspectable *value;
+};
+
+static ULONG fixture_metadata_addref(struct fixture_metadata *self)
+{
+	return (ULONG)InterlockedIncrement(&self->refs);
+}
+
+static ULONG fixture_metadata_release_any(struct fixture_metadata *self)
+{
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->value)
+			self->value->lpVtbl->Release(self->value);
+		HeapFree(GetProcessHeap(), 0, self);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI metadata_query(IInspectable *iface, REFIID iid, void **object)
+{
+	struct fixture_metadata *self = (struct fixture_metadata *)iface;
+	if (!object)
+		return E_POINTER;
+	*object = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable))
+		*object = iface;
+	else if (IsEqualIID(iid, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata))
+		*object = &self->part;
+	else
+		return E_NOINTERFACE;
+	fixture_metadata_addref(self);
+	return S_OK;
+}
+
+static HRESULT WINAPI metadata_part_query(metadata_i *iface, REFIID iid, void **object)
+{
+	return metadata_query((IInspectable *)((struct fixture_metadata_part *)iface)->owner, iid, object);
+}
+
+static ULONG WINAPI metadata_addref(IInspectable *iface) { return fixture_metadata_addref((struct fixture_metadata *)iface); }
+static ULONG WINAPI metadata_release(IInspectable *iface) { return fixture_metadata_release_any((struct fixture_metadata *)iface); }
+static ULONG WINAPI metadata_part_addref(metadata_i *iface)
+{
+	return fixture_metadata_addref(((struct fixture_metadata_part *)iface)->owner);
+}
+static ULONG WINAPI metadata_part_release(metadata_i *iface)
+{
+	return fixture_metadata_release_any(((struct fixture_metadata_part *)iface)->owner);
+}
+
+static HRESULT WINAPI metadata_iids(IInspectable *iface, ULONG *count, IID **iids)
+{ (void)iface; if (!count || !iids) return E_POINTER; *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI metadata_part_iids(metadata_i *iface, ULONG *count, IID **iids)
+{ (void)iface; if (!count || !iids) return E_POINTER; *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI metadata_trust(IInspectable *iface, TrustLevel *level)
+{ (void)iface; if (!level) return E_POINTER; *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI metadata_part_trust(metadata_i *iface, TrustLevel *level)
+{ (void)iface; if (!level) return E_POINTER; *level = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI metadata_name(IInspectable *iface, HSTRING *name)
+{
+	static const WCHAR text[] = L"Raven.Fixture.PropertyMetadata";
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(text, ARRAYSIZE(text) - 1, name);
+}
+
+static HRESULT WINAPI metadata_part_name(metadata_i *iface, HSTRING *name)
+{
+	return metadata_name((IInspectable *)((struct fixture_metadata_part *)iface)->owner, name);
+}
+
+static HRESULT WINAPI metadata_default_value(metadata_i *iface, IInspectable **value)
+{
+	struct fixture_metadata *self = ((struct fixture_metadata_part *)iface)->owner;
+	if (!value)
+		return E_POINTER;
+	*value = self->value;
+	if (*value)
+		(*value)->lpVtbl->AddRef(*value);
+	return S_OK;
+}
+
+static HRESULT WINAPI metadata_create_callback(metadata_i *iface, void **value)
+{
+	(void)iface;
+	if (!value)
+		return E_POINTER;
+	*value = NULL; /* a metadata built with a value carries no factory callback */
+	return S_OK;
+}
+
+static const IInspectableVtbl metadata_inspectable_table = {
+	metadata_query, metadata_addref, metadata_release, metadata_iids, metadata_name, metadata_trust,
+};
+
+static const metadata_i_vtbl metadata_part_table = {
+	metadata_part_query, metadata_part_addref, metadata_part_release, metadata_part_iids, metadata_part_name,
+	metadata_part_trust, metadata_default_value, metadata_create_callback,
+};
+
+static struct fixture_metadata *make_metadata(IInspectable *value)
+{
+	struct fixture_metadata *self = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *self);
+	if (!self)
+		return NULL;
+	self->lpVtbl = &metadata_inspectable_table;
+	self->part.lpVtbl = &metadata_part_table;
+	self->part.owner = self;
+	self->refs = 1;
+	if (value) {
+		value->lpVtbl->AddRef(value);
+		self->value = value;
+	}
+	return self;
+}
+
+static void fixture_metadata_release(struct fixture_metadata *self)
+{
+	if (self)
+		fixture_metadata_release_any(self);
+}
+
 /* The parameterized IVector`1<UIElement> a panel's Children hands out: the GUID is the derivation the element layer
  * documents (SHA-1 of the signature over the parameterized-type namespace), the vtable the twelve IVector`1 slots after
  * the IInspectable ones. The engine's children vector answers this IID, so the fixture can append a child the way the
@@ -484,6 +637,17 @@ int raven_entry(void)
 	struct fixture_number *size32 = NULL, *size14 = NULL, *seven = NULL, *three = NULL, *size8 = NULL;
 	UINT count14 = 0, count32 = 0, count_default = 0, count_override = 0;
 	float font_size = 0;
+	dp_statics_i *dp_statics = NULL;
+	dp_i *font_dp = NULL, *background_dp = NULL, *grid_dp = NULL, *property_read = NULL, *property_read2 = NULL;
+	setter_i *dp_setter = NULL, *dp_setter2 = NULL;
+	IInspectable *setter_object = NULL, *setter_object2 = NULL, *style3 = NULL, *style4 = NULL;
+	IInspectable *dp_unset1 = NULL, *dp_unset2 = NULL;
+	style_i *style3_iface = NULL, *style4_iface = NULL;
+	setter_vector_i *style3_setters = NULL, *style4_setters = NULL;
+	struct fixture_metadata *font_metadata = NULL, *bg_metadata = NULL;
+	struct fixture_number *font_default = NULL, *forty = NULL;
+	struct fixture_box *bg_default = NULL, *dp_blue = NULL;
+	HSTRING font_key = NULL, bg_key = NULL;
 	if (!initialize || !get_factory)
 		return 1;
 	if (initialize(1) != S_OK)
@@ -945,6 +1109,262 @@ int raven_entry(void)
 	if (default_text_iface->lpVtbl->get_FontSize(default_text_iface, (uint64_t)(uintptr_t)&font_size) != S_OK ||
 		font_size != 8.0f)
 		return 143;
+	/* The DependencyProperty stage. The statics come through the engine-internal export and — now that the class is
+	 * cataloged — through RoGetActivationFactory: both hands resolve the same singleton the activation chain reaches. */
+	dependency_statics_function dependency_statics = component ?
+		(dependency_statics_function)GetProcAddress(component, "raven_xaml_dependency_statics") : NULL;
+	setter_create_function setter_create = component ?
+		(setter_create_function)GetProcAddress(component, "raven_xaml_setter_create") : NULL;
+	if (!dependency_statics || !setter_create)
+		return 144;
+	if (dependency_statics(&dp_statics) != S_OK || !dp_statics)
+		return 145;
+	{
+		HSTRING dp_key = NULL;
+		static const WCHAR dp_class[] = L"Windows.UI.Xaml.DependencyProperty";
+		dp_statics_i *chained = NULL;
+		if (WindowsCreateString(dp_class, ARRAYSIZE(dp_class) - 1, &dp_key) != S_OK)
+			return 145;
+		if (get_factory(dp_key, &IID___x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics, (void **)&chained) != S_OK ||
+			chained != dp_statics) {
+			WindowsDeleteString(dp_key);
+			return 145;
+		}
+		WindowsDeleteString(dp_key);
+		dp_statics->lpVtbl->Release(chained);
+	}
+	/* the metadata objects the registrations take their default values from: hand-rolled IPropertyMetadata the way the
+	 * boxes above are hand-rolled IReference`1, because this increment implements DependencyProperty, not
+	 * PropertyMetadata */
+	if (!(font_default = make_number(24.0)))
+		return 146;
+	if (!(font_metadata = make_metadata((IInspectable *)font_default)))
+		return 147;
+	if (!(bg_default = make_box(L"Green")))
+		return 148;
+	if (!(bg_metadata = make_metadata((IInspectable *)bg_default)))
+		return 149;
+	if (WindowsCreateString(L"FontSize", (UINT32)lstrlenW(L"FontSize"), &font_key) != S_OK)
+		return 150;
+	if (WindowsCreateString(L"Background", (UINT32)lstrlenW(L"Background"), &bg_key) != S_OK)
+		return 151;
+	/* Register: the TextBlock-owned FontSize, whose default the metadata's real DefaultValue slot carries */
+	{
+		type_name_s property_type, owner_type;
+		HRESULT result;
+		if (WindowsCreateString(L"Double", (UINT32)lstrlenW(L"Double"), &property_type.Name) != S_OK)
+			return 152;
+		property_type.Kind = TypeKind_Primitive;
+		if (WindowsCreateString(textblock_name, ARRAYSIZE(textblock_name) - 1, &owner_type.Name) != S_OK) {
+			WindowsDeleteString(property_type.Name);
+			return 152;
+		}
+		owner_type.Kind = TypeKind_Metadata;
+		result = dp_statics->lpVtbl->Register(dp_statics, font_key, property_type, owner_type,
+			(metadata_i *)&font_metadata->part, &font_dp);
+		WindowsDeleteString(property_type.Name);
+		WindowsDeleteString(owner_type.Name);
+		if (result != S_OK || !font_dp)
+			return 153;
+	}
+	/* the metadata readers round-trip the registration through the engine-internal interop part the engine object
+	 * answers next to the real IDependencyProperty */
+	{
+		dp_interop_i *interop = NULL;
+		HSTRING read = NULL;
+		type_name_s type;
+		IInspectable *value = NULL;
+		if (((IInspectable *)font_dp)->lpVtbl->QueryInterface((IInspectable *)font_dp,
+			&raven_dependency_property_interop_iid, (void **)&interop) != S_OK || !interop)
+			return 154;
+		if (interop->lpVtbl->get_Name(interop, &read) != S_OK || !read || !same_text(read, L"FontSize"))
+			return 155;
+		WindowsDeleteString(read);
+		if (interop->lpVtbl->get_TypeName(interop, &type) != S_OK || !type.Name)
+			return 156;
+		if (!same_text(type.Name, L"Double") || type.Kind != TypeKind_Primitive)
+			return 157;
+		WindowsDeleteString(type.Name);
+		if (interop->lpVtbl->get_OwnerType(interop, &type) != S_OK || !type.Name)
+			return 158;
+		if (!same_text(type.Name, textblock_name) || type.Kind != TypeKind_Metadata)
+			return 159;
+		WindowsDeleteString(type.Name);
+		if (interop->lpVtbl->get_DefaultValue(interop, &value) != S_OK || !value)
+			return 160;
+		if (!same_unknown(value, (IInspectable *)font_default))
+			return 161;
+		value->lpVtbl->Release(value);
+		interop->lpVtbl->Release(interop);
+	}
+	/* the button-owned Background with the string default */
+	{
+		type_name_s property_type, owner_type;
+		HRESULT result;
+		if (WindowsCreateString(L"String", (UINT32)lstrlenW(L"String"), &property_type.Name) != S_OK)
+			return 162;
+		property_type.Kind = TypeKind_Primitive;
+		if (WindowsCreateString(button_name, ARRAYSIZE(button_name) - 1, &owner_type.Name) != S_OK) {
+			WindowsDeleteString(property_type.Name);
+			return 162;
+		}
+		owner_type.Kind = TypeKind_Metadata;
+		result = dp_statics->lpVtbl->Register(dp_statics, bg_key, property_type, owner_type,
+			(metadata_i *)&bg_metadata->part, &background_dp);
+		WindowsDeleteString(property_type.Name);
+		WindowsDeleteString(owner_type.Name);
+		if (result != S_OK || !background_dp)
+			return 163;
+	}
+	/* the duplicate contract: the same (owner, name) refuses, the same name under a different owner registers (no
+	 * metadata: the default stays NULL) */
+	{
+		type_name_s property_type, owner_type;
+		HRESULT result;
+		if (WindowsCreateString(L"Double", (UINT32)lstrlenW(L"Double"), &property_type.Name) != S_OK)
+			return 164;
+		property_type.Kind = TypeKind_Primitive;
+		if (WindowsCreateString(textblock_name, ARRAYSIZE(textblock_name) - 1, &owner_type.Name) != S_OK) {
+			WindowsDeleteString(property_type.Name);
+			return 164;
+		}
+		owner_type.Kind = TypeKind_Metadata;
+		result = dp_statics->lpVtbl->Register(dp_statics, font_key, property_type, owner_type, NULL, &grid_dp);
+		WindowsDeleteString(property_type.Name);
+		WindowsDeleteString(owner_type.Name);
+		if (result != E_INVALIDARG)
+			return 165;
+		if (WindowsCreateString(grid_name, ARRAYSIZE(grid_name) - 1, &owner_type.Name) != S_OK)
+			return 166;
+		owner_type.Kind = TypeKind_Metadata;
+		result = dp_statics->lpVtbl->Register(dp_statics, font_key, property_type, owner_type, NULL, &grid_dp);
+		WindowsDeleteString(property_type.Name);
+		WindowsDeleteString(owner_type.Name);
+		if (result != S_OK || !grid_dp)
+			return 167;
+	}
+	/* RegisterAttached answers the documented failure: no attached-property store exists to register into */
+	{
+		type_name_s property_type, owner_type;
+		HRESULT result;
+		if (WindowsCreateString(L"Double", (UINT32)lstrlenW(L"Double"), &property_type.Name) != S_OK)
+			return 168;
+		property_type.Kind = TypeKind_Primitive;
+		if (WindowsCreateString(grid_name, ARRAYSIZE(grid_name) - 1, &owner_type.Name) != S_OK) {
+			WindowsDeleteString(property_type.Name);
+			return 168;
+		}
+		owner_type.Kind = TypeKind_Metadata;
+		result = dp_statics->lpVtbl->RegisterAttached(dp_statics, font_key, property_type, owner_type, NULL, &grid_dp);
+		WindowsDeleteString(property_type.Name);
+		WindowsDeleteString(owner_type.Name);
+		if (result != E_NOTIMPL)
+			return 169;
+	}
+	/* UnsetValue: one identity-stable sentinel across the calls */
+	if (dp_statics->lpVtbl->get_UnsetValue(dp_statics, &dp_unset1) != S_OK || !dp_unset1)
+		return 170;
+	if (dp_statics->lpVtbl->get_UnsetValue(dp_statics, &dp_unset2) != S_OK || !dp_unset2)
+		return 171;
+	if (dp_statics->lpVtbl->get_UnsetValue(dp_statics, &dp_unset2) != S_OK || !dp_unset2)
+		return 171;
+	if (!same_unknown(dp_unset1, dp_unset2))
+		return 172;
+	dp_unset1->lpVtbl->Release(dp_unset1);
+	dp_unset2->lpVtbl->Release(dp_unset2);
+	dp_unset1 = NULL;
+	dp_unset2 = NULL;
+	/* the Setter carries the DP: put_Property takes the engine object and copies its registered name into the stored
+	 * pair, so the application walks a DP setter through the very same (name, value) store the name-string setters
+	 * fill, and put_Style applies it the way it applied every round above */
+	if (setter_create(&setter_object) != S_OK || !setter_object)
+		return 173;
+	if (setter_object->lpVtbl->QueryInterface(setter_object, &IID__x_ABI_CWindows_CUI_CXaml_CISetter,
+		(void **)&dp_setter) != S_OK || !dp_setter)
+		return 174;
+	if (dp_setter->lpVtbl->put_Property(dp_setter, (uint64_t)(uintptr_t)background_dp) != S_OK)
+		return 175;
+	if (dp_setter->lpVtbl->get_Property(dp_setter, (uint64_t)(uintptr_t)&property_read) != S_OK || !property_read)
+		return 176;
+	if (!same_unknown(property_read, background_dp))
+		return 177;
+	property_read->lpVtbl->Release(property_read);
+	property_read = NULL;
+	/* a foreign "property" — an object that is no engine DependencyProperty — is refused: it carries no registration
+	 * the engine could read a property name from */
+	if (dp_setter->lpVtbl->put_Property(dp_setter, (uint64_t)(uintptr_t)style) != E_INVALIDARG)
+		return 178;
+	if (!(dp_blue = make_box(L"Blue")))
+		return 179;
+	if (dp_setter->lpVtbl->put_Value(dp_setter, (uint64_t)(uintptr_t)dp_blue) != S_OK)
+		return 180;
+	/* the DP setter appended through the real Setters vector of a fresh style */
+	if (activate(style_name, &style3) != S_OK || !style3)
+		return 181;
+	if (style3->lpVtbl->QueryInterface(style3, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style3_iface) != S_OK ||
+		!style3_iface)
+		return 182;
+	if (style3_iface->lpVtbl->get_Setters(style3_iface, (uint64_t)(uintptr_t)&style3_setters) != S_OK ||
+		!style3_setters)
+		return 183;
+	if (style3_setters->lpVtbl->Append(style3_setters, (__x_ABI_CWindows_CUI_CXaml_CISetterBase *)dp_setter) != S_OK)
+		return 184;
+	/* hosting the styled grid again and putting the DP style: the pixel follows the DP setter the way it follows the
+	 * name-string round at the top, and the pair store hands the setter out under its registered name */
+	if (xaml_window->lpVtbl->put_Content(xaml_window, (uint64_t)(uintptr_t)grid_styled) != S_OK)
+		return 185;
+	if (put_style(grid_styled, style3) != S_OK)
+		return 186;
+	if (color_at(hwnd, 300, 200, RGB(0, 0, 255)))
+		return 187;
+	if (color_at(hwnd, 600, 500, RGB(0, 0, 255)))
+		return 188;
+	{
+		UINT32 pairs = 0;
+		const WCHAR *property = NULL;
+		UINT32 length = 0;
+		IInspectable *value = NULL;
+		if (setter_count(style3, &pairs) != S_OK || pairs != 1)
+			return 189;
+		if (setter_at(style3, 0, &property, &length, &value) != S_OK || !property || !value)
+			return 190;
+		if (!same_raw(property, length, L"Background"))
+			return 191;
+		value->lpVtbl->Release(value);
+	}
+	/* the text block round: the TextBlock-owned FontSize DP setter lands in the real font size through the same
+	 * application, the owner recorded at registration NOT being checked (the name drives the setter) */
+	if (activate(style_name, &style4) != S_OK || !style4)
+		return 192;
+	if (setter_create(&setter_object2) != S_OK || !setter_object2)
+		return 193;
+	if (setter_object2->lpVtbl->QueryInterface(setter_object2, &IID__x_ABI_CWindows_CUI_CXaml_CISetter,
+		(void **)&dp_setter2) != S_OK || !dp_setter2)
+		return 194;
+	if (dp_setter2->lpVtbl->put_Property(dp_setter2, (uint64_t)(uintptr_t)font_dp) != S_OK)
+		return 195;
+	if (!(forty = make_number(40.0)))
+		return 196;
+	if (dp_setter2->lpVtbl->put_Value(dp_setter2, (uint64_t)(uintptr_t)forty) != S_OK)
+		return 197;
+	if (dp_setter2->lpVtbl->get_Property(dp_setter2, (uint64_t)(uintptr_t)&property_read2) != S_OK || !property_read2)
+		return 198;
+	if (!same_unknown(property_read2, font_dp))
+		return 199;
+	property_read2->lpVtbl->Release(property_read2);
+	property_read2 = NULL;
+	if (style4->lpVtbl->QueryInterface(style4, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style4_iface) != S_OK ||
+		!style4_iface)
+		return 200;
+	if (style4_iface->lpVtbl->get_Setters(style4_iface, (uint64_t)(uintptr_t)&style4_setters) != S_OK ||
+		!style4_setters)
+		return 201;
+	if (style4_setters->lpVtbl->Append(style4_setters, (__x_ABI_CWindows_CUI_CXaml_CISetterBase *)dp_setter2) != S_OK)
+		return 202;
+	if (put_style(textblock, style4) != S_OK)
+		return 203;
+	if (text_iface->lpVtbl->get_FontSize(text_iface, (uint64_t)(uintptr_t)&font_size) != S_OK || font_size != 40.0f)
+		return 204;
 	/* release everything: the window's own reference goes with Close, and clearing the content detaches the hosted tree
 	 * from the render and input roots. The component cannot answer DllCanUnloadNow with S_OK after a render — the
 	 * composition target keeps the presented visual tree until the process ends, which is why the rendering fixture never
@@ -1015,6 +1435,54 @@ int raven_entry(void)
 		grid_styled->lpVtbl->Release(grid_styled);
 	if (grid_plain)
 		grid_plain->lpVtbl->Release(grid_plain);
+	/* the DependencyProperty round: the DPs themselves live in the engine's registration store (component lifetime, the
+	 * way the authored defaults are), so what releases here is what the fixture owns */
+	if (property_read)
+		property_read->lpVtbl->Release(property_read);
+	if (property_read2)
+		property_read2->lpVtbl->Release(property_read2);
+	if (dp_setter)
+		dp_setter->lpVtbl->Release(dp_setter);
+	if (dp_setter2)
+		dp_setter2->lpVtbl->Release(dp_setter2);
+	if (setter_object)
+		setter_object->lpVtbl->Release(setter_object);
+	if (setter_object2)
+		setter_object2->lpVtbl->Release(setter_object2);
+	if (style3_iface)
+		style3_iface->lpVtbl->Release(style3_iface);
+	if (style4_iface)
+		style4_iface->lpVtbl->Release(style4_iface);
+	if (style3_setters)
+		style3_setters->lpVtbl->Release(style3_setters);
+	if (style4_setters)
+		style4_setters->lpVtbl->Release(style4_setters);
+	if (style3)
+		style3->lpVtbl->Release(style3);
+	if (style4)
+		style4->lpVtbl->Release(style4);
+	if (font_dp)
+		font_dp->lpVtbl->Release(font_dp);
+	if (background_dp)
+		background_dp->lpVtbl->Release(background_dp);
+	if (grid_dp)
+		grid_dp->lpVtbl->Release(grid_dp);
+	if (dp_unset1)
+		dp_unset1->lpVtbl->Release(dp_unset1);
+	if (dp_unset2)
+		dp_unset2->lpVtbl->Release(dp_unset2);
+	if (dp_statics)
+		dp_statics->lpVtbl->Release(dp_statics);
+	fixture_metadata_release(font_metadata);
+	fixture_metadata_release(bg_metadata);
+	fixture_number_release(font_default);
+	fixture_number_release(forty);
+	fixture_box_release(bg_default);
+	fixture_box_release(dp_blue);
+	if (font_key)
+		WindowsDeleteString(font_key);
+	if (bg_key)
+		WindowsDeleteString(bg_key);
 	xaml_window->lpVtbl->Release(xaml_window);
 	window_statics->lpVtbl->Release(window_statics);
 	window_activation->lpVtbl->Release(window_activation);
