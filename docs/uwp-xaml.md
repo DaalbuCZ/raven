@@ -1212,16 +1212,59 @@ MapChanged subscription → `Lookup("language")` = `en-US` → Languages —
 then .NET Native initializes `CultureInfo` for the neutral culture
 `"en"` and fail-fasts when `GetLocaleInfoEx` near-variant queries
 (`LOCALE_SNAME`/`SPARENT`/…, flags like `0x20001010`) meet the host's
-en-US-only NLS. That is the next wall: a wider synthetic-but-consistent
-en dataset in `text_api.cpp`. Also queued by the trace:
-`RoOriginateLanguageException` (host no-op — needed before HRESULT
-failures become survivable in .NET Native's exception machinery),
-apartment-aware marshaling (`IAgileObject`/`IMarshal` requested and
-refused so far), and lifting the weak-reference helper into
-`xaml_internal.h` when Window/Page objects need it. Evidence:
+en-US-only NLS. That wall and the marshaling/weak-reference walls fell
+the same day — see the two entries below. Evidence:
 `launch-stage7-1.log` (pre-fix wall) and `launch-stage7-final.log`
 (post-fix state). `native_mrt_x64`/`_x32` and `native_mrt_manager_x64`/
-`_x32` pin the new surface (codes 60–78).
+`_x32` pin the new surface (codes 60–85).
+
+- Neutral-culture NLS (2026-10-31, stage 7): the trace corrected the
+  brief — the old host's `SPARENT("en")` = `""` was already right (Wine's
+  conformance suite asserts the empty parent; .NET's invariant walk
+  depends on it). The load-bearing gaps were `LOCALE_INEUTRAL` (served 0
+  for `en` where 1 is required, sending .NET down the specific-culture
+  branch and into the near-variant queries) and the absent
+  `ResolveLocaleName`. Fixes in `text_api.cpp`: neutral cultures differ
+  from their specific form only in identity fields (SNAME canonical,
+  SPARENT `""`, INEUTRAL 1, ILANGUAGE the language id — `en`→`0009`,
+  number 9 with `RETURN_NUMBER`); the invariant answers only its empty
+  SNAME/SPARENT and refuses other kinds; `ResolveLocaleName` maps
+  neutral → Windows's documented default specific (`ar`→`ar-SA`,
+  `zh-Hans`→`zh-CN`, …) and passes specifics through; unknown names and
+  kinds now fail `ERROR_INVALID_PARAMETER` instead of receiving invented
+  en-US data; and the prelude fast path — which answers by LCTYPE
+  without seeing the name — now dispatches the four name-dependent
+  types to the runtime handler. `RoOriginateLanguageException`
+  (`platform_api.cpp`) is implemented with its real BOOL signature and
+  per-thread originate record; honest limit stated: no
+  `IRestrictedErrorInfo` object exists to hand back, so
+  `GetRestrictedErrorInfo` still reports none. The Shapr3D culture walk
+  now completes (en-US init → neutral `en` init → parent walk →
+  invariant) with every visible NLS answer matching real Windows
+  (`launch-stage7b-2.log`); the next throw is .NET Native's
+  unhandled-exception drain with no failing API ahead of it. Pinned by
+  `native_locale_cli` (checks 22–47).
+- Weak references and apartment awareness (2026-10-31, stage 7): the
+  weak-reference helper lifted into `xaml_internal.h` — and the lift
+  exposed a real lifetime bug in the first implementation: it AddRef'd
+  the owner (which could never die while referenced) and its own release
+  decremented the owner without running the release path, leaking the
+  owner and unbalancing `raven_xaml_objects`. The lifted design gives
+  the reference a shared target block holding **no** owner reference;
+  the owner disconnects in its release path and a later Resolve answers
+  the documented null. `IAgileObject` is answered where thread-safety
+  justifies it — ResourceContext, the qualifier map/view/observable
+  (subscription list now lock-guarded), CoreApplication, PropertySet
+  instances — and refused with inline reasons on thread-affine objects
+  (Languages vector's unsynchronized buffer, CoreApplicationView, XAML
+  Window per-TLS state); the weak-reference part forwards the marker ask
+  to its owner. `IMarshal` stays unimplemented (no cross-apartment
+  invocation infrastructure) with the refusal documented. Adoption also
+  caught an x86 cdecl/stdcall mismatch in the helper's function-pointer
+  type that segfaulted the 32-bit fixture. Fixtures: `mrt_client.c`
+  codes 79–85 (agile markers, owner-death resolve) and
+  `xaml_window_client.c` 25–28 (window weak source, resolve identity,
+  agile refusal pinned).
 
 ## Performance rules
 
