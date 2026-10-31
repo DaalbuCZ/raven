@@ -132,9 +132,13 @@ built for both.
   Event dispatch holds a snapshot, so handlers can revoke themselves or add
   subscriptions during dispatch. `CoreApplication.Exit` posts `WM_QUIT` to the
   UI thread, including from another thread; `Exiting` runs after `Uninitialize`.
-- Application limits: one view; no `RunWithActivationFactories` or
-  suspend/resume event delivery (`E_NOTIMPL` — no UI thread exists until
-  `Run` owns one, and the host delivers no lifecycle events). `Id` answers
+- Application limits: one view; no suspend/resume event delivery
+  (`E_NOTIMPL` — no UI thread exists until `Run` owns one, and the host
+  delivers no lifecycle events). `RunWithActivationFactories` validates
+  its callback (`E_POINTER` on NULL, `E_ILLEGAL_METHOD_CALL` while `Run`
+  owns the UI thread, never retaining a refused callback) but the
+  packaged/COM-launch run stays `E_NOTIMPL` — no activation host exists
+  to invoke the callback. `Id` answers
   the manifest's `Applications/Application@Id` (the PRAID) when the process
   has package identity, and keeps forwarding the host's no-package error
   otherwise; `Properties` is a process-wide property set with real
@@ -613,8 +617,10 @@ built for both.
   values, `E_BOUNDS` on missing Lookup/Remove, HasKey/Size/Clear and a
   live `GetView` — handed out as the same object per get and never
   freed. The singleton now claims the `PropertySet` runtime class; see the
-  PropertySet entry below. `RunWithActivationFactories` and suspend/resume
-  stay `E_NOTIMPL` with the missing pieces named in comments.
+  PropertySet entry below. `RunWithActivationFactories` validates its
+  callback and refuses the packaged run (see the Application limits
+  paragraph); suspend/resume stays `E_NOTIMPL` with the missing pieces
+  named in comments.
   `native_core_application_x64`/`_x32` and `native_package_x64`/`_x32`
   cover the no-package `Id` error, the scanner seam, and the full
   property-set round.
@@ -724,6 +730,35 @@ built for both.
   double-Complete idempotency check; handler failing `E_ACCESSDENIED`
   with a second OS thread completing cross-thread on signal), and
   `native_dispatcher_queue_x64`/`_x32` cover the immediate-path refusal.
+- RunWithActivationFactories (2026-10-31, stage 5): the entry validates
+  its callback — `E_POINTER` on NULL (matching `Run`'s NULL source), and
+  `E_ILLEGAL_METHOD_CALL` while `Run` owns the UI thread, via a
+  non-mutating atomic read so a refused call never mutates startup state
+  or retains the callback. The packaged/COM-launch run itself stays
+  `E_NOTIMPL`: the real contract serves out-of-proc activation through
+  the caller's `IGetActivationFactory` while a packaged activation host
+  delivers the launch — nothing of that chain exists on the emulated
+  desktop, and the only class name the engine could honestly ask for
+  (the manifest `EntryPoint`) does not exist in a manifest-less process.
+  `native_core_application_x64`/`_x32` carry a client-side
+  `IGetActivationFactory` (mingw's published IID) probing NULL, idle
+  refusal, refcount-neutrality, and the concurrent-during-`Run` error.
+- Presenter generalization and ContentTemplate (2026-10-31, stage 4): the
+  presenter bind no longer lives in button code — `element_store_template`
+  is element-agnostic in both owner and storage slot (the replaced root's
+  presenters unbind first, then the swap, then the new root binds), and
+  every entry point (direct `put_Template`, the style applier, the
+  loader's deferred template-scope pop) rides it; the button remains the
+  only engine element with a slot today, and a future kind needs only a
+  dispatch case. `ContentPresenter.ContentTemplate` (stable 525, verified
+  by the established index convention) is stored on the presenter through
+  the same routing — **storage only**: the render still resolves the
+  templated parent's Content, and binding the presenters inside a content
+  template waits for the nested-template stage rather than promising a
+  render the engine cannot deliver. `native_xaml_application_x64`/`_x32`
+  load a stable-index XBF declaring a template under property 525 and
+  verify the stored template's identity and root, and
+  `native_style_x64`/`_x32` re-cover the generalized bind pixel-exactly.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -1216,8 +1251,11 @@ remain passing after the trial implementation was removed.
    support landed the same day (see those entries); remaining there:
    stable-index references in the type/property tables, and generalizing
    the presenter beyond the button path. Stable-index references for
-   Template/ControlTemplate/ContentPresenter landed 2026-10-31; remaining:
-   further template-adjacent members (e.g. ContentTemplate 525).
+   Template/ControlTemplate/ContentPresenter landed 2026-10-31; the
+   presenter bind rides the generic template-store path and
+   `ContentTemplate` 525 landed the same day (see the entries) —
+   remaining: nested-template application (content templates are stored
+   only) and further template-adjacent members.
 4. ~~Extend DispatcherQueue with standalone controllers and deferred shutdown
    when required by app traces.~~ Done (2026-10-31): standalone controllers
    landed 2026-10-28 and deferred shutdown (ShutdownStarting deferrals
@@ -1232,9 +1270,11 @@ remain passing after the trial implementation was removed.
    `EnableMouseInPointer`, `SendInput`, a populated pointer table).
 6. ~~Extend application startup with manifest identity/entry-point data
    and `RunWithActivationFactories` as the app's startup path requires.~~
-   Partially done (2026-10-31): `CoreApplication.Id` reads the manifest's
+   Done as far as the emulated desktop honestly reaches (2026-10-31):
+   `CoreApplication.Id` reads the manifest's
    application id and `Properties` is a real process property set;
-   remaining: `RunWithActivationFactories`. Manifest-driven activation is
+   `RunWithActivationFactories` validates its callback and refuses the
+   packaged run it cannot serve. Manifest-driven activation is
    as far as the emulated desktop honestly reaches (2026-10-31): the
    manifest `EntryPoint` travels to `IFrameworkView::Load` as the launch
    argument, but the entry-point class name itself is not activated by the
