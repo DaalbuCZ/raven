@@ -460,8 +460,8 @@ built for both.
   lock), a NULL put restores the platform default, and both answer
   `RO_E_CLOSED` after close. The pointer snapshot's `KeyModifiers` and the
   `IPointerPointProperties` set were verified already honest from the
-  sample; `GetIntermediatePoints` stays unimplemented — the desktop input
-  has no history buffer, so the snapshot carries exactly one point.
+  sample; pointer history landed the same day (see the pointer-history
+  entry below).
   `native_core_desktop_x64`/`_x32` (and the parallel variants) drive the
   cursor round through `RoGetActivationFactory`: activation types, factory
   construction and rejection, the window default, put/identity/NULL-put
@@ -484,6 +484,42 @@ built for both.
   `native_style_x64`/`_x32` drive the styled grid and text block through
   pixels and re-measured runs, the BasedOn precedence round, the
   wrong-kind failure rounds and the `get_Style` round-trip.
+- Pointer history (2026-10-31, stage 4): every desktop window retains a
+  small ring (8 entries, overwritten oldest-first, no allocation) of the
+  mouse samples it built, pushed before the event fires, and each
+  `PointerEventArgs` snapshot freezes its own history vector at
+  construction — the entries strictly older than the current point's
+  frame, oldest first — so a retained args object answers the history it
+  had at press time, not the ring's later contents.
+  `GetIntermediatePoints` AddRefs that snapshot (an empty history is a
+  valid empty vector, never `NULL`; the `E_NOTIMPL` shortcut is gone).
+  The vector itself is a real `IVector<PointerPoint>` (the mingw header
+  precomputes the instantiation and its IID) with honest mutation slots,
+  `E_BOUNDS` out of range, pointer-identity `IndexOf` and an owning
+  `GetView`; the exported engine-internal `raven_pointer_history_create`
+  builds one from raw samples the same way the event path does.
+  `native_core_desktop_x64`/`_x32` check the press-time ordering
+  (strictly decreasing frames below the current point), `E_BOUNDS`, the
+  snapshot surviving hundreds of later samples overwriting the ring, and
+  the builder round with full refcount balance.
+- Authored default styles (2026-10-31, stage 4): the engine authors one
+  sealed `Style` per supported control class from the same
+  `raven_style_add_setter` path applications use — the text block's
+  `FontSize` 14 / `Foreground` black (exactly the values its constructor
+  hardcodes) and the button's `Background` transparent — and attaches it
+  at activation, so a control that never sees an explicit `put_Style`
+  still carries the documented defaults and answers `get_Style`. The
+  defaults are shared per class and sealed at authoring (every mutation
+  slot of a sealed style already rejects), so an application holding the
+  object cannot mutate what every instance points at; an explicit
+  `put_Style` replaces the default the usual way (re-applies, no revert),
+  and `put_Style(NULL)` clears. Without DependencyProperty the authored
+  set stays small: properties the applier has no storage for cannot be
+  authored honestly, and templates remain unimplemented.
+  `native_style_x64`/`_x32` check the constructor pickup, the setter
+  pairs read back through `raven_style_setter_count`/`_at`, the defaults
+  rendering, attach re-putting the same engine object, the explicit
+  override and the clear.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -974,7 +1010,10 @@ remain passing after the trial implementation was removed.
    and give the tree its layout and rendering path (composition stage).
 4. Extend DispatcherQueue with standalone controllers and deferred shutdown when
    required by app traces.
-5. Finish pointer history/static access, cursor objects and touch/pen delivery as
-   native input sources permit.
+5. ~~Finish pointer history/static access, cursor objects and touch/pen
+   delivery as native input sources permit.~~ Pointer history and the
+   CoreCursor/`PointerCursor` objects are done (2026-10-31); remaining:
+   static pointer access and touch/pen delivery as native input sources
+   permit.
 6. Extend application startup with manifest identity/entry-point data and
    `RunWithActivationFactories` as the app's startup path requires.
