@@ -1884,6 +1884,16 @@ static HRESULT raven_core_cursor_factory(HSTRING name, IActivationFactory **out)
 /* The property-set factory lives in application.c; its class catalog line is pending, so the export also serves guests directly. */
 HRESULT raven_property_set_factory(HSTRING name, IActivationFactory **out);
 
+/* Manifest-driven activation: a packaged app's manifest names an Applications/Application@EntryPoint runtime class — the
+ * guest application's own XAML Application subclass (e.g. "Shapr3D.App"), derived from the class an app's
+ * IXamlMetadataProvider serves. Real activation maps the entry point to that app-provided class; this component cannot
+ * serve it, because the object the entry point names is created by the guest's own runtime (Application.Start), not by
+ * any factory here. The chain below therefore answers CLASS_E_CLASSNOTAVAILABLE for an entry-point name like any
+ * unknown class — activating it would fake an Application object the guest never created. The entry point travels the
+ * honest route instead: the manifest reader in package.c captures it, and CoreApplication.Run passes it to the view's
+ * IFrameworkView::Load, the argument a packaged activation carries. A host probe cannot exercise RoGetActivationFactory
+ * for an entry-point-derived name either: the fixtures run without a packaged guest process. */
+
 __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActivationFactory **out)
 {
 	UINT32 length = 0;

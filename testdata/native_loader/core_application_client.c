@@ -533,6 +533,27 @@ int raven_entry(void)
 	if (manifest_id((const BYTE *)without_application, (UINT32)sizeof without_application - 1, &praid) != S_OK ||
 		WindowsGetStringLen(praid)) return 83;
 	WindowsDeleteString(praid);
+	/* The manifest scanner's Applications/Application@EntryPoint reader, through the same seam shape: this is the
+	 * runtime class name a packaged activation carries into IFrameworkView::Load. The harness runs without a package
+	 * layout, so the in-process reader answers nothing here and Load receives no string (checked in framework_load). */
+	typedef HRESULT (WINAPI *manifest_entry_function)(const BYTE *, UINT32, HSTRING *);
+	manifest_entry_function manifest_entry = component ?
+		(manifest_entry_function)GetProcAddress(component, "raven_package_manifest_application_entry_point") : NULL;
+	if (!manifest_entry) return 84;
+	HSTRING entry = (void *)1;
+	if (manifest_entry((const BYTE *)with_application, (UINT32)sizeof with_application - 1, &entry) != S_OK || !entry)
+		return 85;
+	{
+		UINT32 length = 0;
+		const WCHAR *text = WindowsGetStringRawBuffer(entry, &length);
+		if (length != 17 || CompareStringOrdinal(text, (int)length, L"Raven.Fixture.App", -1, FALSE) != CSTR_EQUAL)
+			return 85;
+	}
+	WindowsDeleteString(entry);
+	entry = (void *)1;
+	if (manifest_entry((const BYTE *)without_application, (UINT32)sizeof without_application - 1, &entry) != S_OK ||
+		WindowsGetStringLen(entry)) return 88;
+	WindowsDeleteString(entry);
 	HRESULT (WINAPI *can_unload)(void) = component ? (void *)GetProcAddress(component, "DllCanUnloadNow") : NULL;
 	if (!can_unload || can_unload() != S_OK) return 8;
 	static const int expected[] = {511, 1, 3, 391, 399, 447, 415, 511, 447, 31, 1};

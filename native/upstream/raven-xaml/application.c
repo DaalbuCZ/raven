@@ -35,6 +35,9 @@ static const WCHAR launch_name[] = L"Windows.ApplicationModel.Activation.LaunchA
 /* engine-internal, package.c: the package-relative application id the manifest beside the image declares, or nothing
  * when the process carries no manifest identity */
 BOOL raven_package_application_id(const WCHAR **out);
+/* engine-internal, package.c: the runtime class name the manifest's Applications/Application@EntryPoint declares, or
+ * nothing when the process carries no manifest identity or the manifest declares no EntryPoint */
+BOOL raven_package_application_entry_point(const WCHAR **out);
 
 static DWORD session_tls = TLS_OUT_OF_INDEXES;
 static LONG running;
@@ -207,7 +210,9 @@ static HRESULT WINAPI launch_class(struct launch_interface *iface, HSTRING *out)
 static HRESULT WINAPI launch_trust(struct launch_interface *iface, TrustLevel *out) { return base_trust(out); }
 static HRESULT WINAPI launch_arguments(struct launch_interface *iface, HSTRING *out)
 {
-	/* shortcut: direct framework-view launch has no package activation arguments; use manifest activation data in stage 5. */
+	/* Launch arguments are the activation contract's argument string (a tile or protocol activation carries one); a
+	 * framework-view launch over CoreApplication.Run receives none, so the answer stays empty. The manifest's
+	 * Applications/Application@EntryPoint is not this string: it travels to the view through IFrameworkView::Load. */
 	return class_string(L"", out);
 }
 static HRESULT WINAPI launch_tile(struct launch_interface *iface, HSTRING *out) { return class_string(L"", out); }
@@ -824,8 +829,19 @@ static HRESULT WINAPI app_run(ICoreApplication *iface, IFrameworkViewSource *sou
 		initialized = SUCCEEDED(result);
 	}
 	if (SUCCEEDED(result)) result = IFrameworkView_SetWindow(session->framework, view->window);
-	/* shortcut: a directly supplied view source has no manifest entry-point string; package activation supplies it in stage 5. */
-	if (SUCCEEDED(result)) result = IFrameworkView_Load(session->framework, NULL);
+	/* Manifest-driven activation data: a packaged activation carries the manifest's Applications/Application@EntryPoint
+	 * into Load, and the emulated desktop supplies it from the manifest beside the image the same way. A process without
+	 * a manifest entry point loads with no string, which the view-source case already answered. The EntryPoint class
+	 * itself is the guest application's own XAML Application subclass: the component cannot serve it by activation (the
+	 * object comes from the guest runtime through Application.Start), so the name travels only as this argument. */
+	HSTRING entry_point = NULL;
+	if (SUCCEEDED(result)) {
+		const WCHAR *entry = NULL;
+		if (raven_package_application_entry_point(&entry))
+			result = class_string(entry, &entry_point);
+	}
+	if (SUCCEEDED(result)) result = IFrameworkView_Load(session->framework, entry_point);
+	if (entry_point) WindowsDeleteString(entry_point);
 	if (SUCCEEDED(result)) result = queue_activation(session);
 	if (SUCCEEDED(result)) result = IFrameworkView_Run(session->framework);
 	ICoreWindow_Close(view->window);
