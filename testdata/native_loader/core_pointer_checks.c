@@ -17,6 +17,18 @@
 
 typedef __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs handler_interface;
 typedef __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgsVtbl handler_vtable;
+/* Matches native/upstream/raven-xaml/pointer.h; the sample layout crosses the export boundary. */
+struct raven_mouse_sample {
+	__x_ABI_CWindows_CFoundation_CPoint position;
+	UINT32 buttons, frame;
+	UINT64 timestamp;
+	__x_ABI_CWindows_CSystem_CVirtualKeyModifiers modifiers;
+	__x_ABI_CWindows_CUI_CInput_CPointerUpdateKind update;
+	INT32 wheel;
+	boolean horizontal;
+};
+typedef HRESULT (*history_create_function)(const struct raven_mouse_sample *, UINT32,
+	__FIVector_1_Windows__CUI__CInput__CPointerPoint **);
 enum {ENTERED, EXITED, MOVED, PRESSED, RELEASED, WHEEL, CAPTURE_LOST, POINTER_EVENTS};
 struct pointer_handler { const handler_vtable *lpVtbl; LONG refs; int event; };
 static struct pointer_state {
@@ -36,6 +48,7 @@ static struct pointer_state {
 	IPointerEventArgs *retained_args;
 	IPointerPoint *retained_point;
 	IPointerPointProperties *retained_properties;
+	__FIVector_1_Windows__CUI__CInput__CPointerPoint *retained_history;
 	IPointerDevice *device;
 } state;
 #define CHECK(condition) do { if (!(condition)) { state.failure = __LINE__; return E_FAIL; } } while (0)
@@ -99,8 +112,25 @@ static HRESULT WINAPI handler_invoke(handler_interface *iface, ICoreWindow *wind
 		state.retained_args = args; IPointerEventArgs_AddRef(args);
 		state.retained_point = point; IPointerPoint_AddRef(point);
 		state.retained_properties = properties; IPointerPointProperties_AddRef(properties);
-		/* GetIntermediatePoints stays E_NOTIMPL: the desktop input has no history buffer yet (the args snapshot carries
-		 * exactly one point, the CurrentPoint), and the slot lives in the component's desktop window dispatch. */
+		/* Intermediate points precede CurrentPoint: the samples retained before this press, oldest
+		 * first. The first press follows at least one move, so the history is non-empty and every
+		 * element's FrameId is strictly older than the current point's. */
+		__FIVector_1_Windows__CUI__CInput__CPointerPoint *history = NULL;
+		CHECK(__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs_GetIntermediatePoints(args, &history) == S_OK && history);
+		UINT32 count = 0;
+		CHECK(__FIVector_1_Windows__CUI__CInput__CPointerPoint_get_Size(history, &count) == S_OK && count >= 1);
+		UINT32 previous = state.frame;
+		for (UINT32 i = 0; i < count; ++i) {
+			IPointerPoint *element = NULL;
+			CHECK(__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(history, i, &element) == S_OK && element);
+			UINT32 frame = 0;
+			CHECK(IPointerPoint_get_FrameId(element, &frame) == S_OK && frame && frame < previous);
+			previous = frame;
+			IPointerPoint_Release(element);
+		}
+		IPointerPoint *beyond = (void *)1;
+		CHECK(__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(history, count, &beyond) == E_BOUNDS && !beyond);
+		state.retained_history = history; /* released in raven_pointer_finish */
 	}
 	IPointerPointProperties_Release(properties);
 	IPointerPoint_Release(point);
@@ -171,12 +201,85 @@ static DWORD WINAPI message_clock_worker(void *context)
 	return 0;
 }
 
+/* The engine-internal history builder, reached through GetProcAddress the way style_client reaches
+ * raven_style_add_setter: the vector owns one reference per element, so the fixture balances by
+ * releasing each fetched point once and the vector last. */
+static int history_checks(void)
+{
+	HMODULE component = GetModuleHandleW(L"raven-xaml.dll");
+	if (!component) return __LINE__;
+	history_create_function create_history =
+		(history_create_function)GetProcAddress(component, "raven_pointer_history_create");
+	if (!create_history) return __LINE__;
+	struct raven_mouse_sample samples[3];
+	memset(samples, 0, sizeof samples);
+	for (UINT32 i = 0; i < 3; ++i) {
+		samples[i].position.X = 10.0f * (FLOAT)i;
+		samples[i].position.Y = 20.0f * (FLOAT)i + 1.0f;
+		samples[i].buttons = MK_LBUTTON;
+		samples[i].frame = 100 + i;
+		samples[i].timestamp = 1000 + i;
+		samples[i].modifiers = VirtualKeyModifiers_Control;
+		samples[i].update = PointerUpdateKind_Other;
+	}
+	__FIVector_1_Windows__CUI__CInput__CPointerPoint *history = NULL;
+	if (create_history(samples, 3, &history) != S_OK || !history) return __LINE__;
+	UINT32 count = 0;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_get_Size(history, &count) != S_OK || count != 3) return __LINE__;
+	IPointerPoint *points[3] = {NULL, NULL, NULL};
+	for (UINT32 i = 0; i < count; ++i) {
+		if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(history, i, &points[i]) != S_OK || !points[i]) return __LINE__;
+		Point position;
+		UINT32 frame = 0;
+		UINT64 timestamp = 0;
+		if (IPointerPoint_get_Position(points[i], &position) != S_OK ||
+			position.X != samples[i].position.X || position.Y != samples[i].position.Y) return __LINE__;
+		if (IPointerPoint_get_FrameId(points[i], &frame) != S_OK || frame != samples[i].frame) return __LINE__;
+		if (IPointerPoint_get_Timestamp(points[i], &timestamp) != S_OK || timestamp != samples[i].timestamp) return __LINE__;
+	}
+	IPointerPoint *beyond = (void *)1;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(history, count, &beyond) != E_BOUNDS || beyond) return __LINE__;
+	BOOLEAN found = FALSE;
+	UINT32 index = 0;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_IndexOf(history, points[1], &index, &found) != S_OK ||
+		!found || index != 1) return __LINE__;
+	/* An element of another snapshot is a different object: IndexOf answers not-found. */
+	__FIVector_1_Windows__CUI__CInput__CPointerPoint *other = NULL;
+	if (create_history(&samples[0], 1, &other) != S_OK || !other) return __LINE__;
+	IPointerPoint *foreign = NULL;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(other, 0, &foreign) != S_OK || !foreign) return __LINE__;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_IndexOf(history, foreign, &index, &found) != S_OK ||
+		found || index) return __LINE__;
+	IPointerPoint_Release(foreign);
+	IPointerPoint *many[3] = {NULL, NULL, NULL};
+	UINT32 got = 0;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetMany(history, 1, 3, many, &got) != S_OK || got != 2 ||
+		many[0] != points[1] || many[1] != points[2]) return __LINE__;
+	for (UINT32 i = 0; i < got; ++i)
+		if (IPointerPoint_Release(many[i]) != 2) return __LINE__; /* the vector and GetAt each hold one */
+	/* An empty snapshot is a valid vector, not a null out. */
+	__FIVector_1_Windows__CUI__CInput__CPointerPoint *empty = NULL;
+	if (create_history(NULL, 0, &empty) != S_OK || !empty) return __LINE__;
+	UINT32 empty_count = 7;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_get_Size(empty, &empty_count) != S_OK || empty_count) return __LINE__;
+	IPointerPoint *nothing = (void *)1;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(empty, 0, &nothing) != E_BOUNDS || nothing) return __LINE__;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_Release(empty) != 0) return __LINE__;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_Release(other) != 0) return __LINE__;
+	for (UINT32 i = 0; i < count; ++i)
+		if (IPointerPoint_Release(points[i]) != 1) return __LINE__;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_Release(history) != 0) return __LINE__;
+	return 0;
+}
+
 int raven_pointer_checks(ICoreWindow *window, ICoreDispatcher *dispatcher, HWND hwnd)
 {
 	state.window = window;
 	state.thread = GetCurrentThreadId();
 	int cursor_result = cursor_checks(window);
 	if (cursor_result) return cursor_result;
+	int history_result = history_checks();
+	if (history_result) return history_result;
 	for (int i = 0; i < POINTER_EVENTS; ++i) {
 		state.handlers[i].lpVtbl = &handler_table;
 		state.handlers[i].refs = 1;
@@ -266,6 +369,22 @@ int raven_pointer_finish(void)
 	boolean left;
 	if (IPointerPoint_get_Position(state.retained_point, &position) != S_OK || position.X != -12 || position.Y != 34 ||
 		IPointerPointProperties_get_IsLeftButtonPressed(state.retained_properties, &left) != S_OK || !left) return __LINE__;
+	/* The history snapshot was taken at press time and must still answer it, though hundreds of
+	 * later samples have overwritten the window ring since. */
+	if (!state.retained_history) return __LINE__;
+	UINT32 history_count = 0;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_get_Size(state.retained_history, &history_count) != S_OK ||
+		history_count < 1) return __LINE__;
+	IPointerPoint *oldest = NULL;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(state.retained_history, 0, &oldest) != S_OK || !oldest) return __LINE__;
+	UINT32 oldest_frame = 0, current_frame = 0;
+	if (IPointerPoint_get_FrameId(oldest, &oldest_frame) != S_OK) {
+		IPointerPoint_Release(oldest);
+		return __LINE__;
+	}
+	IPointerPoint_Release(oldest);
+	if (IPointerPoint_get_FrameId(state.retained_point, &current_frame) != S_OK || oldest_frame >= current_frame) return __LINE__;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_Release(state.retained_history) != 1) return __LINE__;
 	if (IPointerEventArgs_Release(state.retained_args) != 0 || IPointerPoint_Release(state.retained_point) != 1 ||
 		IPointerPointProperties_Release(state.retained_properties) != 0 || IPointerDevice_Release(state.device) != 0) return __LINE__;
 	for (int i = 0; i < POINTER_EVENTS; ++i)

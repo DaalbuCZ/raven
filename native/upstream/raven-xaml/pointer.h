@@ -15,4 +15,10 @@ struct raven_mouse_sample {
 	boolean horizontal;
 };
 HRESULT raven_mouse_point_create(const struct raven_mouse_sample *sample, __x_ABI_CWindows_CUI_CInput_CIPointerPoint **out);
+/* Builds an IVector<PointerPoint> snapshot owning one reference per element, so a history handed to
+ * event args outlives the sample ring that produced it. windows.ui.input.h declares the
+ * __FIVector_1_Windows__CUI__CInput__CPointerPoint instantiation (IID dfa655cf-fde7-5048-b4bf-c909231b7edb)
+ * and the implementation uses it directly. */
+__declspec(dllexport) HRESULT raven_pointer_history_create(const struct raven_mouse_sample *samples, UINT32 count,
+	__FIVector_1_Windows__CUI__CInput__CPointerPoint **out);
 #endif

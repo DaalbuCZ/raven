@@ -19,6 +19,7 @@
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
 #define RO_E_CLOSED ((HRESULT)0x80000013)
+#define POINTER_HISTORY_CAP 8
 
 struct raven_desktop_window {
 	ICoreWindow *owner;
@@ -30,6 +31,8 @@ struct raven_desktop_window {
 	WCHAR high_surrogate;
 	BOOL pointer_inside;
 	struct raven_mouse_sample mouse;
+	struct raven_mouse_sample history[POINTER_HISTORY_CAP];
+	UINT32 history_count, history_next;
 	struct raven_event_list events[RAVEN_WINDOW_EVENT_COUNT];
 };
 static HINSTANCE module_instance;
@@ -48,6 +51,7 @@ struct event_args {
 	IInputEnabledEventArgs input;
 	IPointerEventArgs pointer;
 	IPointerPoint *point;
+	__FIVector_1_Windows__CUI__CInput__CPointerPoint *history;
 	VirtualKeyModifiers modifiers;
 	Size dimensions;
 	boolean flag;
@@ -91,6 +95,7 @@ static ULONG args_release(struct event_args *self)
 	LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
 		if (self->point) IPointerPoint_Release(self->point);
+		if (self->history) __FIVector_1_Windows__CUI__CInput__CPointerPoint_Release(self->history);
 		FREE(self);
 		InterlockedDecrement(&raven_xaml_objects);
 	}
@@ -308,9 +313,11 @@ static HRESULT WINAPI pointer_modifiers(IPointerEventArgs *iface, VirtualKeyModi
 static HRESULT WINAPI pointer_intermediate(IPointerEventArgs *iface, __FIVector_1_Windows__CUI__CInput__CPointerPoint **out)
 {
 	if (!out) return E_POINTER;
-	*out = NULL;
-	/* shortcut: desktop input has no sample history yet; implement the collection when coalesced input is retained. */
-	return E_NOTIMPL;
+	/* The snapshot was taken when the args were built, so a retained args object answers the
+	 * history it had then, not whatever the window ring holds now. */
+	*out = CONTAINING_RECORD(iface, struct event_args, pointer)->history;
+	if (*out) __FIVector_1_Windows__CUI__CInput__CPointerPoint_AddRef(*out);
+	return S_OK;
 }
 static const IPointerEventArgsVtbl pointer_table = {
 	pointer_query, pointer_addref, pointer_release, pointer_iids, pointer_class, pointer_trust,
@@ -383,6 +390,23 @@ static BOOL fire_event_sample(struct raven_desktop_window *window, enum raven_wi
 		args->pointer.lpVtbl = &pointer_table;
 		args->modifiers = sample->modifiers;
 		result = raven_mouse_point_create(sample, &args->point);
+		if (FAILED(result)) {
+			record_error(window, result);
+			for (ULONG i = 0; i < count; ++i) IUnknown_Release(handlers[i]);
+			args_release(args);
+			FREE(handlers);
+			return FALSE;
+		}
+		/* Intermediate points are the samples retained before the current one, oldest first; the
+		 * ring already holds the current sample, so entries with frames at or above its frame drop. */
+		struct raven_mouse_sample older[POINTER_HISTORY_CAP];
+		UINT32 kept = 0;
+		UINT32 start = (window->history_next + POINTER_HISTORY_CAP - window->history_count) % POINTER_HISTORY_CAP;
+		for (UINT32 i = 0; i < window->history_count; ++i) {
+			struct raven_mouse_sample *entry = &window->history[(start + i) % POINTER_HISTORY_CAP];
+			if (entry->frame < sample->frame) older[kept++] = *entry;
+		}
+		result = raven_pointer_history_create(older, kept, &args->history);
 		if (FAILED(result)) {
 			record_error(window, result);
 			for (ULONG i = 0; i < count; ++i) IUnknown_Release(handlers[i]);
@@ -490,6 +514,11 @@ static BOOL window_mouse_event(struct raven_desktop_window *window, UINT message
 	if (sample.update != PointerUpdateKind_Other)
 		event = (sample.update & 1) ? RAVEN_WINDOW_POINTER_PRESSED : RAVEN_WINDOW_POINTER_RELEASED;
 	window->mouse = sample;
+	/* Every sample enters the ring before its event fires, so the args snapshot holds the samples
+	 * retained before the current one; Enter and Move for the same message share one ring entry. */
+	window->history[window->history_next] = sample;
+	window->history_next = (window->history_next + 1) % POINTER_HISTORY_CAP;
+	if (window->history_count < POINTER_HISTORY_CAP) ++window->history_count;
 	if (message == WM_MOUSEMOVE && !window->pointer_inside) {
 		window->pointer_inside = TRUE;
 		TRACKMOUSEEVENT tracking = {sizeof tracking, TME_LEAVE, window->hwnd, 0};
