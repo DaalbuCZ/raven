@@ -1892,7 +1892,10 @@ HRESULT raven_property_set_factory(HSTRING name, IActivationFactory **out);
  * unknown class — activating it would fake an Application object the guest never created. The entry point travels the
  * honest route instead: the manifest reader in package.c captures it, and CoreApplication.Run passes it to the view's
  * IFrameworkView::Load, the argument a packaged activation carries. A host probe cannot exercise RoGetActivationFactory
- * for an entry-point-derived name either: the fixtures run without a packaged guest process. */
+ * for an entry-point-derived name either: the fixtures run without a packaged guest process. The same constraint bounds
+ * CoreApplication.RunWithActivationFactories: it is the entry where the activation host would pull this class's factory
+ * from the guest's own IGetActivationFactory callback, and with no packaged launch to deliver it the route only
+ * validates the callback and refuses the run (E_NOTIMPL, see application.c) — it never manufactures a factory here. */
 
 __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActivationFactory **out)
 {

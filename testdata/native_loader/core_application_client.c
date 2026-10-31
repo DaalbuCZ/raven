@@ -16,6 +16,8 @@ typedef __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicat
 typedef __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgsVtbl activated_vtable;
 typedef __FIEventHandler_1_IInspectable exiting_handler;
 typedef __FIEventHandler_1_IInspectableVtbl exiting_vtable;
+typedef __x_ABI_CWindows_CFoundation_CIGetActivationFactory get_activation_factory;
+typedef __x_ABI_CWindows_CFoundation_CIGetActivationFactoryVtbl get_activation_factory_vtable;
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
 
 enum {CREATE = 1, INITIALIZE = 2, SET_WINDOW = 4, LOAD = 8, RUN = 16, ACTIVATED = 32, DISPATCH = 64, UNINITIALIZE = 128, EXITING = 256};
@@ -32,6 +34,8 @@ struct client {
 	ICoreWindow *window;
 	ICoreDispatcher *dispatcher;
 	IActivatedEventArgs *args;
+	get_activation_factory get_factory;
+	LONG factory_refs;
 	EventRegistrationToken activation_token, exit_token;
 	HANDLE activated_event;
 	DWORD ui_thread;
@@ -285,6 +289,48 @@ static HRESULT WINAPI exiting_invoke(exiting_handler *iface, IInspectable *sende
 	REQUIRE(GetCurrentThreadId() == self->ui_thread);
 	return ICoreApplicationExit_remove_Exiting(self->exit, self->exit_token);
 }
+/* The IGetActivationFactory callback a packaged launch would hand RunWithActivationFactories. The engine's refusal
+ * paths must never call into it or retain it, so every member asserts and the reference count must come back unchanged. */
+static HRESULT WINAPI get_factory_query(get_activation_factory *iface, REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	/* the IID is mingw's windows.foundation.h definition (DEFINE_GUID line 2791), not a guess */
+	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IInspectable) &&
+		!IsEqualIID(iid, &IID___x_ABI_CWindows_CFoundation_CIGetActivationFactory))
+		return E_NOINTERFACE;
+	*out = iface;
+	InterlockedIncrement(&CONTAINING_RECORD(iface, struct client, get_factory)->factory_refs);
+	return S_OK;
+}
+static ULONG WINAPI get_factory_addref(get_activation_factory *iface)
+{
+	return InterlockedIncrement(&CONTAINING_RECORD(iface, struct client, get_factory)->factory_refs);
+}
+static ULONG WINAPI get_factory_release(get_activation_factory *iface)
+{
+	return InterlockedDecrement(&CONTAINING_RECORD(iface, struct client, get_factory)->factory_refs);
+}
+static HRESULT WINAPI get_factory_iids(get_activation_factory *iface, ULONG *count, IID **iids) { return no_iids(count, iids); }
+static HRESULT WINAPI get_factory_class(get_activation_factory *iface, HSTRING *out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	return S_OK;
+}
+static HRESULT WINAPI get_factory_trust(get_activation_factory *iface, TrustLevel *out)
+{
+	if (!out) return E_POINTER;
+	*out = BaseTrust;
+	return S_OK;
+}
+static HRESULT WINAPI get_factory_get(get_activation_factory *iface, HSTRING name, IInspectable **factory)
+{
+	(void)iface; (void)name;
+	if (!factory) return E_POINTER;
+	*factory = NULL;
+	return CLASS_E_CLASSNOTAVAILABLE;
+}
 static const IFrameworkViewSourceVtbl source_table = {
 	source_query, source_addref, source_release, source_iids, source_class, source_trust, source_create
 };
@@ -295,6 +341,10 @@ static const IFrameworkViewVtbl framework_table = {
 static const activated_vtable activated_table = {activated_query, activated_addref, activated_release, activated_invoke};
 static const IDispatchedHandlerVtbl dispatched_table = {dispatched_query, dispatched_addref, dispatched_release, dispatched_invoke};
 static const exiting_vtable exiting_table = {exiting_query, exiting_addref, exiting_release, exiting_invoke};
+static const get_activation_factory_vtable get_factory_table = {
+	get_factory_query, get_factory_addref, get_factory_release, get_factory_iids, get_factory_class, get_factory_trust,
+	get_factory_get
+};
 
 static DWORD WINAPI run_application(void *context)
 {
@@ -334,6 +384,9 @@ int raven_entry(void)
 	ICoreApplicationView *absent = (void *)1;
 	if (ICoreApplication_GetCurrentView(app, &absent) != (HRESULT)0x8000000e || absent ||
 		ICoreApplication_Run(app, NULL) != E_POINTER || ICoreApplicationExit_Exit(exit) != (HRESULT)0x8000000e) return 7;
+	/* RunWithActivationFactories: a NULL callback is the projection's ArgumentNullException (E_POINTER), the same
+	 * answer Run's NULL source gets. */
+	if (ICoreApplication_RunWithActivationFactories(app, NULL) != E_POINTER) return 15;
 	HSTRING id = (void *)1;
 	if (ICoreApplication_get_Id(app, &id) != HRESULT_FROM_WIN32(15700) || id) return 12;
 	/* Properties: the process-wide property set, handed out as the same object and honest through its
@@ -564,18 +617,27 @@ int raven_entry(void)
 		self.activated.lpVtbl = &activated_table;
 		self.dispatched.lpVtbl = &dispatched_table;
 		self.exiting.lpVtbl = &exiting_table;
+		self.get_factory.lpVtbl = &get_factory_table;
 		self.refs = 1;
+		self.factory_refs = 1;
 		self.app = app;
 		self.exit = exit;
 		self.mode = mode;
 		self.result = E_PENDING;
 		self.activated_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+		/* Idle refusal on the main thread, before any Run owns the UI thread: the packaged-launch run is refused
+		 * (E_NOTIMPL) and the engine must not have called into or retained the callback. */
+		if (ICoreApplication_RunWithActivationFactories(app, &self.get_factory) != E_NOTIMPL) return 16;
+		if (self.factory_refs != 1) return 17;
 		HANDLE thread = CreateThread(NULL, 0, run_application, &self, 0, NULL);
 		if (!self.activated_event || !thread) return 9;
 		if (mode == 8) {
 			if (WaitForSingleObject(self.activated_event, 5000) != WAIT_OBJECT_0 ||
 				ICoreApplication_GetCurrentView(app, &absent) != (HRESULT)0x8000000e || absent ||
-				ICoreApplication_Run(app, &self.source) != (HRESULT)0x8000000e || ICoreApplicationExit_Exit(exit) != S_OK) return 10;
+				ICoreApplication_Run(app, &self.source) != (HRESULT)0x8000000e ||
+				/* while Run owns the UI thread the factory route is the same rejected concurrent startup */
+				ICoreApplication_RunWithActivationFactories(app, &self.get_factory) != (HRESULT)0x8000000e ||
+				ICoreApplicationExit_Exit(exit) != S_OK) return 10;
 		}
 		DWORD code;
 		if (WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 || !GetExitCodeThread(thread, &code) || code) return 11;

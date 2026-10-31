@@ -860,10 +860,23 @@ static HRESULT WINAPI app_run(ICoreApplication *iface, IFrameworkViewSource *sou
 }
 static HRESULT WINAPI app_run_factories(ICoreApplication *iface, __x_ABI_CWindows_CFoundation_CIGetActivationFactory *factory)
 {
-	/* RunWithActivationFactories runs the callback on the UI thread with the application's activation factory. The
-	 * engine owns no UI thread until Run takes one and has no dispatcher queue to post the callback to before that,
-	 * and running it on the calling thread would not be the contract; it waits for the stage 5 startup work. */
-	return factory ? E_NOTIMPL : E_POINTER;
+	/* RunWithActivationFactories is the packaged/COM-launch startup entry: the activation host delivers the launch
+	 * arguments, then asks the callback's GetActivationFactory for the application's entry-point class while the
+	 * method serves requests on the UI thread until shutdown. The emulated desktop honestly supports none of that
+	 * chain: the harness is an ordinary Win32 process, no COM surrogate or packaged launch delivers activation
+	 * arguments, so no host exists to pull factories through the callback and no part of the flow is probeable
+	 * here. The view-source path Run drives cannot be entered from this route either: Run needs an
+	 * IFrameworkViewSource this route's caller never supplies, and the real flow obtains the view through the
+	 * activation the desktop cannot deliver. The only class name the engine could honestly ask the callback for is
+	 * the manifest's Applications/Application@EntryPoint, which a process without a manifest identity does not
+	 * carry (identity is read once per process, so the fixture cannot supply one without losing the no-package Id
+	 * branch it already covers). What the ABI documents and the fixture can probe stays: a NULL callback is the
+	 * projection's ArgumentNullException and answers E_POINTER like Run's NULL source, and a call while Run owns
+	 * the UI thread is the same rejected concurrent startup E_ILLEGAL_METHOD_CALL that a nested Run gets. The run
+	 * itself waits for a packaged guest and answers E_NOTIMPL without retaining the callback. */
+	if (!factory) return E_POINTER;
+	if (InterlockedCompareExchange(&running, 0, 0)) return E_ILLEGAL_METHOD_CALL;
+	return E_NOTIMPL;
 }
 static HRESULT WINAPI exit_application(ICoreApplicationExit *iface)
 {
