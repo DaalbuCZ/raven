@@ -1881,6 +1881,9 @@ static HRESULT raven_core_cursor_factory(HSTRING name, IActivationFactory **out)
 	return S_OK;
 }
 
+/* The property-set factory lives in application.c; its class catalog line is pending, so the export also serves guests directly. */
+HRESULT raven_property_set_factory(HSTRING name, IActivationFactory **out);
+
 __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActivationFactory **out)
 {
 	UINT32 length = 0;
@@ -1916,6 +1919,8 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 			result = raven_dependency_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_pointer_device_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_property_set_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_automation_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)

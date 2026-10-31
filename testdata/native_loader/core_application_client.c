@@ -341,7 +341,8 @@ int raven_entry(void)
 	__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *properties = (void *)1, *properties_again = NULL;
 	if (ICoreApplication_get_Properties(app, &properties) != S_OK || !properties) return 13;
 	if (ICoreApplication_get_Properties(app, &properties_again) != S_OK || properties_again != properties) return 13;
-	if (properties_again->lpVtbl->Release(properties_again) != 1) return 13;
+	/* the engine holds its own reference on the process-wide instance, so two guest references balance to two */
+	if (properties_again->lpVtbl->Release(properties_again) != 2) return 13;
 	__FIMap_2_HSTRING_IInspectable *map = NULL;
 	if (properties->lpVtbl->QueryInterface(properties, &IID___FIMap_2_HSTRING_IInspectable, (void **)&map) != S_OK ||
 		!map) return 60;
@@ -386,7 +387,116 @@ int raven_entry(void)
 	WindowsDeleteString(property_key_again);
 	WindowsDeleteString(property_other);
 	map->lpVtbl->Release(map);
+	/* the class name the properties object claims, once the class is activatable */
+	HSTRING properties_class = NULL;
+	if (((IInspectable *)properties)->lpVtbl->GetRuntimeClassName((IInspectable *)properties, &properties_class) != S_OK ||
+		!properties_class) return 86;
+	{
+		UINT32 length = 0;
+		const WCHAR *text = WindowsGetStringRawBuffer(properties_class, &length);
+		static const WCHAR claimed[] = L"Windows.Foundation.Collections.PropertySet";
+		if (length != ARRAYSIZE(claimed) - 1 ||
+			CompareStringOrdinal(text, (int)length, claimed, -1, FALSE) != CSTR_EQUAL) return 87;
+	}
+	WindowsDeleteString(properties_class);
 	properties->lpVtbl->Release(properties);
+	/* PropertySet activation: the factory creates independent instances. The class routes through
+	 * RoGetActivationFactory once its catalog entry lands; until then the engine's exported factory serves the
+	 * same object, and this check runs against whichever route is wired (route 1 = the chain, 0 = the export). */
+	HMODULE component_properties = GetModuleHandleW(L"raven-xaml.dll");
+	typedef HRESULT (WINAPI *property_factory_function)(HSTRING, IActivationFactory **);
+	property_factory_function property_factory = component_properties ?
+		(property_factory_function)GetProcAddress(component_properties, "raven_property_set_factory") : NULL;
+	if (!property_factory) return 90;
+	static const WCHAR property_set_class[] = L"Windows.Foundation.Collections.PropertySet";
+	HSTRING class_name = NULL;
+	if (WindowsCreateString(property_set_class, ARRAYSIZE(property_set_class) - 1, &class_name) != S_OK) return 91;
+	IActivationFactory *property_factory_export = NULL;
+	if (property_factory(class_name, &property_factory_export) != S_OK || !property_factory_export) return 92;
+	IActivationFactory *property_factory_chain = NULL;
+	HRESULT chained = factory(class_name, &IID_IActivationFactory, (void **)&property_factory_chain);
+	int route = 1;
+	if (chained == S_OK) {
+		/* the chain resolves through the same DllGetActivationFactory, so it must answer the same factory */
+		if (property_factory_chain != property_factory_export) return 93;
+		IActivationFactory_Release(property_factory_export);
+	} else {
+		if (chained != (HRESULT)0x80040154 || property_factory_chain) return 94;
+		route = 0;
+		property_factory_chain = property_factory_export;
+	}
+	(void)route;
+	IInspectable *first = NULL, *second = NULL;
+	if (IActivationFactory_ActivateInstance(property_factory_chain, &first) != S_OK || !first) return 95;
+	if (IActivationFactory_ActivateInstance(property_factory_chain, &second) != S_OK || !second) return 95;
+	if (first == second) return 96;
+	/* the process-wide Properties object is neither of the activated instances and still the same across gets */
+	__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *properties_third = (void *)1, *properties_fourth = NULL;
+	if (ICoreApplication_get_Properties(app, &properties_third) != S_OK || !properties_third ||
+		ICoreApplication_get_Properties(app, &properties_fourth) != S_OK || properties_fourth != properties_third ||
+		properties_third == (__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *)first ||
+		properties_third == (__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *)second) return 97;
+	properties_fourth->lpVtbl->Release(properties_fourth);
+	properties_third->lpVtbl->Release(properties_third);
+	/* each instance answers the IPropertySet and the IMap shapes */
+	__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *set_first = NULL, *set_second = NULL;
+	__FIMap_2_HSTRING_IInspectable *map_first = NULL, *map_second = NULL;
+	if (first->lpVtbl->QueryInterface(first, &IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet, (void **)&set_first) != S_OK ||
+		!set_first ||
+		second->lpVtbl->QueryInterface(second, &IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet, (void **)&set_second) != S_OK ||
+		!set_second ||
+		set_first->lpVtbl->QueryInterface(set_first, &IID___FIMap_2_HSTRING_IInspectable, (void **)&map_first) != S_OK ||
+		!map_first ||
+		set_second->lpVtbl->QueryInterface(set_second, &IID___FIMap_2_HSTRING_IInspectable, (void **)&map_second) != S_OK ||
+		!map_second) return 98;
+	HSTRING instance_key = NULL;
+	if (WindowsCreateString(L"Fixture.Instance", 16, &instance_key) != S_OK) return 99;
+	boolean instance_replaced = TRUE;
+	if (map_first->lpVtbl->Insert(map_first, instance_key, (IInspectable *)app, &instance_replaced) != S_OK ||
+		instance_replaced) return 100;
+	UINT32 first_size = 0, second_size = 1;
+	if (map_first->lpVtbl->get_Size(map_first, &first_size) != S_OK || first_size != 1 ||
+		map_second->lpVtbl->get_Size(map_second, &second_size) != S_OK || second_size) return 100;
+	IInspectable *instance_value = (void *)1;
+	if (map_second->lpVtbl->Lookup(map_second, instance_key, &instance_value) != E_BOUNDS || instance_value) return 101;
+	instance_replaced = TRUE;
+	if (map_second->lpVtbl->Insert(map_second, instance_key, (IInspectable *)exit, &instance_replaced) != S_OK ||
+		instance_replaced) return 101;
+	if (map_second->lpVtbl->Lookup(map_second, instance_key, &instance_value) != S_OK ||
+		instance_value != (IInspectable *)exit) return 101;
+	instance_value->lpVtbl->Release(instance_value);
+	instance_value = (void *)1;
+	if (map_first->lpVtbl->Lookup(map_first, instance_key, &instance_value) != S_OK ||
+		instance_value != (IInspectable *)app) return 101;
+	instance_value->lpVtbl->Release(instance_value);
+	/* the view of one instance sees only its own entries */
+	__FIMapView_2_HSTRING_IInspectable *view_second = NULL;
+	if (map_second->lpVtbl->GetView(map_second, &view_second) != S_OK || !view_second) return 102;
+	boolean instance_found = FALSE;
+	if (view_second->lpVtbl->get_Size(view_second, &second_size) != S_OK || second_size != 1 ||
+		view_second->lpVtbl->HasKey(view_second, instance_key, &instance_found) != S_OK || !instance_found) return 102;
+	view_second->lpVtbl->Release(view_second);
+	/* GetRuntimeClassName answers the claimed runtime class name on the activated instances */
+	for (int which = 0; which < 2; ++which) {
+		IInspectable *instance = which ? second : first;
+		HSTRING instance_class = NULL;
+		if (instance->lpVtbl->GetRuntimeClassName(instance, &instance_class) != S_OK || !instance_class) return 103;
+		UINT32 length = 0;
+		const WCHAR *text = WindowsGetStringRawBuffer(instance_class, &length);
+		if (length != ARRAYSIZE(property_set_class) - 1 ||
+			CompareStringOrdinal(text, (int)length, property_set_class, -1, FALSE) != CSTR_EQUAL) return 103;
+		WindowsDeleteString(instance_class);
+	}
+	/* the releases balance to zero per instance: the entries and the critical section go with the last reference */
+	if (map_second->lpVtbl->Release(map_second) != 2) return 104;
+	if (map_first->lpVtbl->Release(map_first) != 2) return 104;
+	if (set_second->lpVtbl->Release(set_second) != 1) return 104;
+	if (set_first->lpVtbl->Release(set_first) != 1) return 104;
+	if (second->lpVtbl->Release(second) != 0) return 105;
+	if (first->lpVtbl->Release(first) != 0) return 105;
+	IActivationFactory_Release(property_factory_chain);
+	WindowsDeleteString(instance_key);
+	WindowsDeleteString(class_name);
 	void *missing = (void *)1;
 	if (ICoreApplication_QueryInterface(app, &IID_IFrameworkView, &missing) != E_NOINTERFACE || missing) return 14;
 	HMODULE component = GetModuleHandleW(L"raven-xaml.dll");
