@@ -140,6 +140,18 @@ struct ComState {
 	int mta_threads = 0;
 };
 
+// The error a language projection reported for the calling thread through RoOriginateLanguageException: the code it will raise, its
+// message, and the exception object that can recreate it. Nothing hands the record back yet -- the host has no IRestrictedErrorInfo
+// object to put it in -- so it is what a report of the thread's error consists of here.
+struct OriginatedErrors {
+	struct Error {
+		uint32_t error = 0;
+		std::u16string message;
+		uint64_t exception = 0;
+	};
+	std::map<uint64_t, Error> threads;
+};
+
 }
 
 void register_platform_api(ApiRegistry &registry, KernelContext &context)
@@ -993,8 +1005,32 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.store<int32_t>(call[2], order < 0 ? -1 : order > 0 ? 1 : 0);
 		call.ret(0);
 	});
-	// Without Windows Runtime metadata, a language exception has nowhere to go, and type names and namespaces resolve to nothing.
-	registry.add("RoOriginateLanguageException", 3, [](ApiCall &call) { call.ret(0); });
+	// Without Windows Runtime metadata, type names and namespaces resolve to nothing. RoOriginateLanguageException(error, message,
+	// languageException) is how a language projection reports the exception it is about to raise: a debugger hears of it, and the
+	// fail-fast that follows an unhandled one can say what it was. A success code reports nothing and answers FALSE, as when no error
+	// has occurred; a message comes from an HSTRING, its header carrying the length, and stops at 511 characters as Windows truncates
+	// it; the exception object is recorded as its caller gave it.
+	auto originated = std::make_shared<OriginatedErrors>();
+	registry.add("RoOriginateLanguageException", 3, [originated, &context](ApiCall &call) {
+		const uint32_t error = call.u32(0);
+		if (!(error >> 31)) {
+			call.ret(0);
+			return;
+		}
+		auto &record = originated->threads[context.environment.teb()];
+		record.error = error;
+		record.message.clear();
+		if (call[1]) {
+			const uint32_t length = call.load<uint32_t>(call[1] + 4);
+			if (length) {
+				const auto bytes = call.read(call.load_pointer(call[1] + 16), size_t(std::min(length, 511U)) * 2);
+				record.message.assign(bytes.size() / 2, u'\0');
+				std::memcpy(record.message.data(), bytes.data(), bytes.size());
+			}
+		}
+		record.exception = call[2];
+		call.ret(1);
+	});
 	registry.add("RoParseTypeName", 3, [](ApiCall &call) { call.ret(0x80004001U); });
 	registry.add("RoResolveNamespace", 7, [](ApiCall &call) { call.ret(0x80004001U); });
 	registry.add("RoGetParameterizedTypeInstanceIID", 5, [](ApiCall &call) { call.ret(0x80004001U); });

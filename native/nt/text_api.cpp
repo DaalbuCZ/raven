@@ -33,6 +33,21 @@ constexpr std::pair<std::u16string_view, uint32_t> known_locales[]{{u"ar", 0x01}
 	{u"en-AU", 0xc09}, {u"es-ES", 0xc0a}, {u"fr-CA", 0xc0c}, {u"en-CA", 0x1009}, {u"fr-CH", 0x100c}, {u"en-IE", 0x1809}, {u"sr-Latn-RS", 0x241a},
 	{u"sr-Cyrl-RS", 0x281a}, {u"en-IN", 0x4009}, {u"es-US", 0x540a}};
 
+// The neutral cultures the tables know, a name without a region or with a script alone, and the specific culture each stands for by
+// default, as Windows resolves a neutral name for resource lookup and .NET picks a neutral culture's specific form.
+constexpr std::pair<std::u16string_view, std::u16string_view> neutral_defaults[]{{u"ar", u"ar-SA"}, {u"de", u"de-DE"}, {u"en", u"en-US"},
+	{u"es", u"es-ES"}, {u"fr", u"fr-FR"}, {u"it", u"it-IT"}, {u"ja", u"ja-JP"}, {u"ko", u"ko-KR"}, {u"nl", u"nl-NL"}, {u"pl", u"pl-PL"},
+	{u"pt", u"pt-BR"}, {u"ru", u"ru-RU"}, {u"sv", u"sv-SE"}, {u"tr", u"tr-TR"}, {u"zh-Hans", u"zh-CN"}, {u"zh-Hant", u"zh-TW"}};
+
+// The neutral default of a name, or null when the name is not one of the neutral cultures.
+const std::pair<std::u16string_view, std::u16string_view> *neutral_default(std::u16string_view name)
+{
+	for (const auto &entry : neutral_defaults)
+		if (!compare_fold(name, entry.first))
+			return &entry;
+	return nullptr;
+}
+
 const std::map<uint32_t, std::u16string> &locale_strings()
 {
 	static const std::map<uint32_t, std::u16string> table = [] {
@@ -80,7 +95,7 @@ std::optional<std::u16string> locale_text(uint32_t type)
 	return found->second;
 }
 
-uint32_t as_number(const std::u16string &text)
+uint32_t as_number(std::u16string_view text)
 {
 	uint32_t value = 0;
 	for (const auto character : text)
@@ -652,8 +667,9 @@ std::vector<uint8_t> locale_table()
 	std::vector<uint8_t> table(locale_table_entries * 8, 0xff);
 	std::u16string pool;
 	for (uint32_t index = 0; index < locale_table_entries; ++index) {
-		// The locale's own name and its parent's depend on the locale asked for, which the served block does not read: the runtime answers.
-		if (index == 0x5c || index == 0x6d)
+		// The locale's own name, its parent, its language identifier and its neutrality depend on the locale asked for, which the served
+		// block does not read: the runtime answers.
+		if (index == 0x1 || index == 0x5c || index == 0x6d || index == 0x71)
 			continue;
 		const auto text = locale_text(index < 0x80 ? index : 0x1000 + index - 0x80);
 		if (!text)
@@ -1073,8 +1089,19 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(locale == 0 || locale == 0x400 || locale == 0x800 ? 0x409 : (locale & 0xfc00) ? locale : locale | 0x400);
 	});
 	registry.add("IsValidLocale", 2, [](ApiCall &call) { call.ret(call.u32(0) == 0x409 || call.u32(0) == 0x400 || call.u32(0) == 0x800); });
+	// Every name the locale tables know is a locale, in any letter case, and the empty name the invariant one; no other is.
 	registry.add("IsValidLocaleName", 1, [](ApiCall &call) {
-		call.ret(call[0] && compare_fold(call.wide(call[0], 85), u"en-US") == 0);
+		if (!call[0]) {
+			call.ret(0);
+			return;
+		}
+		const auto name = call.wide(call[0], 85);
+		if (name.empty()) {
+			call.ret(1);
+			return;
+		}
+		const auto known = std::find_if(std::begin(known_locales), std::end(known_locales), [&name](const auto &entry) { return !compare_fold(name, entry.first); });
+		call.ret(known != std::end(known_locales));
 	});
 	const auto locale_name = [](ApiCall &call, uint64_t buffer, int32_t capacity) {
 		const std::u16string name = u"en-US";
@@ -1131,23 +1158,51 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[1], name, size_t(capacity));
 		call.ret(name.size() + 1);
 	});
-	const auto locale_info = [](ApiCall &call, uint32_t type, uint64_t buffer, int32_t capacity, bool wide) {
-		const auto text = locale_text(type);
-		if (!text) {
-			call.fail(87);
+	// ResolveLocaleName(name, buffer, capacity): the specific locale a name stands for — itself when it has a region, the language's
+	// default specific culture when it is a neutral one, the user's default when the name is missing, and its own empty name for the
+	// invariant, which a caller takes as "1 is the invariant" against a zero failure. An unknown name, or a buffer shorter than the
+	// answer, fails as the length queries of GetLocaleInfoEx do.
+	registry.add("ResolveLocaleName", 3, [](ApiCall &call) {
+		const bool named = call[0] != 0;
+		const auto name = named ? call.wide(call[0], 85) : std::u16string();
+		std::u16string resolved;
+		if (!named || name.front() == u'!')
+			resolved = u"en-US";
+		else if (name.empty())
+			resolved = u"";
+		else {
+			const auto known = std::find_if(std::begin(known_locales), std::end(known_locales), [&name](const auto &entry) { return !compare_fold(name, entry.first); });
+			if (known == std::end(known_locales)) {
+				call.fail(87);
+				return;
+			}
+			if (const auto *neutral = neutral_default(name))
+				resolved = std::u16string(neutral->second);
+			else
+				resolved = known->first;
+		}
+		const int32_t capacity = call.i32(2);
+		if (capacity && size_t(capacity) <= resolved.size()) {
+			call.fail(122);
 			return;
 		}
+		call.put_wide(call[1], resolved, size_t(capacity));
+		call.ret(resolved.size() + 1);
+	});
+	// The answer to a locale question of the given kind: with the number flag, four bytes at the buffer, which two wide characters
+	// hold; otherwise the text with its terminator, a zero capacity asking for the length and a short one failing.
+	const auto put_locale_info = [](ApiCall &call, uint32_t type, std::u16string_view text, uint64_t buffer, int32_t capacity, bool wide) {
 		if (type & locale_return_number) {
 			// The capacity counts characters: two wide ones hold the number.
 			if (capacity < (wide ? 2 : 4)) {
 				call.fail(122);
 				return;
 			}
-			call.store<uint32_t>(buffer, as_number(*text));
+			call.store<uint32_t>(buffer, as_number(text));
 			call.ret(2);
 			return;
 		}
-		const size_t needed = text->size() + 1;
+		const size_t needed = text.size() + 1;
 		if (!capacity) {
 			call.ret(needed);
 			return;
@@ -1157,10 +1212,27 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		if (wide)
-			call.put_wide(buffer, *text, size_t(capacity));
+			call.put_wide(buffer, text, size_t(capacity));
 		else
-			call.put_narrow(buffer, to_utf8(*text), size_t(capacity));
+			call.put_narrow(buffer, to_utf8(text), size_t(capacity));
 		call.ret(needed);
+	};
+	const auto locale_info = [put_locale_info](ApiCall &call, uint32_t type, uint64_t buffer, int32_t capacity, bool wide) {
+		const auto text = locale_text(type);
+		if (!text) {
+			call.fail(87);
+			return;
+		}
+		put_locale_info(call, type, *text, buffer, capacity, wide);
+	};
+	// A language identifier as its four hexadecimal digits, the string form of LOCALE_ILANGUAGE.
+	const auto language_id = [](uint32_t locale) {
+		std::u16string text;
+		for (int shift = 12; shift >= 0; shift -= 4) {
+			const uint32_t digit = (locale >> shift) & 0xf;
+			text.push_back(char16_t(digit < 10 ? u'0' + digit : u'A' + digit - 10));
+		}
+		return text;
 	};
 	// VerLanguageName(language, buffer, characters): the name Windows gives a language identifier in its own English interface, as
 	// version resources name the language of their strings. The count leaves out the terminator.
@@ -1195,25 +1267,60 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("VerLanguageNameA", 3, [language_name](ApiCall &call) { language_name(call, false); });
 	registry.add("GetLocaleInfoW", 4, [locale_info](ApiCall &call) { locale_info(call, call.u32(1), call[2], call.i32(3), true); });
 	registry.add("GetLocaleInfoA", 4, [locale_info](ApiCall &call) { locale_info(call, call.u32(1), call[2], call.i32(3), false); });
-	// GetLocaleInfoEx answers for the one locale there is, en-US, and for its neutral form "en", whose name is its own and whose parent is
-	// the invariant culture: a culture's chain of parents ends there.
-	registry.add("GetLocaleInfoEx", 4, [locale_info](ApiCall &call) {
-		const auto name = call[0] ? call.wide(call[0], 85) : std::u16string();
+	// GetLocaleInfoEx answers for the one dataset there is, the US English one, under every locale name the tables know. A neutral
+	// culture, a name without a region, keeps what identifies it: its name is its own, its parent is the invariant culture, it is one by
+	// LOCALE_INEUTRAL, and its language identifier is the language's, not the region's; its other data is its specific form's, as Windows
+	// serves the country and abbreviations of the default specific culture for a neutral name. The invariant culture, named by the empty
+	// string, answers its own empty name and parent and nothing else: programs that want its other data, .NET's CultureInfo among them,
+	// carry the values built in. Unknown names and kinds fail with the parameter error.
+	registry.add("GetLocaleInfoEx", 4, [locale_info, put_locale_info, language_id](ApiCall &call) {
+		const bool named = call[0] != 0;
+		const auto name = named ? call.wide(call[0], 85) : std::u16string();
 		const uint32_t type = call.u32(1) & ~0x80000000U;
-		const bool neutral = !name.empty() && name.find(u'-') == name.npos && name.front() != u'!';
-		if (neutral && (type == 0x5c || type == 0x6d)) {
-			const std::u16string text = type == 0x5c ? name : u"";
-			if (!call.i32(3)) {
-				call.ret(text.size() + 1);
+		if (named) {
+			if (name.empty()) {
+				if ((type & ~locale_return_number) != 0x5c && (type & ~locale_return_number) != 0x6d) {
+					call.fail(87);
+					return;
+				}
+				put_locale_info(call, call.u32(1), std::u16string(), call[2], call.i32(3), true);
 				return;
 			}
-			if (size_t(call.i32(3)) < text.size() + 1) {
-				call.fail(122);
-				return;
+			// A name that stands for the user's or system's default, as "!x-sys-default-locale" does, is answered as the default's; the
+			// other names the tables know are looked up in any letter case.
+			if (name.front() != u'!') {
+				const auto known = std::find_if(std::begin(known_locales), std::end(known_locales), [&name](const auto &entry) { return !compare_fold(name, entry.first); });
+				if (known == std::end(known_locales)) {
+					call.fail(87);
+					return;
+				}
+				const uint32_t kind = type & ~locale_return_number;
+				const bool neutral = neutral_default(name) != nullptr;
+				if (neutral) {
+					// The parent of a neutral culture is the invariant culture, whose name is empty: a chain of parents ends where
+					// the parent's name is empty, and .NET's culture walk relies on it.
+					if (kind == 0x5c) {
+						put_locale_info(call, call.u32(1), known->first, call[2], call.i32(3), true);
+						return;
+					}
+					if (kind == 0x6d) {
+						put_locale_info(call, call.u32(1), std::u16string(), call[2], call.i32(3), true);
+						return;
+					}
+					if (kind == 0x1) {
+						put_locale_info(call, call.u32(1), language_id(known->second), call[2], call.i32(3), true);
+						return;
+					}
+					if (kind == 0x71) {
+						put_locale_info(call, call.u32(1), u"1", call[2], call.i32(3), true);
+						return;
+					}
+				} else if (kind == 0x5c) {
+					// The name asked for in its canonical form.
+					put_locale_info(call, call.u32(1), known->first, call[2], call.i32(3), true);
+					return;
+				}
 			}
-			call.put_wide(call[2], text, size_t(call.i32(3)));
-			call.ret(text.size() + 1);
-			return;
 		}
 		locale_info(call, call.u32(1), call[2], call.i32(3), true);
 	});

@@ -73,5 +73,47 @@ int raven_entry(void)
 	if (LocaleNameToLCID(L"x-none", 0) || GetLastError() != ERROR_INVALID_PARAMETER) return 19;
 	if (LCIDToLocaleName(0x407, name, LOCALE_NAME_MAX_LENGTH, 0) != 6 || name[0] != 'd' || name[3] != 'D') return 20;
 	if (LCIDToLocaleName(0x1234, name, LOCALE_NAME_MAX_LENGTH, 0)) return 21;
+	/* The neutral culture "en" keeps what identifies it: its own canonical name, the invariant culture as its parent, its own language
+	 * identifier, and its neutrality, with the number flag near-variant of the last answering as a number. */
+	DWORD number = 0, neutral_number = 0;
+	if (GetLocaleInfoEx(L"en", LOCALE_SNAME, NULL, 0) != 3) return 22;
+	if (GetLocaleInfoEx(L"en", LOCALE_SNAME, text, 64) != 3 || !same(text, L"en")) return 23;
+	if (GetLocaleInfoEx(L"en", LOCALE_SPARENT, text, 64) != 1 || text[0]) return 24;
+	if (GetLocaleInfoEx(L"en", LOCALE_ILANGUAGE | LOCALE_RETURN_NUMBER, (LPWSTR)&number, 2) != 2 || number != 9) return 25;
+	if (GetLocaleInfoEx(L"en", LOCALE_ILANGUAGE, text, 64) != 5 || !same(text, L"0009")) return 26;
+	if (GetLocaleInfoEx(L"en", LOCALE_INEUTRAL | LOCALE_RETURN_NUMBER, (LPWSTR)&number, 2) != 2 || number != 1) return 27;
+	if (GetLocaleInfoEx(L"en-US", LOCALE_INEUTRAL | LOCALE_RETURN_NUMBER, (LPWSTR)&number, 2) != 2 || number != 0) return 28;
+	if (GetLocaleInfoEx(L"en", LOCALE_INEGNUMBER | LOCALE_RETURN_NUMBER, (LPWSTR)&neutral_number, 2) != 2 || neutral_number != 1) return 29;
+	/* Its other data is its specific form's, as Windows serves the country and abbreviations of the default specific culture. */
+	if (GetLocaleInfoEx(L"en", LOCALE_SDECIMAL, text, 64) != 2 || !same(text, L".")) return 30;
+	if (GetLocaleInfoEx(L"en", LOCALE_SMONTHNAME1, text, 64) != 8 || !same(text, L"January")) return 31;
+	/* The canonical name comes back whatever letter case asked for it. */
+	if (GetLocaleInfoEx(L"EN-us", LOCALE_SNAME, text, 64) != 6 || !same(text, L"en-US")) return 32;
+	/* The invariant culture answers its own empty name and parent and nothing else. */
+	if (GetLocaleInfoEx(L"", LOCALE_SNAME, text, 64) != 1 || text[0]) return 33;
+	if (GetLocaleInfoEx(L"", LOCALE_SPARENT, text, 64) != 1 || text[0]) return 34;
+	SetLastError(0);
+	if (GetLocaleInfoEx(L"", LOCALE_SSORTNAME, text, 64) || GetLastError() != ERROR_INVALID_PARAMETER) return 35;
+	/* Names the tables do not know are no locale, for the neutral form as for the specific one. */
+	SetLastError(0);
+	if (GetLocaleInfoEx(L"zz-ZZ", LOCALE_SNAME, text, 64) || GetLastError() != ERROR_INVALID_PARAMETER) return 36;
+	SetLastError(0);
+	if (GetLocaleInfoEx(L"zz", LOCALE_SNAME, text, 64) || GetLastError() != ERROR_INVALID_PARAMETER) return 37;
+	/* And every name the tables know is a locale, the empty one the invariant. */
+	if (!IsValidLocaleName(L"en") || !IsValidLocaleName(L"it-IT") || !IsValidLocaleName(L"zh-Hans") || !IsValidLocaleName(L""))
+		return 38;
+	if (IsValidLocaleName(L"zzz-ZZZ")) return 39;
+	/* A name resolves to the specific locale it stands for: itself, the language's default specific culture for a neutral one, the
+	 * user's default when the name is missing, and its own empty name for the invariant. */
+	if (ResolveLocaleName(L"en", name, LOCALE_NAME_MAX_LENGTH) != 6 || !same(name, L"en-US")) return 40;
+	if (ResolveLocaleName(L"EN", name, LOCALE_NAME_MAX_LENGTH) != 6 || !same(name, L"en-US")) return 41;
+	if (ResolveLocaleName(L"en-US", name, LOCALE_NAME_MAX_LENGTH) != 6 || !same(name, L"en-US")) return 42;
+	if (ResolveLocaleName(L"zh-Hans", name, LOCALE_NAME_MAX_LENGTH) != 6 || !same(name, L"zh-CN")) return 43;
+	if (ResolveLocaleName(NULL, name, LOCALE_NAME_MAX_LENGTH) != 6 || !same(name, L"en-US")) return 44;
+	if (ResolveLocaleName(L"", name, LOCALE_NAME_MAX_LENGTH) != 1 || name[0]) return 45;
+	SetLastError(0);
+	if (ResolveLocaleName(L"zz", name, LOCALE_NAME_MAX_LENGTH) || GetLastError() != ERROR_INVALID_PARAMETER) return 46;
+	SetLastError(0);
+	if (ResolveLocaleName(L"en", name, 3) || GetLastError() != ERROR_INSUFFICIENT_BUFFER) return 47;
 	return 0;
 }
