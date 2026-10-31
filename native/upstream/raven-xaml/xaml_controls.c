@@ -20,6 +20,7 @@
 #include "windows_ui_xaml_controls.h"
 #include "windows_ui_xaml_elements.h"
 #include "windows_ui_xaml_window.h"
+#include "swapchain_panel.h"
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
@@ -946,7 +947,147 @@ HRESULT __declspec(dllexport) raven_xaml_control_template_put_root(IInspectable 
 
 /* Factory */
 
-enum factory_kind { factory_frame, factory_page, factory_template };
+/* Contract only: HWND-backed Vulkan presentation exists, but it cannot attach an existing
+ * composition swapchain to this CPU/GDI visual tree. Never read back or invent panel pixels.
+ * This object deliberately exposes no IUIElement/IPanel until layout can reject GPU content. */
+static const WCHAR swapchain_class[] = L"Windows.UI.Xaml.Controls.SwapChainPanel";
+struct swapchain_panel;
+struct swapchain_part { const raven_swapchain_panel_vtbl *lpVtbl; struct swapchain_panel *owner; };
+struct swapchain_native_part { const raven_swapchain_native_vtbl *lpVtbl; struct swapchain_panel *owner; };
+struct swapchain_panel {
+	struct swapchain_part panel;
+	struct swapchain_native_part native;
+	LONG refs;
+	DWORD thread;
+	IDXGISwapChain *stored;
+};
+static HRESULT swapchain_query(struct swapchain_panel *self, REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CISwapChainPanel))
+		*out = &self->panel;
+	else if (equal_iid(iid, &IID_ISwapChainPanelNative))
+		*out = &self->native;
+	else return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	return S_OK;
+}
+static ULONG swapchain_release(struct swapchain_panel *self)
+{
+	ULONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->stored) self->stored->lpVtbl->Release(self->stored);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return refs;
+}
+static HRESULT WINAPI sc_query(raven_swapchain_panel *iface, REFIID iid, void **out)
+{ return swapchain_query(((struct swapchain_part *)iface)->owner, iid, out); }
+static ULONG WINAPI sc_addref(raven_swapchain_panel *iface)
+{ return InterlockedIncrement(&((struct swapchain_part *)iface)->owner->refs); }
+static ULONG WINAPI sc_release(raven_swapchain_panel *iface)
+{ return swapchain_release(((struct swapchain_part *)iface)->owner); }
+static HRESULT WINAPI sc_iids(raven_swapchain_panel *iface, ULONG *count, IID **iids)
+{ (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI sc_name(raven_swapchain_panel *iface, HSTRING *out)
+{
+	(void)iface;
+	if (!out) return E_POINTER;
+	return WindowsCreateString(swapchain_class, ARRAYSIZE(swapchain_class) - 1, out);
+}
+static HRESULT WINAPI sc_trust(raven_swapchain_panel *iface, TrustLevel *out)
+{ (void)iface; return inspectable_trust(out); }
+static HRESULT WINAPI sc_scale(raven_swapchain_panel *iface, FLOAT *out)
+{
+	(void)iface;
+	if (!out) return E_POINTER;
+	*out = 0;
+	/* No layout attachment exists from which to obtain a composition scale. */
+	return E_NOTIMPL;
+}
+static HRESULT WINAPI sc_add_scale(raven_swapchain_panel *iface, IUnknown *handler, EventRegistrationToken *token)
+{
+	(void)iface; (void)handler;
+	if (!token) return E_POINTER;
+	token->value = 0;
+	/* No composition-scale source: do not accept a subscription that never fires. */
+	return E_NOTIMPL;
+}
+static HRESULT WINAPI sc_remove_scale(raven_swapchain_panel *iface, EventRegistrationToken token)
+{ (void)iface; (void)token; return E_NOTIMPL; }
+static HRESULT WINAPI sc_input(raven_swapchain_panel *iface,
+	INT32 types, __x_ABI_CWindows_CUI_CCore_CICoreInputSourceBase **out)
+{
+	(void)iface; (void)types;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	/* There is no independent GPU input surface or input worker. */
+	return E_NOTIMPL;
+}
+static HRESULT WINAPI scn_query(raven_swapchain_native *iface, REFIID iid, void **out)
+{ return swapchain_query(((struct swapchain_native_part *)iface)->owner, iid, out); }
+static ULONG WINAPI scn_addref(raven_swapchain_native *iface)
+{ return InterlockedIncrement(&((struct swapchain_native_part *)iface)->owner->refs); }
+static ULONG WINAPI scn_release(raven_swapchain_native *iface)
+{ return swapchain_release(((struct swapchain_native_part *)iface)->owner); }
+static HRESULT WINAPI scn_set(raven_swapchain_native *iface, IDXGISwapChain *chain)
+{
+	struct swapchain_panel *self = ((struct swapchain_native_part *)iface)->owner;
+	if (self->thread != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+	/* E_NOTIMPL: no DXGI composition-swapchain import into the wl_shm/GDI tree.
+	 * Refusal leaves storage untouched; NULL can always detach the stored contract reference. */
+	if (chain) return E_NOTIMPL;
+	IDXGISwapChain *old = self->stored;
+	self->stored = NULL;
+	if (old) old->lpVtbl->Release(old);
+	return S_OK;
+}
+static const raven_swapchain_panel_vtbl sc_table = {
+	sc_query, sc_addref, sc_release, sc_iids, sc_name, sc_trust,
+	sc_scale, sc_scale, sc_add_scale, sc_remove_scale, sc_input,
+};
+static const raven_swapchain_native_vtbl scn_table = { scn_query, scn_addref, scn_release, scn_set };
+static IInspectable *create_swapchain_panel(void)
+{
+	struct swapchain_panel *self = ALLOC(sizeof(*self));
+	if (!self) return NULL;
+	self->panel.lpVtbl = &sc_table; self->panel.owner = self;
+	self->native.lpVtbl = &scn_table; self->native.owner = self;
+	self->refs = 1; self->thread = GetCurrentThreadId();
+	InterlockedIncrement(&raven_xaml_objects);
+	return (IInspectable *)&self->panel;
+}
+/* Engine-internal contract storage, explicitly NOT native SetSwapChain or a WinRT property.
+ * Retaining and returning a DXGI reference says nothing about whether its pixels can be shown. */
+HRESULT __declspec(dllexport) raven_xaml_swapchain_panel_store(raven_swapchain_panel *iface, IDXGISwapChain *chain)
+{
+	if (!iface) return E_POINTER;
+	if (iface->lpVtbl != &sc_table) return E_INVALIDARG;
+	struct swapchain_panel *self = ((struct swapchain_part *)iface)->owner;
+	if (self->thread != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+	if (chain) chain->lpVtbl->AddRef(chain);
+	IDXGISwapChain *old = self->stored;
+	self->stored = chain;
+	if (old) old->lpVtbl->Release(old);
+	return S_OK;
+}
+HRESULT __declspec(dllexport) raven_xaml_swapchain_panel_get(raven_swapchain_panel *iface, IDXGISwapChain **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (!iface) return E_POINTER;
+	if (iface->lpVtbl != &sc_table) return E_INVALIDARG;
+	struct swapchain_panel *self = ((struct swapchain_part *)iface)->owner;
+	if (self->thread != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+	*out = self->stored;
+	if (*out) (*out)->lpVtbl->AddRef(*out);
+	return S_OK;
+}
+
+enum factory_kind { factory_frame, factory_page, factory_template, factory_swapchain };
 
 struct controls_factory;
 
@@ -985,7 +1126,8 @@ static HRESULT controls_query_parts(struct controls_factory *self, REFIID iid, v
 	{ \
 		struct controls_factory *self = ((struct part *)iface##_unused)->owner; \
 		const WCHAR *text = self->kind == factory_frame ? frame_class : \
-			self->kind == factory_page ? page_class : template_class; \
+			self->kind == factory_page ? page_class : \
+			self->kind == factory_swapchain ? swapchain_class : template_class; \
 		if (!name) return E_POINTER; \
 		return WindowsCreateString(text, (UINT32)lstrlenW(text), name); \
 	} \
@@ -1083,12 +1225,17 @@ static struct controls_factory template_factory_instance = {
 	{NULL, NULL}, {NULL, NULL}, {NULL, NULL}, 1, factory_template,
 };
 
+static struct controls_factory swapchain_factory_instance = {
+	{&activation_table, NULL}, {NULL, NULL}, {NULL, NULL}, {NULL, NULL},
+	{NULL, NULL}, {NULL, NULL}, {NULL, NULL}, 1, factory_swapchain,
+};
 static LONG factories_ready;
 
 /* A static initializer cannot name the object being defined, so the back pointers are filled once, before first use. */
 static void prepare_factories(void)
 {
 	if (InterlockedCompareExchange(&factories_ready, 1, 0) == 0) {
+		swapchain_factory_instance.activation.owner = &swapchain_factory_instance;
 		frame_factory_instance.activation.owner = &frame_factory_instance;
 		frame_factory_instance.statics1.owner = &frame_factory_instance;
 		frame_factory_instance.statics2.owner = &frame_factory_instance;
@@ -1167,7 +1314,8 @@ static HRESULT WINAPI factory_name(IActivationFactory *iface, HSTRING *name)
 {
 	struct controls_factory *self = ((struct controls_part *)iface)->owner;
 	const WCHAR *text = self->kind == factory_frame ? frame_class :
-		self->kind == factory_page ? page_class : template_class;
+		self->kind == factory_page ? page_class :
+		self->kind == factory_swapchain ? swapchain_class : template_class;
 	if (!name)
 		return E_POINTER;
 	return WindowsCreateString(text, (UINT32)lstrlenW(text), name);
@@ -1195,6 +1343,9 @@ static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable *
 		if (!page)
 			return E_OUTOFMEMORY;
 		*out = (IInspectable *)page;
+	} else if (self->kind == factory_swapchain) {
+		*out = create_swapchain_panel();
+		if (!*out) return E_OUTOFMEMORY;
 	} else {
 		struct control_template *template = create_control_template();
 		if (!template)
@@ -1400,6 +1551,8 @@ HRESULT raven_xaml_controls_factory(HSTRING name, IActivationFactory **out)
 		factory = &page_factory_instance;
 	else if (length == ARRAYSIZE(template_class) - 1 && CompareStringOrdinal(text, (int)length, template_class, -1, FALSE) == CSTR_EQUAL)
 		factory = &template_factory_instance;
+	else if (length == ARRAYSIZE(swapchain_class) - 1 && CompareStringOrdinal(text, (int)length, swapchain_class, -1, FALSE) == CSTR_EQUAL)
+		factory = &swapchain_factory_instance;
 	else
 		return CLASS_E_CLASSNOTAVAILABLE;
 	InterlockedIncrement(&factory->refs);
@@ -1419,5 +1572,15 @@ HRESULT __declspec(dllexport) raven_xaml_control_template_factory(IActivationFac
 	prepare_factories();
 	InterlockedIncrement(&template_factory_instance.refs);
 	*out = (IActivationFactory *)&template_factory_instance.activation;
+	return S_OK;
+}
+
+/* Until the integrator adds the runtime catalog entry, fixtures use the same factory directly. */
+HRESULT __declspec(dllexport) raven_xaml_swapchain_panel_factory(IActivationFactory **out)
+{
+	if (!out) return E_POINTER;
+	prepare_factories();
+	InterlockedIncrement(&swapchain_factory_instance.refs);
+	*out = (IActivationFactory *)&swapchain_factory_instance.activation;
 	return S_OK;
 }

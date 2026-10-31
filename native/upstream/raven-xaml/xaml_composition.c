@@ -476,6 +476,8 @@ static HRESULT WINAPI compositor_create_scoped_batch(compositor1 *This,
 	return E_NOTIMPL;
 }
 
+/* E_NOTIMPL: the GDI/wl_shm compositor has no GPU-surface import. The desktop
+ * HWND/Vulkan child-surface path is not a composition-swapchain attachment API. */
 static HRESULT WINAPI compositor_create_surface_brush(compositor1 *This,
 	__x_ABI_CWindows_CUI_CComposition_CICompositionSurfaceBrush **result)
 {

@@ -201,6 +201,7 @@ void NativeRegistry::register_runtime_classes()
 		{u"Windows.UI.Xaml.Controls.Grid", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.TextBlock", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.Button", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.SwapChainPanel", u"raven-xaml.dll"},
 		{u"Windows.UI.Composition.Compositor", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.RowDefinition", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.ColumnDefinition", u"raven-xaml.dll"},
