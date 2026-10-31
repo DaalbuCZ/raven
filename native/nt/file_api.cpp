@@ -729,7 +729,10 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(file ? 5 : 6);
 			return;
 		}
-		::fsync(file->descriptor);
+		if (::fsync(file->descriptor)) {
+			call.fail(error_of(errno));
+			return;
+		}
 		call.ret(1);
 	});
 	// Files of a prefix lie on a host file system that answers no device or file system control codes: the caller hears that the

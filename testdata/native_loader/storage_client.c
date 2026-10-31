@@ -276,8 +276,15 @@ int raven_entry(void)
 	if (item->lpVtbl->get_Path(item, &text) != S_OK || !same_text(text, path)) return 12;
 	WindowsDeleteString(text);
 	text = NULL;
-	/* the members outside the subset answer E_NOTIMPL at their exact signatures */
-	if (current->lpVtbl->get_LocalSettings(current, &settings) != E_NOTIMPL || settings) return 15;
+	/* LocalSettings became a real container: the same singleton answers again, roaming stays outside the subset */
+	if (current->lpVtbl->get_LocalSettings(current, &settings) != S_OK || !settings) return 15;
+	{
+		container_i *settings_again = NULL;
+		if (current->lpVtbl->get_LocalSettings(current, &settings_again) != S_OK || settings_again != settings) return 15;
+		settings_again->lpVtbl->Release(settings_again);
+	}
+	settings->lpVtbl->Release(settings);
+	settings = NULL;
 	if (current->lpVtbl->get_RoamingFolder(current, &roaming) != E_NOTIMPL || roaming) return 15;
 	/* CreateFileAsync over a fresh name: an empty file on disk, the operation already Completed, the handler already run */
 	if (!(file_handler = file_done_new())) return 16;

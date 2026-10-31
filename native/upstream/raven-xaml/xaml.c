@@ -1884,6 +1884,9 @@ static HRESULT raven_core_cursor_factory(HSTRING name, IActivationFactory **out)
 /* The property-set factory lives in application.c; its class catalog line is pending, so the export also serves guests directly. */
 HRESULT raven_property_set_factory(HSTRING name, IActivationFactory **out);
 
+/* PropertyValue lives in property_value.c; declared here so the manifest-driven activation chain can route to it. */
+HRESULT raven_property_value_factory(HSTRING name, IActivationFactory **out);
+
 /* Manifest-driven activation: a packaged app's manifest names an Applications/Application@EntryPoint runtime class — the
  * guest application's own XAML Application subclass (e.g. "Shapr3D.App"), derived from the class an app's
  * IXamlMetadataProvider serves. Real activation maps the entry point to that app-provided class; this component cannot
@@ -1934,6 +1937,8 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 			result = raven_pointer_device_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_property_set_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_property_value_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_automation_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)

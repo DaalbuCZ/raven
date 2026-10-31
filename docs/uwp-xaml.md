@@ -1295,9 +1295,16 @@ the same day — see the two entries below. Evidence:
   removal and release remaining subscriptions with the application. The
   desktop does not deliver suspend or resume lifecycle events yet.
 - The subsequent Shapr3D run passes lifecycle registration and reaches
-  `ApplicationData.LocalSettings`. Its getter returns `E_NOTIMPL`, which
-  .NET Native wraps in `TypeInitializationException` (`0x80131534`). A real
-  local settings container and values are the next observed startup need.
+  `ApplicationData.LocalSettings`. A root container now exposes a persistent
+  values map for boxed Boolean, Int32, UInt32, Int64, UInt64, Single, Double
+  and String values. Each record is checked before replacement and written
+  through a flushed temporary file and rename. The supported PropertyValue
+  factories and their `IReference<T>` interfaces are registered. The storage
+  fixture checks identity, weak references, notifications, corrupt-record
+  refusal and persistence across separate processes on x64 and x86. Unsupported
+  boxed types, nested containers and bulk clear return errors; concurrent
+  updates across processes are not coordinated. Shapr3D gets past the root
+  getter and next calls `CreateContainer`, which remains unimplemented.
 - XBF input bounds (2026-10-31, stage 3): the loader validates metadata
   and declared node-stream extents, variable-length values, truncated
   operands and scope depth before returning a tree. Fixtures cover malformed

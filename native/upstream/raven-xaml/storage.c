@@ -29,6 +29,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include <winstring.h>
+#include <stddef.h>
 #include <windows.storage.h>
 #include <windows.storage.streams.h>
 #include "windows_storage.h"
@@ -152,6 +153,8 @@ static BOOL ensure_local_state(WCHAR *path /* MAX_PATH */)
 	attributes = GetFileAttributesW(path);
 	return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
+
+#include "storage_settings.inc"
 
 /* The async core
  *
@@ -1444,10 +1447,7 @@ static HRESULT WINAPI application_data_get_local_settings(application_data_i *if
 	__x_ABI_CWindows_CStorage_CIApplicationDataContainer **value)
 {
 	(void)iface;
-	if (!value)
-		return E_POINTER;
-	*value = NULL;
-	return E_NOTIMPL;
+	return storage_local_settings(value);
 }
 
 static HRESULT WINAPI application_data_get_roaming_settings(application_data_i *iface,
