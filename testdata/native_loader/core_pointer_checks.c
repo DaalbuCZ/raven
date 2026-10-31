@@ -26,6 +26,9 @@ struct raven_mouse_sample {
 	__x_ABI_CWindows_CUI_CInput_CPointerUpdateKind update;
 	INT32 wheel;
 	boolean horizontal;
+	__x_ABI_CWindows_CDevices_CInput_CPointerDeviceType device;
+	UINT32 pointer_id;
+	boolean in_contact, primary, in_range;
 };
 typedef HRESULT (*history_create_function)(const struct raven_mouse_sample *, UINT32,
 	__FIVector_1_Windows__CUI__CInput__CPointerPoint **);
@@ -44,12 +47,20 @@ static struct pointer_state {
 	VirtualKeyModifiers modifiers;
 	PointerUpdateKind update;
 	INT32 wheel;
-	boolean left, right, middle, x1, x2, horizontal, contact;
+	boolean left, right, middle, x1, x2, horizontal, contact, primary, in_range;
+	/* What the next event is expected to carry: the mouse checks run with the defaults
+	 * (id 1, Mouse, primary, in range) and the touch checks point them at the contact. */
+	UINT32 expect_id;
+	PointerDeviceType expect_type;
+	boolean expect_primary, expect_in_range;
 	IPointerEventArgs *retained_args;
 	IPointerPoint *retained_point;
 	IPointerPointProperties *retained_properties;
 	__FIVector_1_Windows__CUI__CInput__CPointerPoint *retained_history;
+	IPointerEventArgs *retained_touch_args;
+	__FIVector_1_Windows__CUI__CInput__CPointerPoint *retained_touch_history;
 	IPointerDevice *device;
+	IPointerDevice *touch_device;
 } state;
 #define CHECK(condition) do { if (!(condition)) { state.failure = __LINE__; return E_FAIL; } } while (0)
 
@@ -78,7 +89,7 @@ static HRESULT WINAPI handler_invoke(handler_interface *iface, ICoreWindow *wind
 	Point raw;
 	CHECK(IPointerPoint_get_RawPosition(point, &raw) == S_OK && raw.X == state.position.X && raw.Y == state.position.Y);
 	UINT32 id = 0;
-	CHECK(IPointerPoint_get_pointer_id(point, &id) == S_OK && id == 1);
+	CHECK(IPointerPoint_get_pointer_id(point, &id) == S_OK && id == state.expect_id);
 	CHECK(IPointerPoint_get_FrameId(point, &state.frame) == S_OK && state.frame);
 	CHECK(IPointerPoint_get_Timestamp(point, &state.timestamp) == S_OK && state.timestamp && state.timestamp <= GetTickCount64() * 1000 + 1000);
 	CHECK(IPointerPoint_get_IsInContact(point, &state.contact) == S_OK);
@@ -95,14 +106,23 @@ static HRESULT WINAPI handler_invoke(handler_interface *iface, ICoreWindow *wind
 	FLOAT pressure;
 	boolean primary, in_range;
 	CHECK(IPointerPointProperties_get_Pressure(properties, &pressure) == S_OK && pressure == 0.5f);
-	CHECK(IPointerPointProperties_get_IsPrimary(properties, &primary) == S_OK && primary);
-	CHECK(IPointerPointProperties_get_IsInRange(properties, &in_range) == S_OK && in_range);
+	CHECK(IPointerPointProperties_get_IsPrimary(properties, &primary) == S_OK && primary == state.expect_primary);
+	CHECK(IPointerPointProperties_get_IsInRange(properties, &in_range) == S_OK && in_range == state.expect_in_range);
+	state.primary = primary;
+	state.in_range = in_range;
 	IPointerDevice *device = NULL;
 	CHECK(IPointerPoint_get_PointerDevice(point, &device) == S_OK && device);
 	PointerDeviceType type;
-	CHECK(IPointerDevice_get_PointerDeviceType(device, &type) == S_OK && type == PointerDeviceType_Mouse);
-	if (!state.device) { state.device = device; IPointerDevice_AddRef(device); }
-	CHECK(device == state.device);
+	CHECK(IPointerDevice_get_PointerDeviceType(device, &type) == S_OK && type == state.expect_type);
+	/* The device object must be the stable catalog identity for its type: the mouse's
+	 * across every mouse event, the touch entry's across every touch event. */
+	if (state.expect_type == PointerDeviceType_Mouse) {
+		if (!state.device) { state.device = device; IPointerDevice_AddRef(device); }
+		CHECK(device == state.device);
+	} else if (state.expect_type == PointerDeviceType_Touch) {
+		if (!state.touch_device) { state.touch_device = device; IPointerDevice_AddRef(device); }
+		CHECK(device == state.touch_device);
+	}
 	IPointerDevice_Release(device);
 	ICoreWindowEventArgs *handled = NULL;
 	CHECK(IPointerEventArgs_QueryInterface(args, &IID_ICoreWindowEventArgs, (void **)&handled) == S_OK);
@@ -131,6 +151,25 @@ static HRESULT WINAPI handler_invoke(handler_interface *iface, ICoreWindow *wind
 		IPointerPoint *beyond = (void *)1;
 		CHECK(__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(history, count, &beyond) == E_BOUNDS && !beyond);
 		state.retained_history = history; /* released in raven_pointer_finish */
+	}
+	/* The touch press's snapshot: ring entries are samples regardless of device, so the
+	 * contact's own previous sample (its in-contact update) must round-trip with the
+	 * touch device's identity and the id the message carried. */
+	if (event == PRESSED && state.expect_type == PointerDeviceType_Touch && !state.retained_touch_args) {
+		state.retained_touch_args = args; IPointerEventArgs_AddRef(args);
+		__FIVector_1_Windows__CUI__CInput__CPointerPoint *history = NULL;
+		CHECK(__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs_GetIntermediatePoints(args, &history) == S_OK && history);
+		UINT32 count = 0;
+		CHECK(__FIVector_1_Windows__CUI__CInput__CPointerPoint_get_Size(history, &count) == S_OK && count >= 1);
+		IPointerPoint *element = NULL;
+		CHECK(__FIVector_1_Windows__CUI__CInput__CPointerPoint_GetAt(history, count - 1, &element) == S_OK && element);
+		UINT32 element_id = 0;
+		CHECK(IPointerPoint_get_pointer_id(element, &element_id) == S_OK && element_id == state.expect_id);
+		IPointerDevice *element_device = NULL;
+		CHECK(IPointerPoint_get_PointerDevice(element, &element_device) == S_OK && element_device == state.touch_device);
+		IPointerDevice_Release(element_device);
+		IPointerPoint_Release(element);
+		state.retained_touch_history = history; /* released in raven_pointer_finish */
 	}
 	IPointerPointProperties_Release(properties);
 	IPointerPoint_Release(point);
@@ -347,7 +386,9 @@ static int device_checks(void)
 		same != mouse) return __LINE__;
 	IPointerDevice_Release(same);
 	for (UINT32 i = 0; i < got; ++i)
-		if (IPointerDevice_Release(many[i]) != (many[i] == mouse ? 4 : 1)) return __LINE__; /* the second view already holds the mouse */
+		/* Every catalog entry is held by the catalog and both views; the mouse also by
+		 * state.device and the fetched pointer. */
+		if (IPointerDevice_Release(many[i]) != (many[i] == mouse ? 4 : 3)) return __LINE__;
 	if (IPointerDevice_Release(mouse) != 3) return __LINE__; /* state.device and the two views remain */
 	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_Release(view) != 0) return __LINE__;
 	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_Release(again) != 0) return __LINE__;
@@ -370,10 +411,127 @@ static int device_checks(void)
 	return 0;
 }
 
+/* Touch delivery over the WM_POINTER source: the messages are posted straight at the
+ * window's HWND — the emulated desktop cannot generate them from real input (no digitizer
+ * in its enumeration, SendInput rejects touch injection), but the decode they drive is the
+ * same code path a host-generated message would take. */
+static int touch_checks(ICoreWindow *window, HWND hwnd, ICoreDispatcher *dispatcher)
+{
+	(void)window;
+	int entered = state.counts[ENTERED], exited = state.counts[EXITED];
+	int moved = state.counts[MOVED], pressed = state.counts[PRESSED], released = state.counts[RELEASED];
+	state.expect_id = 5;
+	state.expect_type = PointerDeviceType_Touch;
+	/* Hover begins: in range, not in contact, the first pointer in range so primary. */
+	SendMessageW(hwnd, WM_POINTERENTER, MAKEWPARAM(5, POINTER_MESSAGE_FLAG_INRANGE), MAKELPARAM(10, 20));
+	if (state.counts[ENTERED] != entered + 1 || state.contact || !state.primary ||
+		!state.in_range || state.position.X != 10 || state.position.Y != 20 ||
+		state.update != PointerUpdateKind_Other) return __LINE__;
+	/* The contact: in range and in contact, still the primary pointer. */
+	SendMessageW(hwnd, WM_POINTERUPDATE, MAKEWPARAM(5, POINTER_MESSAGE_FLAG_INRANGE | POINTER_MESSAGE_FLAG_INCONTACT),
+		MAKELPARAM(15, 25));
+	if (state.counts[MOVED] != moved + 1 || !state.contact || !state.left || !state.primary ||
+		state.position.X != 15 || state.position.Y != 25) return __LINE__;
+	SendMessageW(hwnd, WM_POINTERDOWN, MAKEWPARAM(5, POINTER_MESSAGE_FLAG_NEW | POINTER_MESSAGE_FLAG_INRANGE |
+		POINTER_MESSAGE_FLAG_INCONTACT | POINTER_MESSAGE_FLAG_PRIMARY), MAKELPARAM(20, 30));
+	if (state.counts[PRESSED] != pressed + 1 || !state.contact || state.update != PointerUpdateKind_LeftButtonPressed)
+		return __LINE__;
+	/* A second simultaneous contact: its own id, never the primary one. */
+	state.expect_id = 6;
+	state.expect_primary = FALSE;
+	SendMessageW(hwnd, WM_POINTERDOWN, MAKEWPARAM(6, POINTER_MESSAGE_FLAG_NEW | POINTER_MESSAGE_FLAG_INRANGE |
+		POINTER_MESSAGE_FLAG_INCONTACT), MAKELPARAM(40, 50));
+	if (state.counts[PRESSED] != pressed + 2 || !state.contact || state.primary) return __LINE__;
+	state.expect_id = 6;
+	SendMessageW(hwnd, WM_POINTERUPDATE, MAKEWPARAM(6, POINTER_MESSAGE_FLAG_INRANGE | POINTER_MESSAGE_FLAG_INCONTACT),
+		MAKELPARAM(42, 52));
+	if (state.position.X != 42 || state.position.Y != 52 || state.primary) return __LINE__;
+	/* The contacts lift: out of contact, still in range until the leave. */
+	SendMessageW(hwnd, WM_POINTERUP, MAKEWPARAM(6, POINTER_MESSAGE_FLAG_INRANGE), MAKELPARAM(43, 53));
+	if (state.counts[RELEASED] != released + 1 || state.contact || state.left ||
+		state.update != PointerUpdateKind_LeftButtonReleased) return __LINE__;
+	state.expect_id = 5;
+	/* Id 5 is the first contact still in range, so it is primary again. */
+	state.expect_primary = TRUE;
+	SendMessageW(hwnd, WM_POINTERUP, MAKEWPARAM(5, POINTER_MESSAGE_FLAG_INRANGE), MAKELPARAM(22, 32));
+	if (state.counts[RELEASED] != released + 2 || state.contact) return __LINE__;
+	/* The hover ends and the contact table drains; a leaving id drops out of the
+	 * table before the primary answer is computed. */
+	state.expect_in_range = FALSE;
+	state.expect_primary = FALSE;
+	SendMessageW(hwnd, WM_POINTERLEAVE, MAKEWPARAM(5, 0), MAKELPARAM(22, 32));
+	if (state.counts[EXITED] != exited + 1 || state.in_range) return __LINE__;
+	state.expect_id = 6;
+	SendMessageW(hwnd, WM_POINTERLEAVE, MAKEWPARAM(6, 0), MAKELPARAM(43, 53));
+	if (state.counts[EXITED] != exited + 2) return __LINE__;
+	/* The touch device is the statics catalog's touch entry: the view, the ids the
+	 * messages carried, and the event path all answer one object. */
+	HMODULE component = GetModuleHandleW(L"raven-xaml.dll");
+	if (!component) return __LINE__;
+	statics_create_function create_statics =
+		(statics_create_function)GetProcAddress(component, "raven_pointer_device_statics");
+	if (!create_statics) return __LINE__;
+	IPointerDeviceStatics *statics = NULL;
+	if (create_statics(&statics) != S_OK || !statics) return __LINE__;
+	__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice *view = NULL;
+	if (IPointerDeviceStatics_GetPointerDevices(statics, &view) != S_OK || !view) return __LINE__;
+	UINT32 count = 0;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_get_Size(view, &count) != S_OK || count < 2)
+		return __LINE__;
+	boolean found_touch = FALSE;
+	for (UINT32 i = 0; i < count; ++i) {
+		IPointerDevice *device = NULL;
+		if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_GetAt(view, i, &device) != S_OK || !device)
+			return __LINE__;
+		PointerDeviceType type;
+		if (IPointerDevice_get_PointerDeviceType(device, &type) != S_OK) return __LINE__;
+		if (type == PointerDeviceType_Touch) {
+			if (device != state.touch_device) return __LINE__;
+			found_touch = TRUE;
+			/* No host source reports the stand-in digitizer's facts. */
+			boolean integrated = FALSE;
+			UINT32 contacts = 9;
+			Rect rect;
+			if (IPointerDevice_get_IsIntegrated(device, &integrated) != E_NOTIMPL) return __LINE__;
+			if (IPointerDevice_get_MaxContacts(device, &contacts) != E_NOTIMPL) return __LINE__;
+			if (IPointerDevice_get_PhysicalDeviceRect(device, &rect) != E_NOTIMPL) return __LINE__;
+		}
+		IPointerDevice_Release(device);
+	}
+	if (!found_touch) return __LINE__;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_Release(view) != 0) return __LINE__;
+	/* The ids the engine delivered resolve to the same touch entry; one it never
+	 * delivered is still an unknown pointer. */
+	IPointerDevice *by_id = NULL;
+	if (IPointerDeviceStatics_GetPointerDevice(statics, 5, &by_id) != S_OK || by_id != state.touch_device)
+		return __LINE__;
+	IPointerDevice_Release(by_id);
+	by_id = NULL;
+	if (IPointerDeviceStatics_GetPointerDevice(statics, 6, &by_id) != S_OK || by_id != state.touch_device)
+		return __LINE__;
+	IPointerDevice_Release(by_id);
+	by_id = (void *)1;
+	if (IPointerDeviceStatics_GetPointerDevice(statics, 7, &by_id) != E_INVALIDARG || by_id) return __LINE__;
+	if (IPointerDeviceStatics_Release(statics) != 0) return __LINE__;
+	/* The mouse checks must still pass untouched after the touch traffic. */
+	state.expect_id = 1;
+	state.expect_type = PointerDeviceType_Mouse;
+	state.expect_primary = TRUE;
+	state.expect_in_range = TRUE;
+	if (!PostMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(4, 5))) return __LINE__;
+	if (ICoreDispatcher_ProcessEvents(dispatcher, CoreProcessEventsOption_ProcessAllIfPresent) != S_OK) return __LINE__;
+	if (state.counts[MOVED] != moved + 3 || state.position.X != 4 || state.position.Y != 5) return __LINE__;
+	return 0;
+}
+
 int raven_pointer_checks(ICoreWindow *window, ICoreDispatcher *dispatcher, HWND hwnd)
 {
 	state.window = window;
 	state.thread = GetCurrentThreadId();
+	state.expect_id = 1;
+	state.expect_type = PointerDeviceType_Mouse;
+	state.expect_primary = TRUE;
+	state.expect_in_range = TRUE;
 	int cursor_result = cursor_checks(window);
 	if (cursor_result) return cursor_result;
 	int history_result = history_checks();
@@ -458,6 +616,8 @@ int raven_pointer_checks(ICoreWindow *window, ICoreDispatcher *dispatcher, HWND 
 	state.fail_move = FALSE;
 	int device_result = device_checks();
 	if (device_result) return device_result;
+	int touch_result = touch_checks(window, hwnd, dispatcher);
+	if (touch_result) return touch_result;
 	return state.failure;
 }
 
@@ -487,6 +647,14 @@ int raven_pointer_finish(void)
 	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_Release(state.retained_history) != 1) return __LINE__;
 	if (IPointerEventArgs_Release(state.retained_args) != 0 || IPointerPoint_Release(state.retained_point) != 1 ||
 		IPointerPointProperties_Release(state.retained_properties) != 0 || IPointerDevice_Release(state.device) != 0) return __LINE__;
+	/* The touch press's snapshot answers the same way after everything above: the args
+	 * hold the history, the history holds the contact's samples with their own device. */
+	if (!state.retained_touch_args || !state.retained_touch_history || !state.touch_device) return __LINE__;
+	if (__FIVector_1_Windows__CUI__CInput__CPointerPoint_Release(state.retained_touch_history) != 1) return __LINE__;
+	if (IPointerEventArgs_Release(state.retained_touch_args) != 0) return __LINE__;
+	/* Unlike the static mouse (the catalog carries it without a reference), the touch
+	 * entry is owned by the catalog, which keeps its reference for the process. */
+	if (IPointerDevice_Release(state.touch_device) != 1) return __LINE__;
 	for (int i = 0; i < POINTER_EVENTS; ++i)
 		if (state.handlers[i].refs != 1) return __LINE__;
 	return 0;

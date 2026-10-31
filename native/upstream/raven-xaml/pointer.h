@@ -14,8 +14,19 @@ struct raven_mouse_sample {
 	__x_ABI_CWindows_CUI_CInput_CPointerUpdateKind update;
 	INT32 wheel;
 	boolean horizontal;
+	/* Which pointer the sample belongs to. The desktop mouse pipeline fills in
+	 * PointerDeviceType_Mouse and pointer id 1; a WM_POINTER contact fills in its
+	 * own device and the id its message carried. The boolean state the mouse
+	 * derives from its button bits (contact, the primary pointer, hover range)
+	 * is what a touch contact reports directly, so the layout carries it once. */
+	__x_ABI_CWindows_CDevices_CInput_CPointerDeviceType device;
+	UINT32 pointer_id;
+	boolean in_contact, primary, in_range;
 };
 HRESULT raven_mouse_point_create(const struct raven_mouse_sample *sample, __x_ABI_CWindows_CUI_CInput_CIPointerPoint **out);
+/* Records the pointer id a WM_POINTER contact arrived under, so GetPointerDevice can
+ * resolve the ids the engine actually delivered; the engine mouse's id 1 needs no record. */
+void raven_pointer_track(UINT32 pointer_id, __x_ABI_CWindows_CDevices_CInput_CPointerDeviceType type);
 /* Builds an IVector<PointerPoint> snapshot owning one reference per element, so a history handed to
  * event args outlives the sample ring that produced it. windows.ui.input.h declares the
  * __FIVector_1_Windows__CUI__CInput__CPointerPoint instantiation (IID dfa655cf-fde7-5048-b4bf-c909231b7edb)

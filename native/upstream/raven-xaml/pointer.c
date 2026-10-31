@@ -45,6 +45,11 @@ static struct pointer_device mouse_device_storage = {
 	{&device_table}, 0, PointerDeviceType_Mouse, TRUE, FALSE, TRUE, 1, device_rect_desktop, {0},
 };
 static IPointerDevice *mouse_device = &mouse_device_storage.device;
+/* The host-derived device catalog (built on first use below): the point objects and the
+ * statics both resolve devices against it. */
+static struct pointer_device **device_catalog;
+static UINT32 device_catalog_count;
+static void catalog_ensure(void);
 static HRESULT no_iids(ULONG *count, IID **iids)
 {
 	if (!count || !iids) return E_POINTER;
@@ -90,7 +95,20 @@ static HRESULT WINAPI point_trust(IPointerPoint *iface, TrustLevel *out) { retur
 static HRESULT WINAPI point_device(IPointerPoint *iface, IPointerDevice **out)
 {
 	if (!out) return E_POINTER;
-	*out = mouse_device;
+	PointerDeviceType type = ((struct mouse_point *)iface)->sample.device;
+	if (type == PointerDeviceType_Mouse) {
+		*out = mouse_device;
+	} else {
+		catalog_ensure();
+		struct pointer_device *device = NULL;
+		for (UINT32 i = 0; i < device_catalog_count && !device; ++i)
+			if (device_catalog[i]->type == type) device = device_catalog[i];
+		/* A touch device is always in the catalog (the engine appends its stand-in when
+		 * the host lists no digitizer); a pen cannot occur here unless the host's own
+		 * pointer table delivered one, so an empty answer stays a failure, not a guess. */
+		if (!device) return E_FAIL;
+		*out = &device->device;
+	}
 	IPointerDevice_AddRef(*out);
 	return S_OK;
 }
@@ -103,7 +121,9 @@ static HRESULT WINAPI point_position(IPointerPoint *iface, Point *out)
 static HRESULT WINAPI point_id(IPointerPoint *iface, UINT32 *out)
 {
 	if (!out) return E_POINTER;
-	*out = 1; /* Raven's single desktop mouse keeps the same pointer identity across windows. */
+	/* The mouse pipeline fills in id 1 (Raven's single desktop mouse keeps the same pointer
+	 * identity across windows); a WM_POINTER contact carries the id its message had. */
+	*out = ((struct mouse_point *)iface)->sample.pointer_id;
 	return S_OK;
 }
 static HRESULT WINAPI point_frame(IPointerPoint *iface, UINT32 *out)
@@ -121,7 +141,13 @@ static HRESULT WINAPI point_timestamp(IPointerPoint *iface, UINT64 *out)
 static HRESULT WINAPI point_contact(IPointerPoint *iface, boolean *out)
 {
 	if (!out) return E_POINTER;
-	*out = !!(((struct mouse_point *)iface)->sample.buttons & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2));
+	struct mouse_point *self = (struct mouse_point *)iface;
+	/* A mouse is in contact while a button is held; a touch contact reports the
+	 * INCONTACT state its messages carried. */
+	if (self->sample.device == PointerDeviceType_Mouse)
+		*out = !!(self->sample.buttons & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2));
+	else
+		*out = self->sample.in_contact;
 	return S_OK;
 }
 static HRESULT WINAPI point_properties(IPointerPoint *iface, IPointerPointProperties **out)
@@ -206,14 +232,20 @@ static HRESULT WINAPI properties_TouchConfidence(IPointerPointProperties *iface,
 static HRESULT WINAPI properties_IsPrimary(IPointerPointProperties *iface, boolean *out)
 {
 	if (!out) return E_POINTER;
-	*out = TRUE;
+	/* The mouse is the desktop's primary pointer; a touch contact is primary while it is
+	 * the first one in range (the window tracks the down order). */
+	struct mouse_point *self = properties_owner(iface);
+	*out = self->sample.device == PointerDeviceType_Mouse ? TRUE : self->sample.primary;
 	return S_OK;
 }
 
 static HRESULT WINAPI properties_IsInRange(IPointerPointProperties *iface, boolean *out)
 {
 	if (!out) return E_POINTER;
-	*out = TRUE;
+	/* The mouse cursor is in range whenever it delivers an event; a touch contact reports
+	 * the INRANGE state its messages carried (hover between UP and LEAVE stays in range). */
+	struct mouse_point *self = properties_owner(iface);
+	*out = self->sample.device == PointerDeviceType_Mouse ? TRUE : self->sample.in_range;
 	return S_OK;
 }
 
@@ -234,7 +266,13 @@ static HRESULT WINAPI properties_IsBarrelButtonPressed(IPointerPointProperties *
 static HRESULT WINAPI properties_IsLeftButtonPressed(IPointerPointProperties *iface, boolean *out)
 {
 	if (!out) return E_POINTER;
-	*out = !!(properties_owner(iface)->sample.buttons & MK_LBUTTON);
+	/* A touch contact presses the left button the way the desktop's mouse does (the real
+	 * statics report it in contact); only the mouse samples carry real button bits. */
+	struct mouse_point *self = properties_owner(iface);
+	if (self->sample.device == PointerDeviceType_Mouse)
+		*out = !!(self->sample.buttons & MK_LBUTTON);
+	else
+		*out = self->sample.in_contact;
 	return S_OK;
 }
 
@@ -969,8 +1007,6 @@ static void catalog_scan_touch_hid(struct device_list *list)
 	}
 	FREE(raw);
 }
-static struct pointer_device **device_catalog;
-static UINT32 device_catalog_count;
 static void catalog_ensure(void)
 {
 	if (device_catalog) return;
@@ -1008,6 +1044,20 @@ static void catalog_ensure(void)
 	UINT32 before = list.count;
 	catalog_scan_touch_user32(&list);
 	if (list.count == before) catalog_scan_touch_hid(&list);
+	/* The engine decodes WM_POINTER contacts whether or not the host lists a digitizer, so a
+	 * touch device must always resolve for the events it delivers; without a host entry the
+	 * catalog carries the engine's touch stand-in, whose digitizer facts (integration, contact
+	 * count, extent) stay a documented E_NOTIMPL because no source on this desktop reports them. */
+	boolean touch_present = FALSE;
+	for (UINT32 i = 0; i < list.count; ++i)
+		if (list.items[i]->type == PointerDeviceType_Touch) touch_present = TRUE;
+	if (!touch_present) {
+		struct pointer_device *device = NULL;
+		if (SUCCEEDED(device_create(PointerDeviceType_Touch, FALSE, FALSE, FALSE, 0, device_rect_none, NULL, &device))) {
+			if (FAILED(device_list_push(&list, device)))
+				IPointerDevice_Release(&device->device);
+		}
+	}
 	/* Never a wrong count: with the mouse guaranteed above, the catalog is non-empty even when the
 	 * host reports nothing. */
 	if (InterlockedCompareExchangePointer((void *)&device_catalog, list.items, NULL)) {
@@ -1057,18 +1107,55 @@ static HRESULT WINAPI statics_trust(IPointerDeviceStatics *iface, TrustLevel *ou
 	(void)iface;
 	return trust(out);
 }
+/* The pointer ids the engine's WM_POINTER decode has delivered, so GetPointerDevice resolves
+ * the ids the events actually carried. The engine mouse's id 1 never needs a record. */
+#define RAVEN_POINTER_ID_CAP 16
+static struct { UINT32 id; PointerDeviceType type; } pointer_id_table[RAVEN_POINTER_ID_CAP];
+static LONG pointer_id_next;
+void raven_pointer_track(UINT32 pointer_id, PointerDeviceType type)
+{
+	/* Id 1 stays the engine mouse's: a WM_POINTER naming it is not delivered (see the window
+	 * decoder), so recording it would put two devices on one identity. */
+	if (!pointer_id || pointer_id == 1) return;
+	for (UINT32 i = 0; i < RAVEN_POINTER_ID_CAP; ++i) {
+		if (pointer_id_table[i].id == pointer_id) {
+			pointer_id_table[i].type = type;
+			return;
+		}
+	}
+	LONG slot = (UINT32)(InterlockedIncrement(&pointer_id_next) - 1) % RAVEN_POINTER_ID_CAP;
+	pointer_id_table[slot].id = pointer_id;
+	pointer_id_table[slot].type = type;
+}
 static HRESULT WINAPI statics_GetPointerDevice(IPointerDeviceStatics *iface, UINT32 pointer_id, IPointerDevice **out)
 {
 	(void)iface;
 	if (!out) return E_POINTER;
 	*out = NULL;
-	/* Every pointer the engine raises reports PointerId 1 (see point_id), so 1 is the only id a
-	 * caller can observe; anything else is an unknown pointer. The real statics reject unknown ids —
-	 * this answers E_INVALIDARG, the engine's contract for an out-of-space argument. */
-	if (pointer_id != 1) return E_INVALIDARG;
-	*out = mouse_device;
-	IPointerDevice_AddRef(*out);
-	return S_OK;
+	/* The engine mouse answers id 1, the ids its events have always reported. A WM_POINTER
+	 * contact resolves through the ids its messages carried; an id the engine never delivered
+	 * is an unknown pointer, and the real statics reject those with E_INVALIDARG — the engine's
+	 * contract for an out-of-space argument. */
+	if (pointer_id == 1) {
+		*out = mouse_device;
+		IPointerDevice_AddRef(*out);
+		return S_OK;
+	}
+	for (UINT32 i = 0; i < RAVEN_POINTER_ID_CAP; ++i) {
+		if (pointer_id_table[i].id && pointer_id_table[i].id == pointer_id) {
+			PointerDeviceType type = pointer_id_table[i].type;
+			catalog_ensure();
+			for (UINT32 j = 0; j < device_catalog_count; ++j) {
+				if (device_catalog[j]->type == type) {
+					*out = &device_catalog[j]->device;
+					IPointerDevice_AddRef(*out);
+					return S_OK;
+				}
+			}
+			return E_INVALIDARG;
+		}
+	}
+	return E_INVALIDARG;
 }
 struct device_view {
 	__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice view;

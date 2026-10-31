@@ -20,6 +20,10 @@
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
 #define RO_E_CLOSED ((HRESULT)0x80000013)
 #define POINTER_HISTORY_CAP 8
+/* The WM_POINTER contact table's documented bound. The host's digitizers would report their
+ * MaxContacts; this desktop's enumeration reports none (see window_pointer_event), so the
+ * engine keeps a fixed bound instead of an unbounded table. */
+#define POINTER_CONTACT_CAP 8
 
 struct raven_desktop_window {
 	ICoreWindow *owner;
@@ -33,6 +37,10 @@ struct raven_desktop_window {
 	struct raven_mouse_sample mouse;
 	struct raven_mouse_sample history[POINTER_HISTORY_CAP];
 	UINT32 history_count, history_next;
+	/* The WM_POINTER ids currently in range, in the order they arrived; the first one is
+	 * the contact the events report as primary. */
+	UINT32 contacts[POINTER_CONTACT_CAP];
+	UINT32 contact_count;
 	struct raven_event_list events[RAVEN_WINDOW_EVENT_COUNT];
 };
 static HINSTANCE module_instance;
@@ -481,6 +489,13 @@ static BOOL window_mouse_event(struct raven_desktop_window *window, UINT message
 	sample.position.Y = position.y * scale;
 	sample.frame = (UINT32)InterlockedIncrement(&pointer_frame);
 	sample.timestamp = pointer_timestamp();
+	/* The mouse is always the engine's mouse: device Mouse, pointer id 1, the desktop's
+	 * primary pointer, in range whenever it delivers an event. */
+	sample.device = PointerDeviceType_Mouse;
+	sample.pointer_id = 1;
+	sample.in_contact = FALSE;
+	sample.primary = TRUE;
+	sample.in_range = TRUE;
 	sample.modifiers = (sample.buttons & MK_CONTROL ? VirtualKeyModifiers_Control : 0) |
 		(sample.buttons & MK_SHIFT ? VirtualKeyModifiers_Shift : 0) |
 		(GetKeyState(VK_MENU) & 0x8000 ? VirtualKeyModifiers_Menu : 0) |
@@ -526,6 +541,91 @@ static BOOL window_mouse_event(struct raven_desktop_window *window, UINT message
 		fire_event_sample(window, RAVEN_WINDOW_POINTER_ENTERED, 0, 0, &sample);
 		if (window->closing) return TRUE;
 	}
+	return fire_event_sample(window, event, 0, 0, &sample);
+}
+
+static void contact_add(struct raven_desktop_window *window, UINT32 pointer_id)
+{
+	for (UINT32 i = 0; i < window->contact_count; ++i)
+		if (window->contacts[i] == pointer_id) return;
+	if (window->contact_count == POINTER_CONTACT_CAP) return; /* documented bound above */
+	window->contacts[window->contact_count++] = pointer_id;
+}
+static void contact_remove(struct raven_desktop_window *window, UINT32 pointer_id)
+{
+	for (UINT32 i = 0; i < window->contact_count; ++i) {
+		if (window->contacts[i] != pointer_id) continue;
+		MoveMemory(window->contacts + i, window->contacts + i + 1,
+			(--window->contact_count - i) * sizeof *window->contacts);
+		return;
+	}
+}
+
+/* The WM_POINTER source: WM_POINTERDOWN/UPDATE/UP/ENTER/LEAVE, wParam LOWORD the pointer id
+ * and HIWORD its flags, lParam the client position. The pointer's type would come from
+ * GetPointerInfo over the id — an API this desktop's user32 does not implement (resolving it
+ * aborts the guest process) — and the host's GetPointerDevices table is empty, leaving no
+ * cursor-id ranges to map either. What remains is the documented engine convention: every id
+ * except the engine mouse's 1 decodes as a touch contact, because a pointerless contact on a
+ * desktop is touch and pen needs a digitizer this host cannot report. A host that populates
+ * its pointer table would map its cursor-id ranges here before the convention applies, which
+ * is also the only path a pen sample could take. The decode is exercised by posting synthetic
+ * WM_POINTER messages; real touch requires a digitizer the emulated desktop does not have,
+ * and its SendInput rejects touch injection, so nothing can generate the messages natively.
+ * The legacy WM_TOUCH source stays undecoded: the host never generates it (no digitizer, no
+ * touch injection) and a posted WM_TOUCH cannot carry the host-allocated TOUCHINPUT handle
+ * GetTouchInputInfo would read, so there is nothing honest to decode there either. */
+static BOOL window_pointer_event(struct raven_desktop_window *window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+	UINT32 pointer_id = GET_POINTERID_WPARAM(wparam);
+	/* Id 1 is the engine mouse's pointer identity everywhere (the mouse sample above, the
+	 * point objects, GetPointerDevice); a WM_POINTER naming it has no device of its own. */
+	if (!pointer_id || pointer_id == 1) return FALSE;
+	DWORD flags = HIWORD(wparam);
+	boolean in_contact = !!(flags & POINTER_MESSAGE_FLAG_INCONTACT);
+	boolean in_range = !!(flags & POINTER_MESSAGE_FLAG_INRANGE);
+	struct raven_mouse_sample sample;
+	memset(&sample, 0, sizeof sample);
+	POINT position = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+	FLOAT scale = dip_scale(window->hwnd);
+	sample.position.X = position.x * scale;
+	sample.position.Y = position.y * scale;
+	sample.frame = (UINT32)InterlockedIncrement(&pointer_frame);
+	sample.timestamp = pointer_timestamp();
+	sample.modifiers = (GetKeyState(VK_CONTROL) & 0x8000 ? VirtualKeyModifiers_Control : 0) |
+		(GetKeyState(VK_SHIFT) & 0x8000 ? VirtualKeyModifiers_Shift : 0) |
+		(GetKeyState(VK_MENU) & 0x8000 ? VirtualKeyModifiers_Menu : 0) |
+		((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000 ? VirtualKeyModifiers_Windows : 0);
+	sample.device = PointerDeviceType_Touch;
+	sample.pointer_id = pointer_id;
+	sample.in_contact = in_contact;
+	sample.in_range = in_range;
+	/* The contact table tracks the ids in range (a contact stays in range across its UP
+	 * until the LEAVE), so the first one in range is the primary pointer. */
+	if (in_range) contact_add(window, pointer_id);
+	else contact_remove(window, pointer_id);
+	sample.primary = window->contact_count && window->contacts[0] == pointer_id;
+	enum raven_window_event event = RAVEN_WINDOW_POINTER_MOVED;
+	switch (message) {
+	case WM_POINTERDOWN:
+		/* A touch contact presses the left button the way the desktop's mouse does. */
+		sample.update = PointerUpdateKind_LeftButtonPressed;
+		event = RAVEN_WINDOW_POINTER_PRESSED;
+		break;
+	case WM_POINTERUP:
+		sample.update = PointerUpdateKind_LeftButtonReleased;
+		event = RAVEN_WINDOW_POINTER_RELEASED;
+		break;
+	case WM_POINTERENTER: event = RAVEN_WINDOW_POINTER_ENTERED; break;
+	case WM_POINTERLEAVE: event = RAVEN_WINDOW_POINTER_EXITED; break;
+	}
+	/* Every sample enters the ring before its event fires, exactly as the mouse's do; the
+	 * ring holds samples regardless of device, so a touch contact round-trips through the
+	 * history snapshots with its own type and id. */
+	window->history[window->history_next] = sample;
+	window->history_next = (window->history_next + 1) % POINTER_HISTORY_CAP;
+	if (window->history_count < POINTER_HISTORY_CAP) ++window->history_count;
+	raven_pointer_track(pointer_id, sample.device);
 	return fire_event_sample(window, event, 0, 0, &sample);
 }
 
@@ -601,6 +701,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
 		}
 		break;
 	case WM_CAPTURECHANGED: handled = window_mouse_event(window, message, wparam, lparam); break;
+	case WM_POINTERDOWN: case WM_POINTERUPDATE: case WM_POINTERUP:
+	case WM_POINTERENTER: case WM_POINTERLEAVE:
+		if (IsWindowEnabled(hwnd)) handled = window_pointer_event(window, message, wparam, lparam);
+		break;
+		/* WM_POINTERWHEEL/HWHEEL stay with the mouse pipeline: the desktop's wheel is the
+		 * mouse's (WM_MOUSEWHEEL), and no source here generates a pointer wheel. WM_TOUCH is
+		 * undecoded; the reason is in the window_pointer_event comment above. */
 	case WM_KEYDOWN: case WM_SYSKEYDOWN:
 		if (IsWindowEnabled(hwnd)) handled = fire_event(window, RAVEN_WINDOW_KEY_DOWN, wparam, lparam);
 		break;
