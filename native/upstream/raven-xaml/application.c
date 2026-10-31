@@ -13,6 +13,7 @@
 #define WIDL_using_Windows_UI_Core
 #include <winstring.h>
 #include <appmodel.h>
+#include <windows.foundation.h>
 #include <windows.applicationmodel.core.h>
 #include <windows.applicationmodel.activation.h>
 #include "xaml_internal.h"
@@ -30,6 +31,11 @@ typedef __FIEventHandler_1_IInspectable exiting_handler;
 static const WCHAR application_name[] = L"Windows.ApplicationModel.Core.CoreApplication";
 static const WCHAR view_name[] = L"Windows.ApplicationModel.Core.CoreApplicationView";
 static const WCHAR launch_name[] = L"Windows.ApplicationModel.Activation.LaunchActivatedEventArgs";
+
+/* engine-internal, package.c: the package-relative application id the manifest beside the image declares, or nothing
+ * when the process carries no manifest identity */
+BOOL raven_package_application_id(const WCHAR **out);
+
 static DWORD session_tls = TLS_OUT_OF_INDEXES;
 static LONG running;
 static CRITICAL_SECTION application_lock;
@@ -329,10 +335,303 @@ static HRESULT WINAPI activation_instance(IActivationFactory *iface, IInspectabl
 	*out = NULL;
 	return E_ILLEGAL_METHOD_CALL;
 }
+
+/* The process property set. CoreApplication.Properties hands out one process-wide object shaped
+ * IMap<HSTRING, IInspectable> — the interface shape the runtime projects as its PropertySet class — with string keys
+ * compared by content and the values owned by the map. The PropertySet runtime class itself is not claimed: its
+ * activation is a catalog entry that has not landed, so GetRuntimeClassName answers the parameterized IMap name. */
+static const WCHAR property_map_type[] =
+	L"Windows.Foundation.Collections.IMap`2<Windows.Foundation.HSTRING, Windows.Foundation.IInspectable>";
+
+struct property_entry {
+	HSTRING key;
+	IInspectable *value;
+};
+struct property_set_object {
+	__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet base;
+	__FIMap_2_HSTRING_IInspectable map;
+	__FIMapView_2_HSTRING_IInspectable view;
+	LONG refs;
+	struct property_entry *entries;
+	UINT32 count;
+	UINT32 capacity;
+};
+static struct property_set_object property_set_instance;
+static CRITICAL_SECTION property_set_lock;
+
+static HRESULT WINAPI property_base_query(__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *iface, REFIID iid, void **out);
+static ULONG WINAPI property_base_addref(__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *iface);
+static ULONG WINAPI property_base_release(__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *iface);
+static HRESULT WINAPI property_base_iids(__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *iface, ULONG *count, IID **iids);
+static HRESULT WINAPI property_base_class(__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *iface, HSTRING *out);
+static HRESULT WINAPI property_base_trust(__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *iface, TrustLevel *out);
+static HRESULT WINAPI property_map_query(__FIMap_2_HSTRING_IInspectable *iface, REFIID iid, void **out);
+static ULONG WINAPI property_map_addref(__FIMap_2_HSTRING_IInspectable *iface);
+static ULONG WINAPI property_map_release(__FIMap_2_HSTRING_IInspectable *iface);
+static HRESULT WINAPI property_map_iids(__FIMap_2_HSTRING_IInspectable *iface, ULONG *count, IID **iids);
+static HRESULT WINAPI property_map_class(__FIMap_2_HSTRING_IInspectable *iface, HSTRING *out);
+static HRESULT WINAPI property_map_trust(__FIMap_2_HSTRING_IInspectable *iface, TrustLevel *out);
+static HRESULT WINAPI property_view_query(__FIMapView_2_HSTRING_IInspectable *iface, REFIID iid, void **out);
+static ULONG WINAPI property_view_addref(__FIMapView_2_HSTRING_IInspectable *iface);
+static ULONG WINAPI property_view_release(__FIMapView_2_HSTRING_IInspectable *iface);
+static HRESULT WINAPI property_view_iids(__FIMapView_2_HSTRING_IInspectable *iface, ULONG *count, IID **iids);
+static HRESULT WINAPI property_view_class(__FIMapView_2_HSTRING_IInspectable *iface, HSTRING *out);
+static HRESULT WINAPI property_view_trust(__FIMapView_2_HSTRING_IInspectable *iface, TrustLevel *out);
+
+static const __x_ABI_CWindows_CFoundation_CCollections_CIPropertySetVtbl property_base_table = {
+	property_base_query, property_base_addref, property_base_release,
+	property_base_iids, property_base_class, property_base_trust
+};
+static const __FIMap_2_HSTRING_IInspectableVtbl property_map_table;
+static const __FIMapView_2_HSTRING_IInspectableVtbl property_view_table;
+static struct property_set_object property_set_instance = {
+	{&property_base_table}, {&property_map_table}, {&property_view_table}, 0, NULL, 0, 0
+};
+
+static ULONG property_addref(struct property_set_object *self)
+{
+	return InterlockedIncrement(&self->refs);
+}
+static ULONG property_release(struct property_set_object *self)
+{
+	/* process-wide like the application factory: the count follows the guests' references, the object is never freed */
+	return InterlockedDecrement(&self->refs);
+}
+static HRESULT property_query(struct property_set_object *self, REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) ||
+		IsEqualIID(iid, &IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet))
+		*out = &self->base;
+	else if (IsEqualIID(iid, &IID___FIMap_2_HSTRING_IInspectable))
+		*out = &self->map;
+	else if (IsEqualIID(iid, &IID___FIMapView_2_HSTRING_IInspectable))
+		*out = &self->view;
+	else
+		return E_NOINTERFACE;
+	property_addref(self);
+	return S_OK;
+}
+
+/* The three parts forward their lifetime to the object, whose base their member offset reaches. */
+#define PROPERTY_PART_LIFETIME(part, iface_type, member) \
+	static HRESULT WINAPI part##_query(iface_type *iface, REFIID iid, void **out) \
+	{ return property_query(CONTAINING_RECORD(iface, struct property_set_object, member), iid, out); } \
+	static ULONG WINAPI part##_addref(iface_type *iface) \
+	{ return property_addref(CONTAINING_RECORD(iface, struct property_set_object, member)); } \
+	static ULONG WINAPI part##_release(iface_type *iface) \
+	{ return property_release(CONTAINING_RECORD(iface, struct property_set_object, member)); } \
+	static HRESULT WINAPI part##_iids(iface_type *iface, ULONG *count, IID **iids) \
+	{ (void)iface; return no_iids(count, iids); } \
+	static HRESULT WINAPI part##_class(iface_type *iface, HSTRING *out) \
+	{ (void)iface; return class_string(property_map_type, out); } \
+	static HRESULT WINAPI part##_trust(iface_type *iface, TrustLevel *out) \
+	{ (void)iface; return base_trust(out); }
+
+PROPERTY_PART_LIFETIME(property_base, __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet, base)
+PROPERTY_PART_LIFETIME(property_map, __FIMap_2_HSTRING_IInspectable, map)
+PROPERTY_PART_LIFETIME(property_view, __FIMapView_2_HSTRING_IInspectable, view)
+
+/* String keys compare by content; a NULL HSTRING is the empty key the way every HSTRING argument reads. */
+static BOOL property_key_equal(HSTRING left, HSTRING right)
+{
+	INT order = 0;
+	if (left == right) return TRUE;
+	if (!left || !right) return FALSE;
+	if (FAILED(WindowsCompareStringOrdinal(left, right, &order))) return FALSE;
+	return order == 0;
+}
+static struct property_entry *property_find(struct property_set_object *self, HSTRING key)
+{
+	for (UINT32 i = 0; i < self->count; ++i)
+		if (property_key_equal(self->entries[i].key, key))
+			return &self->entries[i];
+	return NULL;
+}
+static void property_entry_dispose(struct property_entry *entry)
+{
+	if (entry->key) WindowsDeleteString(entry->key);
+	if (entry->value) entry->value->lpVtbl->Release(entry->value);
+}
+
+static HRESULT property_lookup_impl(struct property_set_object *self, HSTRING key, IInspectable **value)
+{
+	struct property_entry *entry;
+	HRESULT result;
+	if (!value) return E_POINTER;
+	*value = NULL;
+	EnterCriticalSection(&property_set_lock);
+	entry = property_find(self, key);
+	if (entry && entry->value) {
+		*value = entry->value;
+		(*value)->lpVtbl->AddRef(*value);
+	}
+	result = entry ? S_OK : E_BOUNDS;
+	LeaveCriticalSection(&property_set_lock);
+	return result;
+}
+static HRESULT property_size_impl(struct property_set_object *self, UINT32 *value)
+{
+	if (!value) return E_POINTER;
+	EnterCriticalSection(&property_set_lock);
+	*value = self->count;
+	LeaveCriticalSection(&property_set_lock);
+	return S_OK;
+}
+static HRESULT property_has_key_impl(struct property_set_object *self, HSTRING key, boolean *found)
+{
+	if (!found) return E_POINTER;
+	EnterCriticalSection(&property_set_lock);
+	*found = property_find(self, key) ? TRUE : FALSE;
+	LeaveCriticalSection(&property_set_lock);
+	return S_OK;
+}
+
+static HRESULT WINAPI property_map_lookup(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value)
+{
+	return property_lookup_impl(CONTAINING_RECORD(iface, struct property_set_object, map), key, value);
+}
+static HRESULT WINAPI property_map_size(__FIMap_2_HSTRING_IInspectable *iface, UINT32 *value)
+{
+	return property_size_impl(CONTAINING_RECORD(iface, struct property_set_object, map), value);
+}
+static HRESULT WINAPI property_map_has_key(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key, boolean *found)
+{
+	return property_has_key_impl(CONTAINING_RECORD(iface, struct property_set_object, map), key, found);
+}
+static HRESULT WINAPI property_map_get_view(__FIMap_2_HSTRING_IInspectable *iface, __FIMapView_2_HSTRING_IInspectable **view)
+{
+	struct property_set_object *self = CONTAINING_RECORD(iface, struct property_set_object, map);
+	if (!view) return E_POINTER;
+	/* the view reads the same storage, so it sees later mutations the way the live map does */
+	*view = &self->view;
+	property_addref(self);
+	return S_OK;
+}
+static HRESULT WINAPI property_map_insert(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable *value,
+	boolean *replaced)
+{
+	struct property_set_object *self = CONTAINING_RECORD(iface, struct property_set_object, map);
+	struct property_entry *entry;
+	HRESULT result = S_OK;
+	if (replaced) *replaced = FALSE;
+	EnterCriticalSection(&property_set_lock);
+	entry = property_find(self, key);
+	if (entry) {
+		if (replaced) *replaced = TRUE;
+		if (value) value->lpVtbl->AddRef(value);
+		if (entry->value) entry->value->lpVtbl->Release(entry->value);
+		entry->value = value;
+	} else {
+		if (self->count == self->capacity) {
+			const UINT32 capacity = self->capacity ? self->capacity * 2 : 4;
+			struct property_entry *entries = ALLOC((SIZE_T)capacity * sizeof *entries);
+			if (!entries) {
+				result = E_OUTOFMEMORY;
+			} else {
+				if (self->entries) {
+					memcpy(entries, self->entries, (SIZE_T)self->count * sizeof *entries);
+					FREE(self->entries);
+				}
+				self->entries = entries;
+				self->capacity = capacity;
+			}
+		}
+		if (SUCCEEDED(result)) {
+			UINT32 length = 0;
+			const WCHAR *text = key ? WindowsGetStringRawBuffer(key, &length) : NULL;
+			HSTRING stored = NULL;
+			/* the map owns its keys: an empty key normalizes to the NULL handle WindowsCreateString answers */
+			result = WindowsCreateString(text, length, &stored);
+			if (SUCCEEDED(result)) {
+				self->entries[self->count].key = stored;
+				self->entries[self->count].value = value;
+				if (value) value->lpVtbl->AddRef(value);
+				++self->count;
+			}
+		}
+	}
+	LeaveCriticalSection(&property_set_lock);
+	return result;
+}
+static HRESULT WINAPI property_map_remove(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key)
+{
+	struct property_set_object *self = CONTAINING_RECORD(iface, struct property_set_object, map);
+	HRESULT result = E_BOUNDS;
+	EnterCriticalSection(&property_set_lock);
+	for (UINT32 i = 0; i < self->count; ++i) {
+		if (!property_key_equal(self->entries[i].key, key)) continue;
+		property_entry_dispose(&self->entries[i]);
+		for (UINT32 rest = i; rest + 1 < self->count; ++rest)
+			self->entries[rest] = self->entries[rest + 1];
+		--self->count;
+		result = S_OK;
+		break;
+	}
+	LeaveCriticalSection(&property_set_lock);
+	return result;
+}
+static HRESULT WINAPI property_map_clear(__FIMap_2_HSTRING_IInspectable *iface)
+{
+	struct property_set_object *self = CONTAINING_RECORD(iface, struct property_set_object, map);
+	EnterCriticalSection(&property_set_lock);
+	for (UINT32 i = 0; i < self->count; ++i)
+		property_entry_dispose(&self->entries[i]);
+	self->count = 0;
+	LeaveCriticalSection(&property_set_lock);
+	return S_OK;
+}
+
+static HRESULT WINAPI property_view_lookup(__FIMapView_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value)
+{
+	return property_lookup_impl(CONTAINING_RECORD(iface, struct property_set_object, view), key, value);
+}
+static HRESULT WINAPI property_view_size(__FIMapView_2_HSTRING_IInspectable *iface, UINT32 *value)
+{
+	return property_size_impl(CONTAINING_RECORD(iface, struct property_set_object, view), value);
+}
+static HRESULT WINAPI property_view_has_key(__FIMapView_2_HSTRING_IInspectable *iface, HSTRING key, boolean *found)
+{
+	return property_has_key_impl(CONTAINING_RECORD(iface, struct property_set_object, view), key, found);
+}
+static HRESULT WINAPI property_view_split(__FIMapView_2_HSTRING_IInspectable *iface,
+	__FIMapView_2_HSTRING_IInspectable **first, __FIMapView_2_HSTRING_IInspectable **second)
+{
+	(void)iface;
+	if (first) *first = NULL;
+	if (second) *second = NULL;
+	return E_NOTIMPL;
+}
+
+static const __FIMap_2_HSTRING_IInspectableVtbl property_map_table = {
+	property_map_query, property_map_addref, property_map_release,
+	property_map_iids, property_map_class, property_map_trust,
+	property_map_lookup, property_map_size, property_map_has_key,
+	property_map_get_view, property_map_insert, property_map_remove, property_map_clear
+};
+static const __FIMapView_2_HSTRING_IInspectableVtbl property_view_table = {
+	property_view_query, property_view_addref, property_view_release,
+	property_view_iids, property_view_class, property_view_trust,
+	property_view_lookup, property_view_size, property_view_has_key, property_view_split
+};
+
+static HRESULT WINAPI app_properties(ICoreApplication *iface, __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet **out)
+{
+	if (!out) return E_POINTER;
+	*out = &property_set_instance.base;
+	property_addref(&property_set_instance);
+	return S_OK;
+}
+
 static HRESULT WINAPI app_id(ICoreApplication *iface, HSTRING *out)
 {
 	if (!out) return E_POINTER;
 	*out = NULL;
+	/* with package identity the Id is the package-relative application id the manifest declares */
+	const WCHAR *praid = NULL;
+	if (raven_package_application_id(&praid)) return class_string(praid, out);
+	/* no package identity: forward the host's answer */
 	UINT32 length = 0;
 	LONG error = GetCurrentApplicationUserModelId(&length, NULL);
 	if (error != ERROR_INSUFFICIENT_BUFFER) return HRESULT_FROM_WIN32(error);
@@ -358,12 +657,6 @@ static HRESULT WINAPI app_add_resuming(ICoreApplication *iface, exiting_handler 
 	return E_NOTIMPL;
 }
 static HRESULT WINAPI app_remove_resuming(ICoreApplication *iface, EventRegistrationToken token) { return E_NOTIMPL; }
-static HRESULT WINAPI app_properties(ICoreApplication *iface, __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet **out)
-{
-	if (!out) return E_POINTER;
-	*out = NULL;
-	return E_NOTIMPL;
-}
 static HRESULT WINAPI app_current(ICoreApplication *iface, ICoreApplicationView **out)
 {
 	if (!out) return E_POINTER;
@@ -467,6 +760,9 @@ static HRESULT WINAPI app_run(ICoreApplication *iface, IFrameworkViewSource *sou
 }
 static HRESULT WINAPI app_run_factories(ICoreApplication *iface, __x_ABI_CWindows_CFoundation_CIGetActivationFactory *factory)
 {
+	/* RunWithActivationFactories runs the callback on the UI thread with the application's activation factory. The
+	 * engine owns no UI thread until Run takes one and has no dispatcher queue to post the callback to before that,
+	 * and running it on the calling thread would not be the contract; it waits for the stage 5 startup work. */
 	return factory ? E_NOTIMPL : E_POINTER;
 }
 static HRESULT WINAPI exit_application(ICoreApplicationExit *iface)
@@ -516,6 +812,7 @@ BOOL raven_application_notify(DWORD reason, void *reserved)
 		if (session_tls == TLS_OUT_OF_INDEXES) return FALSE;
 		InitializeCriticalSection(&application_lock);
 		InitializeCriticalSection(&exiting.lock);
+		InitializeCriticalSection(&property_set_lock);
 	} else if (reason == DLL_THREAD_DETACH || (reason == DLL_PROCESS_DETACH && !reserved)) {
 		struct session *session = session_tls == TLS_OUT_OF_INDEXES ? NULL : TlsGetValue(session_tls);
 		if (session) dispose_session(session);
@@ -524,6 +821,7 @@ BOOL raven_application_notify(DWORD reason, void *reserved)
 		if (!reserved) raven_event_close(&exiting);
 		DeleteCriticalSection(&exiting.lock);
 		DeleteCriticalSection(&application_lock);
+		DeleteCriticalSection(&property_set_lock);
 		TlsFree(session_tls);
 		session_tls = TLS_OUT_OF_INDEXES;
 	}

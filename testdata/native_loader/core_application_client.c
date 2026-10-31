@@ -336,11 +336,93 @@ int raven_entry(void)
 		ICoreApplication_Run(app, NULL) != E_POINTER || ICoreApplicationExit_Exit(exit) != (HRESULT)0x8000000e) return 7;
 	HSTRING id = (void *)1;
 	if (ICoreApplication_get_Id(app, &id) != HRESULT_FROM_WIN32(15700) || id) return 12;
-	__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *properties = (void *)1;
-	if (ICoreApplication_get_Properties(app, &properties) != E_NOTIMPL || properties) return 13;
+	/* Properties: the process-wide property set, handed out as the same object and honest through its
+	 * IMap<HSTRING, IInspectable> shape. */
+	__x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *properties = (void *)1, *properties_again = NULL;
+	if (ICoreApplication_get_Properties(app, &properties) != S_OK || !properties) return 13;
+	if (ICoreApplication_get_Properties(app, &properties_again) != S_OK || properties_again != properties) return 13;
+	if (properties_again->lpVtbl->Release(properties_again) != 1) return 13;
+	__FIMap_2_HSTRING_IInspectable *map = NULL;
+	if (properties->lpVtbl->QueryInterface(properties, &IID___FIMap_2_HSTRING_IInspectable, (void **)&map) != S_OK ||
+		!map) return 60;
+	UINT32 size = 1;
+	if (map->lpVtbl->get_Size(map, &size) != S_OK || size) return 61;
+	HSTRING property_key = NULL, property_key_again = NULL, property_other = NULL;
+	if (WindowsCreateString(L"One", 3, &property_key) != S_OK ||
+		WindowsCreateString(L"One", 3, &property_key_again) != S_OK ||
+		WindowsCreateString(L"Two", 3, &property_other) != S_OK) return 62;
+	boolean replaced = TRUE;
+	if (map->lpVtbl->Insert(map, property_key, (IInspectable *)app, &replaced) != S_OK || replaced) return 63;
+	if (map->lpVtbl->get_Size(map, &size) != S_OK || size != 1) return 64;
+	IInspectable *value = (void *)1;
+	if (map->lpVtbl->Lookup(map, property_key, &value) != S_OK || value != (IInspectable *)app) return 65;
+	value->lpVtbl->Release(value);
+	boolean found = FALSE;
+	if (map->lpVtbl->HasKey(map, property_key, &found) != S_OK || !found ||
+		map->lpVtbl->HasKey(map, property_other, &found) != S_OK || found) return 66;
+	/* string keys compare by content: a different HSTRING with the same text replaces */
+	replaced = FALSE;
+	if (map->lpVtbl->Insert(map, property_key_again, NULL, &replaced) != S_OK || !replaced) return 67;
+	if (map->lpVtbl->Lookup(map, property_key, &value) != S_OK || value) return 68;
+	if (map->lpVtbl->Insert(map, property_other, (IInspectable *)app, &replaced) != S_OK || replaced) return 69;
+	if (map->lpVtbl->get_Size(map, &size) != S_OK || size != 2) return 70;
+	__FIMapView_2_HSTRING_IInspectable *view = NULL;
+	if (map->lpVtbl->GetView(map, &view) != S_OK || !view) return 71;
+	if (view->lpVtbl->get_Size(view, &size) != S_OK || size != 2 ||
+		view->lpVtbl->HasKey(view, property_other, &found) != S_OK || !found ||
+		view->lpVtbl->Lookup(view, property_key, &value) != S_OK || value) return 72;
+	view->lpVtbl->Release(view);
+	if (map->lpVtbl->Remove(map, property_key) != S_OK || map->lpVtbl->Remove(map, property_key) != E_BOUNDS ||
+		map->lpVtbl->Lookup(map, property_key, &value) != E_BOUNDS) return 73;
+	if (map->lpVtbl->get_Size(map, &size) != S_OK || size != 1) return 74;
+	if (map->lpVtbl->Clear(map) != S_OK || map->lpVtbl->get_Size(map, &size) != S_OK || size ||
+		map->lpVtbl->HasKey(map, property_other, &found) != S_OK || found) return 75;
+	/* a NULL HSTRING is the empty key the way every HSTRING argument reads */
+	replaced = TRUE;
+	if (map->lpVtbl->Insert(map, NULL, (IInspectable *)app, &replaced) != S_OK || replaced ||
+		map->lpVtbl->Lookup(map, NULL, &value) != S_OK || value != (IInspectable *)app ||
+		map->lpVtbl->Remove(map, NULL) != S_OK || map->lpVtbl->get_Size(map, &size) != S_OK || size) return 76;
+	WindowsDeleteString(property_key);
+	WindowsDeleteString(property_key_again);
+	WindowsDeleteString(property_other);
+	map->lpVtbl->Release(map);
+	properties->lpVtbl->Release(properties);
 	void *missing = (void *)1;
 	if (ICoreApplication_QueryInterface(app, &IID_IFrameworkView, &missing) != E_NOINTERFACE || missing) return 14;
 	HMODULE component = GetModuleHandleW(L"raven-xaml.dll");
+	/* The manifest scanner's Application/Id reader, through the engine-internal seam: this harness runs without a
+	 * package layout (the identity is read once per process, so both branches cannot run here), so the reader is
+	 * checked on manifests from memory, parsed by the same scanner the manifest on disk goes through. */
+	typedef HRESULT (WINAPI *manifest_id_function)(const BYTE *, UINT32, HSTRING *);
+	manifest_id_function manifest_id = component ?
+		(manifest_id_function)GetProcAddress(component, "raven_package_manifest_application_id") : NULL;
+	if (!manifest_id) return 80;
+	static const char with_application[] =
+		"<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+		"<Package xmlns=\"http://schemas.microsoft.com/appx/manifest/foundation/windows10\">"
+		"<Identity Name=\"Raven.Fixture\" Publisher=\"CN=Raven\" Version=\"1.2.3.4\"/>"
+		"<Applications><Application Id=\"Raven.Fixture.App\" EntryPoint=\"Raven.Fixture.App\">"
+		"<uap:VisualElements DisplayName=\"Raven\"/></Application></Applications>"
+		"</Package>";
+	HSTRING praid = (void *)1;
+	if (manifest_id((const BYTE *)with_application, (UINT32)sizeof with_application - 1, &praid) != S_OK || !praid)
+		return 81;
+	{
+		UINT32 length = 0;
+		const WCHAR *text = WindowsGetStringRawBuffer(praid, &length);
+		if (length != 17 || CompareStringOrdinal(text, (int)length, L"Raven.Fixture.App", -1, FALSE) != CSTR_EQUAL)
+			return 82;
+	}
+	WindowsDeleteString(praid);
+	static const char without_application[] =
+		"<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+		"<Package xmlns=\"http://schemas.microsoft.com/appx/manifest/foundation/windows10\">"
+		"<Identity Name=\"Raven.Fixture\" Publisher=\"CN=Raven\" Version=\"1.2.3.4\"/>"
+		"</Package>";
+	praid = (void *)1;
+	if (manifest_id((const BYTE *)without_application, (UINT32)sizeof without_application - 1, &praid) != S_OK ||
+		WindowsGetStringLen(praid)) return 83;
+	WindowsDeleteString(praid);
 	HRESULT (WINAPI *can_unload)(void) = component ? (void *)GetProcAddress(component, "DllCanUnloadNow") : NULL;
 	if (!can_unload || can_unload() != S_OK) return 8;
 	static const int expected[] = {511, 1, 3, 391, 399, 447, 415, 511, 447, 31, 1};

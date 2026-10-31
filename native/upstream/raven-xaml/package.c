@@ -190,6 +190,7 @@ struct package_manifest {
 	WCHAR name[MANIFEST_TEXT_MAX];
 	WCHAR publisher[MANIFEST_TEXT_MAX];
 	WCHAR resource_id[MANIFEST_TEXT_MAX];
+	WCHAR application_id[MANIFEST_TEXT_MAX];
 	WCHAR version_text[64];
 	WCHAR display_name[MANIFEST_TEXT_MAX];
 	WCHAR publisher_display[MANIFEST_TEXT_MAX];
@@ -534,8 +535,9 @@ enum capture_kind {
 };
 
 /* The scanner walks tags and text with a tolerant hand: only the elements the identity needs are recognized, matched by
- * the local name the way an Appx manifest spells them, and everything else — comments, processing instructions, other
- * elements — is skipped or copied through. A manifest with sections this component does not model still parses. */
+ * the local name the way an Appx manifest spells them (the Identity attributes, the Applications/Application Id, the
+ * Properties display values), and everything else — comments, processing instructions, other elements — is skipped or
+ * copied through. A manifest with sections this component does not model still parses. */
 static void parse_manifest(const BYTE *data, UINT32 length, struct package_manifest *manifest)
 {
 	/* the element stack, only to know whose child the current element is */
@@ -622,6 +624,7 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 			UINT32 name_length;
 			BOOL self_closing = FALSE;
 			BOOL is_identity = FALSE;
+			BOOL is_application = FALSE;
 			BOOL in_dependencies = FALSE;
 			enum capture_kind property = capture_none;
 			position = name_start;
@@ -632,6 +635,8 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 			if (!name_length || position >= length)
 				break;
 			is_identity = bytes_equal(data, name_start, name_length, "Identity");
+			is_application = depth && stack_is(stack[depth - 1].name, stack[depth - 1].length, "Applications") &&
+				bytes_equal(data, name_start, name_length, "Application");
 			in_dependencies = depth && stack_is(stack[depth - 1].name, stack[depth - 1].length, "Dependencies");
 			if (is_identity)
 				manifest->has_identity = TRUE;
@@ -714,6 +719,11 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 							(value.length == 4 && !memcmp(value.text, "true", 4)) ||
 							(value.length == 1 && value.text[0] == '1');
 					}
+				} else if (is_application && bytes_equal(data, attribute_name, attribute_length, "Id")) {
+					/* the package-relative application id CoreApplication.Id answers with */
+					utf8_clear(&value);
+					utf8_markup(&value, data + value_start, value_length);
+					store_utf8(manifest->application_id, MANIFEST_TEXT_MAX, &value);
 				}
 			}
 			if (position < length && data[position] == '/') {
@@ -1416,6 +1426,35 @@ static HRESULT WINAPI statics_get_current(package_statics_i *iface, package_i **
 	package_addref((package_i *)&package_instance);
 	*out = (package_i *)&package_instance;
 	return S_OK;
+}
+
+/* The engine-internal reader CoreApplication.Id builds on: the package-relative application id the manifest declares,
+ * or nothing when the process carries no manifest identity or the manifest declares no Application id. The string is
+ * the static manifest storage, valid for the process's lifetime. */
+BOOL raven_package_application_id(const WCHAR **out)
+{
+	if (!out)
+		return FALSE;
+	*out = NULL;
+	ensure_manifest();
+	if (!package_instance.manifest.application_id[0])
+		return FALSE;
+	*out = package_instance.manifest.application_id;
+	return TRUE;
+}
+
+/* The test seam the core-application fixture reads the scanner through: its harness runs without a package layout, so
+ * the Application/Id capture is checked on a manifest from memory, parsed by the same scanner the manifest on disk
+ * goes through. */
+__declspec(dllexport) HRESULT raven_package_manifest_application_id(const BYTE *data, UINT32 length, HSTRING *out)
+{
+	struct package_manifest manifest;
+	if (!out || (!data && length))
+		return E_POINTER;
+	*out = NULL;
+	memset(&manifest, 0, sizeof manifest);
+	parse_manifest(data, length, &manifest);
+	return create_string(manifest.application_id, out);
 }
 
 HRESULT raven_package_factory(HSTRING name, IActivationFactory **out)
