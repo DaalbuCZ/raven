@@ -25,7 +25,12 @@
  * the duplicate (owner, name) contract refuses, the same name under another owner registers, RegisterAttached answers
  * E_NOTIMPL, UnsetValue is one identity-stable sentinel, and a Setter carrying a DP applies through put_Style to the same
  * pixels the name-string setters reach — the DP's registered name flowing into the same (name, value) pair store, read
- * back through setter_count/setter_at. Freestanding C like the
+ * back through setter_count/setter_at. The ControlTemplate stage runs after those: a Style setter named "Template" carries
+ * the ControlTemplate object itself through the same (name, value) store, the button routes it to the store put_Template
+ * serves, and the applied template's root tree replaces the control's rendered visuals — a template whose root is a red
+ * grid paints red where the unstyled control painted nothing, the replace changes the pixel, a wrong-kind Template value
+ * fails put_Style with E_INVALIDARG leaving the previous template, and a direct put_Template(NULL) clears. Freestanding C
+ * like the
  * other guests: hand-rolled COM, no CRT beyond the freestanding one the build links. */
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID
@@ -80,6 +85,10 @@ typedef HRESULT (*setter_count_function)(IInspectable *, UINT32 *);
 typedef HRESULT (*setter_at_function)(IInspectable *, UINT32, const WCHAR **, UINT32 *, IInspectable **);
 typedef HRESULT (*dependency_statics_function)(dp_statics_i **);
 typedef HRESULT (*setter_create_function)(IInspectable **);
+typedef HRESULT (*template_factory_function)(IActivationFactory **);
+typedef HRESULT (*template_root_function)(IInspectable *, IInspectable *);
+typedef HRESULT (*put_template_function)(IInspectable *, IInspectable *);
+typedef HRESULT (*get_template_function)(IInspectable *, IInspectable **);
 
 static int same_text(HSTRING value, const WCHAR *expected)
 {
@@ -648,6 +657,15 @@ int raven_entry(void)
 	struct fixture_number *font_default = NULL, *forty = NULL;
 	struct fixture_box *bg_default = NULL, *dp_blue = NULL;
 	HSTRING font_key = NULL, bg_key = NULL;
+	/* the ControlTemplate round */
+	template_factory_function control_template_factory_fn = NULL;
+	template_root_function template_put_root = NULL;
+	put_template_function put_template = NULL;
+	get_template_function get_template = NULL;
+	IActivationFactory *control_template_factory = NULL;
+	IInspectable *template_red = NULL, *template_blue = NULL, *template_style = NULL, *template_style2 = NULL;
+	IInspectable *template_bad = NULL, *template_button = NULL, *template_root_grid = NULL, *template_root_grid2 = NULL;
+	brush_i *red_brush = NULL, *blue_brush = NULL;
 	if (!initialize || !get_factory)
 		return 1;
 	if (initialize(1) != S_OK)
@@ -684,6 +702,12 @@ int raven_entry(void)
 	setter_count = component ? (setter_count_function)GetProcAddress(component, "raven_style_setter_count") : NULL;
 	setter_at = component ? (setter_at_function)GetProcAddress(component, "raven_style_setter_at") : NULL;
 	if (!add_setter || !put_style || !get_style || !default_attach || !setter_count || !setter_at)
+		return 12;
+	control_template_factory_fn = component ? (template_factory_function)GetProcAddress(component, "raven_xaml_control_template_factory") : NULL;
+	template_put_root = component ? (template_root_function)GetProcAddress(component, "raven_xaml_control_template_put_root") : NULL;
+	put_template = component ? (put_template_function)GetProcAddress(component, "raven_xaml_element_put_template") : NULL;
+	get_template = component ? (get_template_function)GetProcAddress(component, "raven_xaml_element_get_template") : NULL;
+	if (!control_template_factory_fn || !template_put_root || !put_template || !get_template)
 		return 12;
 	/* the plain grid: its own blue background through the real brush slot, set before any style exists */
 	if (activate(grid_name, &grid_plain) != S_OK || !grid_plain)
@@ -1365,6 +1389,175 @@ int raven_entry(void)
 		return 203;
 	if (text_iface->lpVtbl->get_FontSize(text_iface, (uint64_t)(uintptr_t)&font_size) != S_OK || font_size != 40.0f)
 		return 204;
+	/* The ControlTemplate stage: a Style setter named "Template" carries the ControlTemplate object itself, the button
+	 * routes it to the same store put_Template serves, and the applied template's root tree replaces the control's
+	 * rendered visuals — a template whose root is a red grid paints red where the unstyled button painted nothing. The
+	 * wrong-kind value (a string where a template is wanted) fails put_Style with E_INVALIDARG and the element keeps
+	 * its previous template; the replace and the clear follow the pixels. */
+	if (control_template_factory_fn(&control_template_factory) != S_OK || !control_template_factory)
+		return 300;
+	if (control_template_factory->lpVtbl->ActivateInstance(control_template_factory, &template_red) != S_OK ||
+		!template_red)
+		return 301;
+	{
+		color_s red;
+		color_s blue;
+		red.A = 255;
+		red.R = 255;
+		red.G = 0;
+		red.B = 0;
+		blue.A = 255;
+		blue.R = 0;
+		blue.G = 0;
+		blue.B = 255;
+		if (compositor->lpVtbl->CreateColorBrushWithColor(compositor, red, &red_brush) != S_OK || !red_brush)
+			return 302;
+		if (compositor->lpVtbl->CreateColorBrushWithColor(compositor, blue, &blue_brush) != S_OK || !blue_brush)
+			return 303;
+	}
+	if (activate(grid_name, &template_root_grid) != S_OK || !template_root_grid)
+		return 304;
+	{
+		panel_i *root_panel = NULL;
+		if (template_root_grid->lpVtbl->QueryInterface(template_root_grid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+			(void **)&root_panel) != S_OK || !root_panel)
+			return 305;
+		if (root_panel->lpVtbl->put_Background(root_panel, (uint64_t)(uintptr_t)red_brush) != S_OK) {
+			root_panel->lpVtbl->Release(root_panel);
+			return 306;
+		}
+		root_panel->lpVtbl->Release(root_panel);
+	}
+	if (template_put_root(template_red, template_root_grid) != S_OK)
+		return 307;
+	/* the template style: the extent setters size the button inside its cell, the Template setter carries the object */
+	if (activate(style_name, &template_style) != S_OK || !template_style)
+		return 308;
+	{
+		struct fixture_number *width400 = make_number(400.0);
+		struct fixture_number *height300 = make_number(300.0);
+		if (!width400 || !height300)
+			return 309;
+		if (add_setter(template_style, L"Width", (UINT32)lstrlenW(L"Width"), (IInspectable *)width400) != S_OK ||
+			add_setter(template_style, L"Height", (UINT32)lstrlenW(L"Height"), (IInspectable *)height300) != S_OK ||
+			add_setter(template_style, L"Template", (UINT32)lstrlenW(L"Template"), template_red) != S_OK) {
+			fixture_number_release(width400);
+			fixture_number_release(height300);
+			return 310;
+		}
+		fixture_number_release(width400);
+		fixture_number_release(height300);
+	}
+	/* the button on the hosted plain grid: without the template it paints nothing (the engine's control chrome does not
+	 * render), the unstyled pixel is the plain grid's blue */
+	if (activate(button_name, &template_button) != S_OK || !template_button)
+		return 311;
+	{
+		void *children = NULL;
+		struct fixture_children *vector = NULL;
+		if (plain_panel->lpVtbl->get_Children(plain_panel, (uint64_t)(uintptr_t)&children) != S_OK || !children)
+			return 312;
+		if (((IInspectable *)children)->lpVtbl->QueryInterface((IInspectable *)children, &IID___FIVector_1_UIElement,
+			(void **)&vector) != S_OK) {
+			((IInspectable *)children)->lpVtbl->Release((IInspectable *)children);
+			return 313;
+		}
+		((IInspectable *)children)->lpVtbl->Release((IInspectable *)children);
+		const HRESULT appended = vector->lpVtbl->Append(vector, template_button);
+		vector->lpVtbl->Release(vector);
+		if (appended != S_OK)
+			return 314;
+		if (xaml_window->lpVtbl->put_Content(xaml_window, (uint64_t)(uintptr_t)grid_plain) != S_OK)
+			return 315;
+	}
+	if (color_at(hwnd, 100, 100, RGB(0, 0, 255)))
+		return 316;
+	if (put_style(template_button, template_style) != S_OK)
+		return 317;
+	/* the template root's red fills the button's rectangle */
+	if (color_at(hwnd, 100, 100, RGB(255, 0, 0)))
+		return 318;
+	if (color_at(hwnd, 200, 150, RGB(255, 0, 0)))
+		return 319;
+	/* outside the 400x300 button the plain grid's blue shows */
+	if (color_at(hwnd, 600, 500, RGB(0, 0, 255)))
+		return 320;
+	/* the template round-trips through the element export */
+	{
+		IInspectable *read = NULL;
+		if (get_template(template_button, &read) != S_OK || !read)
+			return 321;
+		if (!same_unknown(read, template_red)) {
+			read->lpVtbl->Release(read);
+			return 322;
+		}
+		read->lpVtbl->Release(read);
+	}
+	/* the wrong-kind Template setter fails the whole put: the red template stays */
+	if (activate(style_name, &template_bad) != S_OK || !template_bad)
+		return 323;
+	if (add_setter(template_bad, L"Template", (UINT32)lstrlenW(L"Template"), (IInspectable *)red) != S_OK)
+		return 324;
+	if (put_style(template_button, template_bad) != E_INVALIDARG)
+		return 325;
+	if (color_at(hwnd, 100, 100, RGB(255, 0, 0)))
+		return 326;
+	if (get_style(template_button, &roundtrip) != S_OK || !roundtrip)
+		return 327;
+	if (!same_unknown(roundtrip, template_style)) {
+		roundtrip->lpVtbl->Release(roundtrip);
+		return 328;
+	}
+	roundtrip->lpVtbl->Release(roundtrip);
+	roundtrip = NULL;
+	/* the replace: a second template whose root paints blue, carried by a second style */
+	if (control_template_factory->lpVtbl->ActivateInstance(control_template_factory, &template_blue) != S_OK ||
+		!template_blue)
+		return 329;
+	if (activate(grid_name, &template_root_grid2) != S_OK || !template_root_grid2)
+		return 330;
+	{
+		panel_i *root_panel = NULL;
+		if (template_root_grid2->lpVtbl->QueryInterface(template_root_grid2,
+			&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel, (void **)&root_panel) != S_OK || !root_panel)
+			return 331;
+		if (root_panel->lpVtbl->put_Background(root_panel, (uint64_t)(uintptr_t)blue_brush) != S_OK) {
+			root_panel->lpVtbl->Release(root_panel);
+			return 332;
+		}
+		root_panel->lpVtbl->Release(root_panel);
+	}
+	if (template_put_root(template_blue, template_root_grid2) != S_OK)
+		return 333;
+	if (activate(style_name, &template_style2) != S_OK || !template_style2)
+		return 334;
+	if (add_setter(template_style2, L"Template", (UINT32)lstrlenW(L"Template"), template_blue) != S_OK)
+		return 335;
+	if (put_style(template_button, template_style2) != S_OK)
+		return 336;
+	if (color_at(hwnd, 100, 100, RGB(0, 0, 255)))
+		return 337;
+	/* get_Template answers the replacement */
+	{
+		IInspectable *read = NULL;
+		if (get_template(template_button, &read) != S_OK || !read)
+			return 338;
+		if (!same_unknown(read, template_blue)) {
+			read->lpVtbl->Release(read);
+			return 339;
+		}
+		read->lpVtbl->Release(read);
+	}
+	/* the clear: a direct put_Template(NULL) removes the template and the control's visuals fall back to its content
+	 * slot — empty here, so the plain grid's blue shows again */
+	if (put_template(template_button, NULL) != S_OK)
+		return 340;
+	if (get_template(template_button, &roundtrip) != S_OK || roundtrip)
+		return 341;
+	if (color_at(hwnd, 100, 100, RGB(0, 0, 255)))
+		return 342;
+	if (control_template_factory)
+		control_template_factory->lpVtbl->Release(control_template_factory);
 	/* release everything: the window's own reference goes with Close, and clearing the content detaches the hosted tree
 	 * from the render and input roots. The component cannot answer DllCanUnloadNow with S_OK after a render — the
 	 * composition target keeps the presented visual tree until the process ends, which is why the rendering fixture never
@@ -1473,6 +1666,27 @@ int raven_entry(void)
 		dp_unset2->lpVtbl->Release(dp_unset2);
 	if (dp_statics)
 		dp_statics->lpVtbl->Release(dp_statics);
+	/* the ControlTemplate round: the templates own their roots, so what releases here is the fixture's own references */
+	if (red_brush)
+		red_brush->lpVtbl->Release(red_brush);
+	if (blue_brush)
+		blue_brush->lpVtbl->Release(blue_brush);
+	if (template_button)
+		template_button->lpVtbl->Release(template_button);
+	if (template_bad)
+		template_bad->lpVtbl->Release(template_bad);
+	if (template_style2)
+		template_style2->lpVtbl->Release(template_style2);
+	if (template_style)
+		template_style->lpVtbl->Release(template_style);
+	if (template_root_grid2)
+		template_root_grid2->lpVtbl->Release(template_root_grid2);
+	if (template_root_grid)
+		template_root_grid->lpVtbl->Release(template_root_grid);
+	if (template_blue)
+		template_blue->lpVtbl->Release(template_blue);
+	if (template_red)
+		template_red->lpVtbl->Release(template_red);
 	fixture_metadata_release(font_metadata);
 	fixture_metadata_release(bg_metadata);
 	fixture_number_release(font_default);

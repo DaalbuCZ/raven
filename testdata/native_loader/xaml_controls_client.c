@@ -34,6 +34,76 @@ typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType markup_type;
 typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlTypeVtbl markup_typeVtbl;
 typedef __x_ABI_CWindows_CUI_CXaml_CIApplicationFactory application_factory1;
 
+/* The real IControlTemplate and IControl IIDs (Windows.UI.Xaml.winmd, the WDK IDL): the engine's ControlTemplate answers
+ * the first, the engine's button answers the second. The vtables here carry the exact member order — TargetType get/put on
+ * the template, the Template pair among the 41 control members — with the slots the fixture does not call left declared
+ * but unused. */
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, 0xefd2418e, 0x41e0, 0x48bb, 0x8b, 0x82, 0x91,
+	0xed, 0xa1, 0xba, 0x3f, 0xe2);
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl, 0xa8912263, 0x2951, 0x4f58, 0xa9, 0xc5, 0x5a, 0x13,
+	0x4e, 0xaa, 0x7f, 0x07);
+
+struct fixture_template_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(void *This);
+	ULONG (STDMETHODCALLTYPE *Release)(void *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(void *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(void *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(void *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *get_TargetType)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_TargetType)(void *This, uint64_t value);
+};
+
+struct fixture_control_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(void *This);
+	ULONG (STDMETHODCALLTYPE *Release)(void *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(void *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(void *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(void *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *get_FontSize)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontSize)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FontFamily)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontFamily)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FontWeight)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontWeight)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FontStyle)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontStyle)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FontStretch)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontStretch)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_CharacterSpacing)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_CharacterSpacing)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Foreground)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_Foreground)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_IsTabStop)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_IsTabStop)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_IsEnabled)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_IsEnabled)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_TabIndex)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_TabIndex)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_TabNavigation)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_TabNavigation)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Template)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_Template)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Padding)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_Padding)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_HorizontalContentAlignment)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_HorizontalContentAlignment)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_VerticalContentAlignment)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_VerticalContentAlignment)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Background)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_Background)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_BorderThickness)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_BorderThickness)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_BorderBrush)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_BorderBrush)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FocusState)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *add_IsEnabledChanged)(void *This, uint64_t handler, uint64_t token);
+	HRESULT (STDMETHODCALLTYPE *remove_IsEnabledChanged)(void *This, uint64_t token);
+	HRESULT (STDMETHODCALLTYPE *ApplyTemplate)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *Focus)(void *This, uint64_t state, uint64_t value);
+};
+
 /* The IVector<UIElement> the panel's Children returns: the parameterized ABI has no mingw header, so the slots the fixture
  * reads are declared locally in metadata order after the six IInspectable methods. */
 struct fixture_vector_vtbl {
@@ -897,6 +967,148 @@ int raven_entry(void)
 	button_child->lpVtbl->Release(button_child);
 	WindowsDeleteString(textblock_key);
 	WindowsDeleteString(button_key);
+
+	/* ControlTemplate through the engine-internal factory (the runtime catalog does not list the class yet): the
+	 * TargetType round-trips the interop TypeName over the real IControlTemplate, put_Template assigns through the real
+	 * IControl, get_Template round-trips, and the content precedence is the documented one — the template root replaces
+	 * the control's rendered visuals while get_Content keeps answering the stored Content, because the engine's control
+	 * has no chrome ContentPresenter to host it (the pixel proof of the replace lives in the style fixture, which hosts
+	 * the templated control on a rendered grid). A value that is no engine ControlTemplate answers E_INVALIDARG and the
+	 * previous template stays; put_Template(NULL) clears. */
+	{
+		typedef HRESULT (*template_factory_function)(IActivationFactory **);
+		typedef HRESULT (*template_root_function)(IInspectable *, IInspectable *);
+		typedef HRESULT (*put_template_function)(IInspectable *, IInspectable *);
+		typedef HRESULT (*get_template_function)(IInspectable *, IInspectable **);
+		static const WCHAR template_class[] = L"Windows.UI.Xaml.Controls.ControlTemplate";
+		static const WCHAR button_name[] = L"Windows.UI.Xaml.Controls.Button";
+		template_factory_function get_template_factory = NULL;
+		template_root_function put_template_root = NULL;
+		put_template_function element_put_template = NULL;
+		get_template_function element_get_template = NULL;
+		HMODULE engine = LoadLibraryW(L"raven-xaml.dll");
+		IActivationFactory *control_template_factory = NULL;
+		IInspectable *template_object = NULL, *template_root_child = NULL, *button_object = NULL;
+		IActivationFactory *button_factory = NULL, *child_factory = NULL;
+		HSTRING button_key = NULL;
+		content_control1 *button_content = NULL;
+		void *template_iface = NULL, *control_iface = NULL;
+		struct fixture_template_vtbl *template_vtbl = NULL;
+		struct fixture_control_vtbl *control = NULL;
+		IInspectable *read = NULL;
+		IUnknown *one = NULL, *other = NULL;
+		HSTRING read_name = NULL;
+		xaml_type_name put_type, got_type;
+		if (!engine) return 700;
+		get_template_factory = (template_factory_function)GetProcAddress(engine, "raven_xaml_control_template_factory");
+		put_template_root = (template_root_function)GetProcAddress(engine, "raven_xaml_control_template_put_root");
+		element_put_template = (put_template_function)GetProcAddress(engine, "raven_xaml_element_put_template");
+		element_get_template = (get_template_function)GetProcAddress(engine, "raven_xaml_element_get_template");
+		if (!get_template_factory || !put_template_root || !element_put_template || !element_get_template) return 701;
+		if (get_template_factory(&control_template_factory) != S_OK || !control_template_factory) return 702;
+		if (control_template_factory->lpVtbl->ActivateInstance(control_template_factory, &template_object) != S_OK ||
+			!template_object) return 703;
+		if (template_object->lpVtbl->QueryInterface(template_object,
+			&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, &template_iface) != S_OK || !template_iface)
+			return 704;
+		template_vtbl = *(struct fixture_template_vtbl **)template_iface;
+		if (WindowsCreateString(button_name, ARRAYSIZE(button_name) - 1, &put_type.Name) != S_OK) return 705;
+		put_type.Kind = TypeKind_Metadata;
+		if (template_vtbl->put_TargetType(template_iface, (uint64_t)(uintptr_t)&put_type) != S_OK) return 706;
+		got_type.Name = NULL;
+		got_type.Kind = TypeKind_Primitive;
+		if (template_vtbl->get_TargetType(template_iface, (uint64_t)(uintptr_t)&got_type) != S_OK || !got_type.Name)
+			return 707;
+		if (!same(got_type.Name, button_name, ARRAYSIZE(button_name) - 1) || got_type.Kind != TypeKind_Metadata) {
+			WindowsDeleteString(got_type.Name);
+			return 708;
+		}
+		WindowsDeleteString(got_type.Name);
+		WindowsDeleteString(put_type.Name);
+		/* the template content: the engine-internal attach stores the root tree the real interface has no setter for */
+		if (WindowsCreateString(L"Windows.UI.Xaml.Controls.TextBlock", 34, &textblock_key) != S_OK) return 709;
+		if (RoGetActivationFactory(textblock_key, &IID_IActivationFactory, (void **)&child_factory) != S_OK ||
+			!child_factory) return 710;
+		if (child_factory->lpVtbl->ActivateInstance(child_factory, &template_root_child) != S_OK ||
+			!template_root_child) return 711;
+		if (put_template_root(template_object, template_root_child) != S_OK) return 712;
+		/* the button: content child first, then the template assignment through the real IControl */
+		if (WindowsCreateString(button_name, ARRAYSIZE(button_name) - 1, &button_key) != S_OK) return 713;
+		if (RoGetActivationFactory(button_key, &IID_IActivationFactory, (void **)&button_factory) != S_OK ||
+			!button_factory) return 713;
+		WindowsDeleteString(button_key);
+		if (button_factory->lpVtbl->ActivateInstance(button_factory, &button_object) != S_OK || !button_object)
+			return 714;
+		if (button_object->lpVtbl->QueryInterface(button_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl,
+			(void **)&button_content) != S_OK || !button_content) return 715;
+		if (button_content->lpVtbl->put_Content(button_content, (uint64_t)(uintptr_t)template_root_child) != S_OK)
+			return 716;
+		if (button_object->lpVtbl->QueryInterface(button_object, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl,
+			&control_iface) != S_OK || !control_iface) return 717;
+		control = *(struct fixture_control_vtbl **)control_iface;
+		if (control->put_Template(control_iface, (uint64_t)(uintptr_t)template_object) != S_OK) return 718;
+		if (control->get_Template(control_iface, (uint64_t)(uintptr_t)&read) != S_OK || !read) return 719;
+		if (read->lpVtbl->QueryInterface(read, &IID_IUnknown, (void **)&one) != S_OK || !one) return 720;
+		if (template_object->lpVtbl->QueryInterface(template_object, &IID_IUnknown, (void **)&other) != S_OK || !other)
+			return 721;
+		if (one != other) return 722;
+		other->lpVtbl->Release(other);
+		other = NULL;
+		one->lpVtbl->Release(one);
+		one = NULL;
+		read->lpVtbl->Release(read);
+		read = NULL;
+		/* the content precedence: get_Content still answers the stored Content while the template root is the visual child */
+		if (button_content->lpVtbl->get_Content(button_content, (uint64_t)(uintptr_t)&read) != S_OK || !read) return 723;
+		if (read->lpVtbl->QueryInterface(read, &IID_IUnknown, (void **)&one) != S_OK || !one) return 724;
+		if (template_root_child->lpVtbl->QueryInterface(template_root_child, &IID_IUnknown, (void **)&other) != S_OK ||
+			!other) return 725;
+		if (one != other) return 726;
+		other->lpVtbl->Release(other);
+		other = NULL;
+		one->lpVtbl->Release(one);
+		one = NULL;
+		read->lpVtbl->Release(read);
+		read = NULL;
+		/* the wrong-kind value: a TextBlock where a ControlTemplate is wanted answers E_INVALIDARG and the template stays */
+		if (element_put_template(button_object, template_root_child) != E_INVALIDARG) return 727;
+		if (element_get_template(button_object, &read) != S_OK || !read) return 728;
+		if (read->lpVtbl->QueryInterface(read, &IID_IUnknown, (void **)&one) != S_OK || !one) return 729;
+		if (template_object->lpVtbl->QueryInterface(template_object, &IID_IUnknown, (void **)&other) != S_OK || !other)
+			return 730;
+		if (one != other) return 731;
+		other->lpVtbl->Release(other);
+		other = NULL;
+		one->lpVtbl->Release(one);
+		one = NULL;
+		read->lpVtbl->Release(read);
+		read = NULL;
+		/* the clear and the re-put: the control answers NULL after the NULL put and the template again after the re-put */
+		if (control->put_Template(control_iface, 0) != S_OK) return 732;
+		if (element_get_template(button_object, &read) != S_OK || read) return 733;
+		if (control->put_Template(control_iface, (uint64_t)(uintptr_t)template_object) != S_OK) return 734;
+		if (element_get_template(button_object, &read) != S_OK || !read) return 735;
+		read->lpVtbl->Release(read);
+		read = NULL;
+		/* the runtime class name answers the ControlTemplate class */
+		if (template_object->lpVtbl->GetRuntimeClassName(template_object, &read_name) != S_OK || !read_name) return 736;
+		if (!same(read_name, template_class, ARRAYSIZE(template_class) - 1)) {
+			WindowsDeleteString(read_name);
+			return 737;
+		}
+		WindowsDeleteString(read_name);
+		((IUnknown *)control_iface)->lpVtbl->Release((IUnknown *)control_iface);
+		((IUnknown *)template_iface)->lpVtbl->Release((IUnknown *)template_iface);
+		button_content->lpVtbl->Release(button_content);
+		button_object->lpVtbl->Release(button_object);
+		template_object->lpVtbl->Release(template_object);
+		template_root_child->lpVtbl->Release(template_root_child);
+		button_factory->lpVtbl->Release(button_factory);
+		child_factory->lpVtbl->Release(child_factory);
+		control_template_factory->lpVtbl->Release(control_template_factory);
+		WindowsDeleteString(textblock_key);
+		textblock_key = NULL;
+	}
 
 	/* The application metadata provider: the fixture composes its provider onto the XAML Application object, the loader
 	 * reaches it through Application.Current, and an application page type resolves to the object the provider creates. */

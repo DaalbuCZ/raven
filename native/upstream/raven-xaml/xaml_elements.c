@@ -60,6 +60,73 @@ DEFINE_GUID(IID___FIVector_1_UIElement, 0x393d6210, 0xfa21, 0x573a, 0xa2, 0x38, 
 DEFINE_GUID(IID___FIVector_1_RowDefinition, 0x2a17524a, 0x48ef, 0x579b, 0x9e, 0x63, 0xe1, 0xce, 0x52, 0xad, 0xca, 0xe2);
 DEFINE_GUID(IID___FIVector_1_ColumnDefinition, 0xcaf7c66c, 0x1ccb, 0x5ada, 0xaf, 0xce, 0xfc, 0x62, 0xd2, 0xdb, 0x2c, 0x66);
 
+/* The real IControl ABI (Windows.UI.Xaml.winmd, uuid A8912263-2951-4F58-A9C5-5A134EAA7F07): the members in the interface's
+ * declaration order after the six IInspectable methods, Template among them. The hand headers cannot carry this interface
+ * (they list only the classes earlier stages needed), so it is declared here once and the IID is defined in every TU that
+ * includes the declaration (DEFINE_GUID is selectany under INITGUID). The engine stores only Template; the other members
+ * answer E_NOTIMPL the way the control chrome itself waits for its stage. */
+typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControl control1;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControlVtbl control1_vtbl;
+struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControlVtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(control1 *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(control1 *This);
+	ULONG (STDMETHODCALLTYPE *Release)(control1 *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(control1 *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(control1 *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(control1 *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *get_FontSize)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontSize)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FontFamily)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontFamily)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FontWeight)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontWeight)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FontStyle)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontStyle)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FontStretch)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_FontStretch)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_CharacterSpacing)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_CharacterSpacing)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Foreground)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_Foreground)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_IsTabStop)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_IsTabStop)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_IsEnabled)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_IsEnabled)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_TabIndex)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_TabIndex)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_TabNavigation)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_TabNavigation)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Template)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_Template)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Padding)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_Padding)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_HorizontalContentAlignment)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_HorizontalContentAlignment)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_VerticalContentAlignment)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_VerticalContentAlignment)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Background)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_Background)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_BorderThickness)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_BorderThickness)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_BorderBrush)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_BorderBrush)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_FocusState)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *add_IsEnabledChanged)(control1 *This, uint64_t handler, uint64_t token);
+	HRESULT (STDMETHODCALLTYPE *remove_IsEnabledChanged)(control1 *This, uint64_t token);
+	HRESULT (STDMETHODCALLTYPE *ApplyTemplate)(control1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *Focus)(control1 *This, uint64_t state, uint64_t value);
+	END_INTERFACE
+};
+interface __x_ABI_CWindows_CUI_CXaml_CControls_CIControl { CONST_VTBL control1_vtbl *lpVtbl; };
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl, 0xa8912263, 0x2951, 0x4f58, 0xa9, 0xc5, 0x5a, 0x13,
+	0x4e, 0xaa, 0x7f, 0x07);
+
+/* The ControlTemplate surface lives in xaml_controls.c; the declarations ride here because the shared internal header is
+ * the engine hotspot's interface and this increment keeps it untouched. raven_xaml_control_template_root answers S_OK for
+ * an engine ControlTemplate (root possibly NULL, the caller's AddRef) and S_FALSE for any other object. */
+HRESULT raven_xaml_control_template_root(IInspectable *template_object, IInspectable **out);
+
 static const WCHAR grid_class[] = L"Windows.UI.Xaml.Controls.Grid";
 static const WCHAR textblock_class[] = L"Windows.UI.Xaml.Controls.TextBlock";
 static const WCHAR button_class[] = L"Windows.UI.Xaml.Controls.Button";
@@ -1196,15 +1263,22 @@ struct button;
 struct button1_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIButtonVtbl *lpVtbl; struct button *owner; };
 struct buttonbase_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBaseVtbl *lpVtbl; struct button *owner; };
 struct content_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControlVtbl *lpVtbl; struct button *owner; };
+struct control_part { const control1_vtbl *lpVtbl; struct button *owner; };
 
 struct button {
 	struct button1_part first;
 	struct buttonbase_part base;
 	struct content_part content;
+	struct control_part control;
 	struct element_ui ui;
 	LONG refs;
 	HSTRING name;
 	IInspectable *content_value;
+	/* The ControlTemplate the control carries (an owned reference): put_Template and the "Template" setter route here,
+	 * and the render hook answers the template's root as the control's single visual child while it is set. The stored
+	 * Content is NOT rendered while a template is applied — the engine has no chrome ContentPresenter to host it (the
+	 * real control's template carries one), so a template that wants the content shown must place it itself. */
+	IInspectable *template_value;
 	IInspectable *command, *command_parameter;
 	struct raven_event_list click;
 	UINT32 click_mode; /* enum raven_xaml_click_mode; the zero initialization is ClickMode.Release, the platform default */
@@ -1243,6 +1317,7 @@ static ULONG button_release(struct button *self);
 BUTTON_PART(button1_part, button1, buttonp)
 BUTTON_PART(buttonbase_part, __x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase, basep)
 BUTTON_PART(content_part, content_control, contentp)
+BUTTON_PART(control_part, control1, controlp)
 
 static HRESULT button_query_any(struct button *self, REFIID iid, void **out)
 {
@@ -1258,6 +1333,8 @@ static HRESULT button_query_any(struct button *self, REFIID iid, void **out)
 		*out = &self->ui;
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl))
 		*out = &self->content;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl))
+		*out = &self->control;
 	else
 		return E_NOINTERFACE;
 	button_addref(self);
@@ -1277,6 +1354,8 @@ static ULONG button_release(struct button *self)
 			WindowsDeleteString(self->name);
 		if (self->content_value)
 			IInspectable_Release(self->content_value);
+		if (self->template_value)
+			IInspectable_Release(self->template_value);
 		if (self->command)
 			IInspectable_Release(self->command);
 		if (self->command_parameter)
@@ -1555,6 +1634,150 @@ STUB1(content_control, content_put_selector)
 STUB1(content_control, content_transitions)
 STUB1(content_control, content_put_transitions)
 
+/* The Template property of IControl: the put owns the reference and validates the kind — a value that is no engine
+ * ControlTemplate answers E_INVALIDARG and the previous template stays, the wrong-kind convention the style application
+ * rides. Re-put replaces, a NULL put clears; the render follows through the visual-child hook without a re-apply of
+ * anything else. */
+static void button_store_template(struct button *self, IInspectable *template_object)
+{
+	if (template_object)
+		template_object->lpVtbl->AddRef(template_object);
+	if (self->template_value)
+		self->template_value->lpVtbl->Release(self->template_value);
+	self->template_value = template_object;
+	raven_render_changed();
+}
+
+static HRESULT button_put_template(struct button *self, IInspectable *template_object)
+{
+	IInspectable *root = NULL;
+	HRESULT kind;
+	if (!template_object) {
+		button_store_template(self, NULL);
+		return S_OK;
+	}
+	kind = raven_xaml_control_template_root(template_object, &root);
+	if (kind != S_OK)
+		return E_INVALIDARG;
+	if (root)
+		root->lpVtbl->Release(root);
+	button_store_template(self, template_object);
+	return S_OK;
+}
+
+static HRESULT WINAPI control_get_template(control1 *This, uint64_t out)
+{
+	struct button *self = ((struct control_part *)This)->owner;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = self->template_value;
+	if (self->template_value)
+		self->template_value->lpVtbl->AddRef(self->template_value);
+	return S_OK;
+}
+
+static HRESULT WINAPI control_put_template(control1 *This, uint64_t value)
+{
+	return button_put_template(((struct control_part *)This)->owner, (IInspectable *)(uintptr_t)value);
+}
+
+/* The IControl members the engine does not store answer E_NOTIMPL: the slots carry the exact interface order, the values
+ * wait for the stages that will read them. */
+#define CONTROL_STUB(name) static HRESULT WINAPI name(control1 *This, uint64_t a1) \
+	{ (void)This; (void)a1; return E_NOTIMPL; }
+#define CONTROL_STUB2(name) static HRESULT WINAPI name(control1 *This, uint64_t a1, uint64_t a2) \
+	{ (void)This; (void)a1; (void)a2; return E_NOTIMPL; }
+
+CONTROL_STUB(control_font_size_get)
+CONTROL_STUB(control_font_size_put)
+CONTROL_STUB(control_font_family_get)
+CONTROL_STUB(control_font_family_put)
+CONTROL_STUB(control_font_weight_get)
+CONTROL_STUB(control_font_weight_put)
+CONTROL_STUB(control_font_style_get)
+CONTROL_STUB(control_font_style_put)
+CONTROL_STUB(control_font_stretch_get)
+CONTROL_STUB(control_font_stretch_put)
+CONTROL_STUB(control_character_spacing_get)
+CONTROL_STUB(control_character_spacing_put)
+CONTROL_STUB(control_foreground_get)
+CONTROL_STUB(control_foreground_put)
+CONTROL_STUB(control_is_tab_stop_get)
+CONTROL_STUB(control_is_tab_stop_put)
+CONTROL_STUB(control_is_enabled_get)
+CONTROL_STUB(control_is_enabled_put)
+CONTROL_STUB(control_tab_index_get)
+CONTROL_STUB(control_tab_index_put)
+CONTROL_STUB(control_tab_navigation_get)
+CONTROL_STUB(control_tab_navigation_put)
+CONTROL_STUB(control_padding_get)
+CONTROL_STUB(control_padding_put)
+CONTROL_STUB(control_horizontal_alignment_get)
+CONTROL_STUB(control_horizontal_alignment_put)
+CONTROL_STUB(control_vertical_alignment_get)
+CONTROL_STUB(control_vertical_alignment_put)
+CONTROL_STUB(control_background_get)
+CONTROL_STUB(control_background_put)
+CONTROL_STUB(control_border_thickness_get)
+CONTROL_STUB(control_border_thickness_put)
+CONTROL_STUB(control_border_brush_get)
+CONTROL_STUB(control_border_brush_put)
+CONTROL_STUB(control_focus_state_get)
+CONTROL_STUB2(control_is_enabled_changed_add)
+CONTROL_STUB(control_is_enabled_changed_remove)
+CONTROL_STUB(control_apply_template)
+CONTROL_STUB2(control_focus)
+
+static const control1_vtbl control_table = {
+	.QueryInterface = controlp_query,
+	.AddRef = controlp_addref,
+	.Release = controlp_release,
+	.GetIids = controlp_iids,
+	.GetRuntimeClassName = controlp_name,
+	.GetTrustLevel = controlp_trust,
+	.get_FontSize = control_font_size_get,
+	.put_FontSize = control_font_size_put,
+	.get_FontFamily = control_font_family_get,
+	.put_FontFamily = control_font_family_put,
+	.get_FontWeight = control_font_weight_get,
+	.put_FontWeight = control_font_weight_put,
+	.get_FontStyle = control_font_style_get,
+	.put_FontStyle = control_font_style_put,
+	.get_FontStretch = control_font_stretch_get,
+	.put_FontStretch = control_font_stretch_put,
+	.get_CharacterSpacing = control_character_spacing_get,
+	.put_CharacterSpacing = control_character_spacing_put,
+	.get_Foreground = control_foreground_get,
+	.put_Foreground = control_foreground_put,
+	.get_IsTabStop = control_is_tab_stop_get,
+	.put_IsTabStop = control_is_tab_stop_put,
+	.get_IsEnabled = control_is_enabled_get,
+	.put_IsEnabled = control_is_enabled_put,
+	.get_TabIndex = control_tab_index_get,
+	.put_TabIndex = control_tab_index_put,
+	.get_TabNavigation = control_tab_navigation_get,
+	.put_TabNavigation = control_tab_navigation_put,
+	.get_Template = control_get_template,
+	.put_Template = control_put_template,
+	.get_Padding = control_padding_get,
+	.put_Padding = control_padding_put,
+	.get_HorizontalContentAlignment = control_horizontal_alignment_get,
+	.put_HorizontalContentAlignment = control_horizontal_alignment_put,
+	.get_VerticalContentAlignment = control_vertical_alignment_get,
+	.put_VerticalContentAlignment = control_vertical_alignment_put,
+	.get_Background = control_background_get,
+	.put_Background = control_background_put,
+	.get_BorderThickness = control_border_thickness_get,
+	.put_BorderThickness = control_border_thickness_put,
+	.get_BorderBrush = control_border_brush_get,
+	.put_BorderBrush = control_border_brush_put,
+	.get_FocusState = control_focus_state_get,
+	.add_IsEnabledChanged = control_is_enabled_changed_add,
+	.remove_IsEnabledChanged = control_is_enabled_changed_remove,
+	.ApplyTemplate = control_apply_template,
+	.Focus = control_focus,
+};
+
 static const __x_ABI_CWindows_CUI_CXaml_CControls_CIButtonVtbl button1_table = {
 	.QueryInterface = buttonp_query,
 	.AddRef = buttonp_addref,
@@ -1613,6 +1836,8 @@ static struct button *create_button(void)
 	button->base.owner = button;
 	button->content.lpVtbl = &button_content_table;
 	button->content.owner = button;
+	button->control.lpVtbl = &control_table;
+	button->control.owner = button;
 	element_ui_init(&button->ui, button, (element_query_function)button_query_any, (element_reference_function)button_addref,
 		(element_reference_function)button_release, button_class);
 	button->ui.behavior = button_pointer_behavior;
@@ -2369,6 +2594,19 @@ static HRESULT button_apply_setter(void *state, const WCHAR *name, UINT32 length
 		}
 		return S_OK;
 	}
+	if (same_text(name, length, L"Template")) {
+		/* The value must be an engine ControlTemplate: the wrong kind — a string box, a number, a Style — fails the
+		 * application with E_INVALIDARG the way the colour setters do, and the check-only pass leaves the previous
+		 * template untouched. A NULL value clears. */
+		IInspectable *root = NULL;
+		if (value && raven_xaml_control_template_root(value, &root) != S_OK)
+			return E_INVALIDARG;
+		if (root)
+			root->lpVtbl->Release(root);
+		if (!check_only)
+			button_store_template(self, value);
+		return S_OK;
+	}
 	return S_OK;
 }
 
@@ -2494,6 +2732,78 @@ __declspec(dllexport) HRESULT raven_xaml_element_get_style(IInspectable *object,
 	}
 	if (*out)
 		(*out)->lpVtbl->AddRef(*out);
+	return S_OK;
+}
+
+/* The fixture-facing exports of the Template property (the button the only element class with control storage so far):
+ * the same put the IControl part serves, so a fixture can drive clear/replace through GetProcAddress without declaring
+ * the 41-slot IControl vtable. Other classes answer S_FALSE. */
+__declspec(dllexport) HRESULT raven_xaml_element_put_template(IInspectable *object, IInspectable *template_object)
+{
+	button1 *button = NULL;
+	if (!object)
+		return E_POINTER;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+		(void **)&button)) || !button)
+		return S_FALSE;
+	if (button->lpVtbl != &button1_table) {
+		button->lpVtbl->Release(button);
+		return S_FALSE;
+	}
+	const HRESULT result = button_put_template(((struct button1_part *)button)->owner, template_object);
+	button->lpVtbl->Release(button);
+	return result;
+}
+
+__declspec(dllexport) HRESULT raven_xaml_element_get_template(IInspectable *object, IInspectable **out)
+{
+	button1 *button = NULL;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!object)
+		return S_FALSE;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+		(void **)&button)) || !button)
+		return S_FALSE;
+	if (button->lpVtbl != &button1_table) {
+		button->lpVtbl->Release(button);
+		return S_FALSE;
+	}
+	struct button *self = ((struct button1_part *)button)->owner;
+	if (self->template_value) {
+		*out = self->template_value;
+		(*out)->lpVtbl->AddRef(*out);
+	}
+	button->lpVtbl->Release(button);
+	return S_OK;
+}
+
+/* The templated control's single visual child, what the render walk's raven_xaml_frame_render_child hook consults first:
+ * the root of the applied ControlTemplate, so a templated control renders its template tree in place of its content slot
+ * and the walk needs no template-aware step of its own. S_FALSE for an object that is no engine button; S_OK with a NULL
+ * out for a button without a template. */
+HRESULT raven_xaml_element_template_child(IInspectable *object, IInspectable **out)
+{
+	button1 *button = NULL;
+	IInspectable *root = NULL;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!object)
+		return S_FALSE;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+		(void **)&button)) || !button)
+		return S_FALSE;
+	if (button->lpVtbl != &button1_table) {
+		button->lpVtbl->Release(button);
+		return S_FALSE;
+	}
+	struct button *self = ((struct button1_part *)button)->owner;
+	if (self->template_value &&
+		raven_xaml_control_template_root(self->template_value, &root) == S_OK && root)
+		*out = root;
+	button->lpVtbl->Release(button);
 	return S_OK;
 }
 

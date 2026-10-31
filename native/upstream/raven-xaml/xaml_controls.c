@@ -7,8 +7,10 @@
  * A Frame navigates to a page by type name: the name is resolved through the metadata provider and the page is created through
  * the runtime catalog, then attached to the frame. The frame keeps the current page and its source type, reports that it cannot
  * go back or forward, and accepts its navigation events without raising them. Page carries the frame it was navigated into, its
- * navigation cache mode and the optional app bars. The navigation stack, its serialization and the dependency-property statics
- * are not implemented yet. */
+ * navigation cache mode and the optional app bars. ControlTemplate is the runtime class a Control's Template property and a
+ * Style's "Template" setter carry: its content tree rides the same visual-child hook the render walk reads first, so a
+ * templated control renders the template root the way it renders a frame's page. The navigation stack, its serialization and
+ * the dependency-property statics are not implemented yet. */
 #define INITGUID
 #define CINTERFACE
 #define COBJMACROS
@@ -38,8 +40,37 @@ typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIPageStatics page_statics;
 typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl page_content_control;
 typedef __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName xaml_type_name;
 
+/* The real IControlTemplate ABI (Windows.UI.Xaml.winmd, uuid EFD2418E-41E0-48BB-8B82-91EDA1BA3FE2): TargetType get/put
+ * after the six IInspectable methods, nothing else — the real interface carries no content member, the template's tree
+ * arriving from XAML parsing, so the engine-internal root attach is the export below. The hand headers cannot carry this
+ * interface (they list only the classes earlier stages needed), so it is declared here once and the IID is defined in
+ * every TU that includes the declaration (DEFINE_GUID is selectany under INITGUID). */
+typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate template1;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplateVtbl template1_vtbl;
+struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplateVtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(template1 *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(template1 *This);
+	ULONG (STDMETHODCALLTYPE *Release)(template1 *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(template1 *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(template1 *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(template1 *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *get_TargetType)(template1 *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *put_TargetType)(template1 *This, uint64_t value);
+	END_INTERFACE
+};
+interface __x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate { CONST_VTBL template1_vtbl *lpVtbl; };
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, 0xefd2418e, 0x41e0, 0x48bb, 0x8b, 0x82, 0x91,
+	0xed, 0xa1, 0xba, 0x3f, 0xe2);
+
+/* The visual-child hook of the element classes (xaml_elements.c): the templated control answers it with the root of its
+ * applied ControlTemplate, so the render walk picks the tree up unchanged. Declared here because the shared internal
+ * header stays untouched this increment. */
+HRESULT raven_xaml_element_template_child(IInspectable *object, IInspectable **out);
+
 static const WCHAR frame_class[] = L"Windows.UI.Xaml.Controls.Frame";
 static const WCHAR page_class[] = L"Windows.UI.Xaml.Controls.Page";
+static const WCHAR template_class[] = L"Windows.UI.Xaml.Controls.ControlTemplate";
 
 static HRESULT inspectable_iids(ULONG *count, IID **iids)
 {
@@ -730,9 +761,179 @@ void raven_xaml_page_set_frame(IInspectable *object, IInspectable *frame)
 	page->lpVtbl->Release(page);
 }
 
+static void store_name(HSTRING *slot, const WCHAR *text, UINT32 length);
+
+/* ControlTemplate: the runtime class a Control's Template property and a Style's "Template" setter carry. The real
+ * interface is TargetType only; the content tree arrives through the engine-internal attach (the XBF-declared template
+ * loader path is future work), and the class is activatable, not composable, so the activation factory alone answers it.
+ * The template owns its root element; the render walk reaches the root through the raven_xaml_frame_render_child hook,
+ * which means a control with an applied template renders the template's tree in place of its own single visual child. */
+
+struct control_template {
+	const template1_vtbl *lpVtbl;
+	LONG refs;
+	HSTRING target_type; /* the TargetType name; the interop Kind slot reads back Metadata the way the frame's page type does */
+	IInspectable *root; /* the content tree the engine-internal attach owns */
+};
+
+static HRESULT WINAPI template_query(template1 *iface, REFIID iid, void **out)
+{
+	struct control_template *self = (struct control_template *)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	*out = iface;
+	return S_OK;
+}
+
+static ULONG WINAPI template_addref(template1 *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct control_template *)iface)->refs);
+}
+
+static ULONG WINAPI template_release(template1 *iface)
+{
+	struct control_template *self = (struct control_template *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->target_type)
+			WindowsDeleteString(self->target_type);
+		if (self->root)
+			IInspectable_Release(self->root);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI template_iids(template1 *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI template_name(template1 *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(template_class, (UINT32)lstrlenW(template_class), name);
+}
+
+static HRESULT WINAPI template_trust(template1 *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI template_target_type(template1 *iface, uint64_t out)
+{
+	write_type_name(out, ((struct control_template *)iface)->target_type);
+	return S_OK;
+}
+
+static HRESULT WINAPI template_put_target_type(template1 *iface, uint64_t value)
+{
+	struct control_template *self = (struct control_template *)iface;
+	const xaml_type_name *type = (const xaml_type_name *)(uintptr_t)value;
+	UINT32 length = 0;
+	const WCHAR *text = NULL;
+	if (type && type->Name)
+		text = WindowsGetStringRawBuffer(type->Name, &length);
+	store_name(&self->target_type, text, text ? length : 0);
+	return S_OK;
+}
+
+static const template1_vtbl template_table = {
+	.QueryInterface = template_query,
+	.AddRef = template_addref,
+	.Release = template_release,
+	.GetIids = template_iids,
+	.GetRuntimeClassName = template_name,
+	.GetTrustLevel = template_trust,
+	.get_TargetType = template_target_type,
+	.put_TargetType = template_put_target_type,
+};
+
+static struct control_template *create_control_template(void)
+{
+	struct control_template *template = ALLOC(sizeof *template);
+	if (!template)
+		return NULL;
+	template->lpVtbl = &template_table;
+	template->refs = 1;
+	InterlockedIncrement(&raven_xaml_objects);
+	return template;
+}
+
+/* The engine-internal template surface, the dllexport+GetProcAddress pattern the fixtures reach the other engine-internal
+ * entries through. raven_xaml_control_template_root answers S_OK for an engine ControlTemplate (root possibly NULL, the
+ * caller's AddRef) and S_FALSE for any other object — the kind check the Template puts and the "Template" setter route
+ * use to reject a wrong-kind value with E_INVALIDARG. */
+HRESULT __declspec(dllexport) raven_xaml_control_template_root(IInspectable *template_object, IInspectable **out)
+{
+	template1 *iface = NULL;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!template_object)
+		return E_POINTER;
+	if (FAILED(template_object->lpVtbl->QueryInterface(template_object,
+		&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, (void **)&iface)) || !iface)
+		return S_FALSE;
+	if (iface->lpVtbl != &template_table) {
+		iface->lpVtbl->Release(iface);
+		return S_FALSE;
+	}
+	struct control_template *self = (struct control_template *)iface;
+	if (self->root) {
+		*out = self->root;
+		(*out)->lpVtbl->AddRef(*out);
+	}
+	iface->lpVtbl->Release(iface);
+	return S_OK;
+}
+
+HRESULT __declspec(dllexport) raven_xaml_control_template_put_root(IInspectable *template_object, IInspectable *root)
+{
+	IInspectable *probe = NULL;
+	struct control_template *self = NULL;
+	template1 *iface = NULL;
+	if (!template_object)
+		return E_POINTER;
+	if (root)
+		IInspectable_AddRef(root);
+	if (FAILED(template_object->lpVtbl->QueryInterface(template_object,
+		&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, (void **)&iface)) || !iface) {
+		if (root)
+			IInspectable_Release(root);
+		return E_INVALIDARG;
+	}
+	if (iface->lpVtbl != &template_table) {
+		iface->lpVtbl->Release(iface);
+		if (root)
+			IInspectable_Release(root);
+		return E_INVALIDARG;
+	}
+	self = (struct control_template *)iface;
+	(void)raven_xaml_control_template_root(template_object, &probe);
+	if (probe)
+		IInspectable_Release(probe);
+	if (self->root)
+		IInspectable_Release(self->root);
+	self->root = root;
+	raven_render_changed();
+	iface->lpVtbl->Release(iface);
+	return S_OK;
+}
+
 /* Factory */
 
-enum factory_kind { factory_frame, factory_page };
+enum factory_kind { factory_frame, factory_page, factory_template };
 
 struct controls_factory;
 
@@ -770,7 +971,8 @@ static HRESULT controls_query_parts(struct controls_factory *self, REFIID iid, v
 	static HRESULT WINAPI prefix##_name(iface *iface##_unused, HSTRING *name) \
 	{ \
 		struct controls_factory *self = ((struct part *)iface##_unused)->owner; \
-		const WCHAR *text = self->kind == factory_frame ? frame_class : page_class; \
+		const WCHAR *text = self->kind == factory_frame ? frame_class : \
+			self->kind == factory_page ? page_class : template_class; \
 		if (!name) return E_POINTER; \
 		return WindowsCreateString(text, (UINT32)lstrlenW(text), name); \
 	} \
@@ -863,6 +1065,11 @@ static struct controls_factory page_factory_instance = {
 	{&page_statics_table, NULL}, {NULL, NULL}, {&page_create_table, NULL}, 1, factory_page,
 };
 
+static struct controls_factory template_factory_instance = {
+	{&activation_table, NULL}, {NULL, NULL}, {NULL, NULL}, {NULL, NULL},
+	{NULL, NULL}, {NULL, NULL}, {NULL, NULL}, 1, factory_template,
+};
+
 static LONG factories_ready;
 
 /* A static initializer cannot name the object being defined, so the back pointers are filled once, before first use. */
@@ -883,6 +1090,13 @@ static void prepare_factories(void)
 		page_factory_instance.page_statics.owner = &page_factory_instance;
 		page_factory_instance.frame_create.owner = &page_factory_instance;
 		page_factory_instance.page_create.owner = &page_factory_instance;
+		template_factory_instance.activation.owner = &template_factory_instance;
+		template_factory_instance.statics1.owner = &template_factory_instance;
+		template_factory_instance.statics2.owner = &template_factory_instance;
+		template_factory_instance.statics5.owner = &template_factory_instance;
+		template_factory_instance.page_statics.owner = &template_factory_instance;
+		template_factory_instance.frame_create.owner = &template_factory_instance;
+		template_factory_instance.page_create.owner = &template_factory_instance;
 		InterlockedExchange(&factories_ready, 2);
 	} else {
 		while (InterlockedCompareExchange(&factories_ready, 2, 2) != 2)
@@ -939,7 +1153,8 @@ static HRESULT WINAPI factory_iids(IActivationFactory *iface, ULONG *count, IID 
 static HRESULT WINAPI factory_name(IActivationFactory *iface, HSTRING *name)
 {
 	struct controls_factory *self = ((struct controls_part *)iface)->owner;
-	const WCHAR *text = self->kind == factory_frame ? frame_class : page_class;
+	const WCHAR *text = self->kind == factory_frame ? frame_class :
+		self->kind == factory_page ? page_class : template_class;
 	if (!name)
 		return E_POINTER;
 	return WindowsCreateString(text, (UINT32)lstrlenW(text), name);
@@ -962,11 +1177,16 @@ static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable *
 		if (!frame)
 			return E_OUTOFMEMORY;
 		*out = (IInspectable *)&frame->first;
-	} else {
+	} else if (self->kind == factory_page) {
 		struct page *page = create_page();
 		if (!page)
 			return E_OUTOFMEMORY;
 		*out = (IInspectable *)page;
+	} else {
+		struct control_template *template = create_control_template();
+		if (!template)
+			return E_OUTOFMEMORY;
+		*out = (IInspectable *)template;
 	}
 	return S_OK;
 }
@@ -1116,13 +1336,20 @@ HRESULT raven_xaml_element_set_object(IInspectable *object, const WCHAR *name, U
 	return raven_xaml_elements_set_object(object, name, length, value);
 }
 
-/* The page a hosted frame currently shows; the rendering walk treats it as the frame's single visual child. */
+/* The page a hosted frame currently shows; the rendering walk treats it as the frame's single visual child. The same
+ * hook answers a templated control's template root first: the render walk reads it before the content slot, so an
+ * applied ControlTemplate replaces the control's rendered visuals with its tree and no render-path change is needed. */
 HRESULT raven_xaml_frame_render_child(IInspectable *object, IInspectable **out)
 {
 	frame1 *frame = NULL;
+	IInspectable *templated = NULL;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
+	if (raven_xaml_element_template_child(object, &templated) == S_OK && templated) {
+		*out = templated;
+		return S_OK;
+	}
 	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame, (void **)&frame)) || !frame)
 		return S_FALSE;
 	if (frame->lpVtbl != &frame1_table) {
@@ -1152,9 +1379,26 @@ HRESULT raven_xaml_controls_factory(HSTRING name, IActivationFactory **out)
 		factory = &frame_factory_instance;
 	else if (length == ARRAYSIZE(page_class) - 1 && CompareStringOrdinal(text, (int)length, page_class, -1, FALSE) == CSTR_EQUAL)
 		factory = &page_factory_instance;
+	else if (length == ARRAYSIZE(template_class) - 1 && CompareStringOrdinal(text, (int)length, template_class, -1, FALSE) == CSTR_EQUAL)
+		factory = &template_factory_instance;
 	else
 		return CLASS_E_CLASSNOTAVAILABLE;
 	InterlockedIncrement(&factory->refs);
 	*out = (IActivationFactory *)&factory->activation;
+	return S_OK;
+}
+
+/* The ControlTemplate factory through the engine-internal export: the runtime catalog does not list the class yet (the
+ * registry entry is added separately), so RoGetActivationFactory cannot reach it until then; the fixtures drive
+ * activation through this GetProcAddress the way they drive the other engine-internal exports. Hands out an AddRef'd
+ * IActivationFactory. */
+HRESULT __declspec(dllexport) raven_xaml_control_template_factory(IActivationFactory **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	prepare_factories();
+	InterlockedIncrement(&template_factory_instance.refs);
+	*out = (IActivationFactory *)&template_factory_instance.activation;
 	return S_OK;
 }
