@@ -795,6 +795,32 @@ built for both.
   RowDefinition.Height/ColumnDefinition.Width (the vtables exist but the
   loader's float dispatch does not route Width/Height to definitions —
   the next candidate unlock).
+- SwapChainPanel (2026-10-31, stage 6): the parked design question is
+  resolved as **contract-only**, on probe evidence: D3D10 creation is
+  confirmed unsupported by the existing fixtures, D3D9 objects work but
+  do not present, and guest Vulkan submits and reads back with installed
+  drivers (`lvp_icd.json` is the only thing missing in the harness) — but
+  the desktop's GPU child surfaces are HWND-backed and offer no bridge
+  importing a supplied composition swapchain into the XAML tree, so GPU
+  capability alone does not establish panel interop. `Windows.UI.Xaml.
+  Controls.SwapChainPanel` (stable type 536) is a runtime class in the
+  catalog with the real ABI: `ISwapChainPanel` (no SwapChain or
+  CompositeMode property — attachment belongs to
+  `ISwapChainPanelNative::SetSwapChain`, verified against the SDK
+  headers; the WinRT IID `c589644f-…` and native IID `f92f19d2-…` were
+  re-verified against independent sources before integration) answering
+  CompositionScaleX/Y and the CompositionScaleChanged event pair,
+  `CreateCoreIndependentInputSource` `E_NOTIMPL` (no input routing into
+  a GPU surface), and the native part storing an internal swapchain
+  reference — SetSwapChain with a non-NULL chain returns `E_NOTIMPL`
+  without retaining the refused chain, NULL detaches, thread checks and
+  COM identity/lifetime are real, and no pixel is ever read back or
+  invented. The panel deliberately exposes no IUIElement/IPanel until
+  layout can reject GPU content, and `xaml_composition.c` documents why
+  GPU surface brushes stay unsupported.
+  `native_composition_x64`/`_x32` cover identity, ownership, replacement,
+  destruction, threading and refusal (codes 150–220) and the
+  surface-brush refusal (271–275).
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -1137,6 +1163,11 @@ pages, layout, and rendering through the composition stage.
 
 - `SwapChainPanel`/`ICompositionSurface`, Win2D (`Microsoft.Graphics.Canvas`)
   on D2D1/D3D11, DirectX interop.
+- ~~Design question: a SwapChainPanel is a GPU texture, not pixels copied
+  into wl_shm.~~ Resolved 2026-10-31 as contract-only (see the
+  SwapChainPanel entry): the emulated desktop's presentation path cannot
+  accept a composition swapchain, so the real ABI stores and refuses
+  honestly while no pixel is faked.
 - Acceptance: a Direct3D texture composites in a XAML surface without readback.
 
 ### Stage 7 — Shapr3D
