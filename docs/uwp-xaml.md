@@ -132,9 +132,15 @@ built for both.
   Event dispatch holds a snapshot, so handlers can revoke themselves or add
   subscriptions during dispatch. `CoreApplication.Exit` posts `WM_QUIT` to the
   UI thread, including from another thread; `Exiting` runs after `Uninitialize`.
-- Application limits: one view; no `RunWithActivationFactories`, process property
-  set or suspend/resume event delivery (`E_NOTIMPL`). There is no package
-  identity yet: `Id` forwards the host's no-package error. Direct view-source
+- Application limits: one view; no `RunWithActivationFactories` or
+  suspend/resume event delivery (`E_NOTIMPL` — no UI thread exists until
+  `Run` owns one, and the host delivers no lifecycle events). `Id` answers
+  the manifest's `Applications/Application@Id` (the PRAID) when the process
+  has package identity, and keeps forwarding the host's no-package error
+  otherwise; `Properties` is a process-wide property set with real
+  `IMap<HSTRING, IInspectable>` semantics (content-compared string keys,
+  live view), not yet claiming the `PropertySet` runtime class name since
+  its activation is not wired. Direct view-source
   startup has empty `Load` entry point, launch arguments and tile ID, and no
   splash screen. Manifest-driven activation and additional activation-argument
   interfaces remain for stage 5.
@@ -561,6 +567,51 @@ built for both.
   engine-internal export and `RoGetActivationFactory`, the mouse's COM
   identity against the event-verified device, the documented values,
   view bounds/GetMany/IndexOf and a full refcount ledger.
+- Touch delivery (2026-10-31, stage 4): the desktop window decodes
+  `WM_POINTER` messages alongside the mouse — pointer id from the
+  message, flags from the high word, position to DIPs, samples pushed to
+  the same history ring before the event fires — so touch contacts reach
+  Pressed/Released/Moved/Entered/Exited as distinct pointers with stable
+  ids across a contact (a documented 8-contact bound; the first is
+  primary), touch presses the left button the way the real statics do,
+  and the PointerPoint hands out the matching device object from the
+  statics catalog. The host probe settled what is deliverable: no
+  digitizer in the enumeration, `SendInput` injects nothing,
+  `GetPointerInfo` is an unimplemented import, and the host pointer
+  table is empty — so synthetic `WM_POINTER` posts (which arrive
+  verbatim) are the real test seam, ids other than the engine mouse's
+  decode as touch by documented convention, and pen stays unreachable
+  until a host populates the table (the comment at the decoder states
+  the mapping a real host must add). `WM_TOUCH` is not decoded: nothing
+  here can produce a decodable one. The catalog appends a documented
+  touch stand-in when the host lists no digitizer, whose unknown
+  digitizer facts answer `E_NOTIMPL` rather than invented values.
+  `native_core_desktop_x64`/`_x32` drive a hover→contact→press round on
+  two simultaneous contacts (distinct ids, only one primary), the touch
+  history round-tripping through `GetIntermediatePoints` with the touch
+  device's identity, the stand-in's facts, and a closing mouse move
+  still answering id 1/Mouse.
+- CoreApplication identity and properties (2026-10-31, stage 5):
+  `CoreApplication.Id` answers the manifest's `Applications/Application@Id`
+  (the PRAID — `EntryPoint` is a class name, not an id) through the same
+  hand-rolled scanner `package.c` already runs, and keeps forwarding the
+  host's no-package error without identity; the scanner's capture is
+  covered through an exported seam that parses in-memory manifests with
+  the disk path's own parser, since the engine reads identity once per
+  process and the fixture cannot run both branches in one.
+  `CoreApplication.Properties` is a process-wide property set with real
+  `IMap<HSTRING, IInspectable>` semantics — content-compared string keys
+  (a NULL HSTRING is the empty key), Insert reports replacement and owns
+  values, `E_BOUNDS` on missing Lookup/Remove, HasKey/Size/Clear and a
+  live `GetView` — handed out as the same object per get and never
+  freed. It does not yet claim the `PropertySet` runtime class name (its
+  GetRuntimeClassName answers the parameterized IMap name) because the
+  class activation is not wired and the current singleton object cannot
+  be honestly instanced. `RunWithActivationFactories` and suspend/resume
+  stay `E_NOTIMPL` with the missing pieces named in comments.
+  `native_core_application_x64`/`_x32` and `native_package_x64`/`_x32`
+  cover the no-package `Id` error, the scanner seam, and the full
+  property-set round.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -1054,7 +1105,13 @@ remain passing after the trial implementation was removed.
 5. ~~Finish pointer history/static access, cursor objects and touch/pen
    delivery as native input sources permit.~~ Pointer history, the
    CoreCursor/`PointerCursor` objects and the `PointerDevice` statics are
-   done (2026-10-31); remaining: touch/pen delivery as native input
-   sources permit.
-6. Extend application startup with manifest identity/entry-point data and
-   `RunWithActivationFactories` as the app's startup path requires.
+   done (2026-10-31); touch delivery landed the same day over the
+   host's `WM_POINTER` path (see the touch-delivery entry) — remaining:
+   the host-side plumbing a real digitizer would need (`GetPointerInfo`,
+   `EnableMouseInPointer`, `SendInput`, a populated pointer table).
+6. ~~Extend application startup with manifest identity/entry-point data
+   and `RunWithActivationFactories` as the app's startup path requires.~~
+   Partially done (2026-10-31): `CoreApplication.Id` reads the manifest's
+   application id and `Properties` is a real process property set;
+   remaining: `RunWithActivationFactories`, manifest-driven activation
+   and the additional activation-argument interfaces.
