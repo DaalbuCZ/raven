@@ -3,13 +3,15 @@
  * See LICENSES/MIT.txt.
  */
 /* The automation fixture: a compiled page hosts a grid whose three children are a named TextBlock, a
- * nameless one and a nameless grid, and the client works through the FrameworkElementAutomationPeer
- * statics the winmd declares: a second CreatePeerForElement for an element returns the same peer, the
- * Owner the peer reports is the element, GetName answers the loader-assigned name and falls back to the
- * Text of a nameless TextBlock and to the runtime class name of a nameless grid, GetPattern answers
- * E_NOTIMPL for every PatternInterface, the peer reports itself a content and a control element, and two
- * elements get different peers. The registry holds one reference to each peer for the process, so the
- * fixture releases everything it borrowed and lets the registry entries stay. */
+ * nameless one and a nameless grid, and a Button named Go, and the client works through the
+ * FrameworkElementAutomationPeer statics the winmd declares: a second CreatePeerForElement for an
+ * element returns the same peer, the Owner the peer reports is the element, GetName answers the
+ * loader-assigned name and falls back to the Text of a nameless TextBlock and to the runtime class
+ * name of a nameless grid, GetPattern answers E_NOTIMPL for every PatternInterface on a text peer,
+ * the button's peer serves the Invoke provider whose Invoke raises the Click a handler on IButtonBase
+ * receives, the peer reports itself a content and a control element, and two elements get different
+ * peers. The registry holds one reference to each peer for the process, so the fixture releases
+ * everything it borrowed and lets the registry entries stay. */
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID
 #define CINTERFACE
@@ -26,6 +28,8 @@
 #include "../../native/upstream/raven-xaml/windows_ui_xaml_window.h"
 #include "../../native/upstream/raven-xaml/windows_ui_xaml_uielement.h"
 #include "../../native/upstream/raven-xaml/windows_ui_xaml_automation_peers.h"
+#include "../../native/upstream/raven-xaml/windows_ui_xaml_automation_provider.h"
+#include "../../native/upstream/raven-xaml/windows_ui_xaml_buttonbase.h"
 
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
@@ -158,8 +162,9 @@ static size_t set_name(unsigned char *doc, size_t at, const char *text)
 	return at;
 }
 
-/* A page whose content is a grid with three children: a TextBlock named Caption carrying text, a
- * nameless TextBlock carrying text, and a nameless grid. */
+/* A page whose content is a grid with four children: a TextBlock named Caption carrying text, a
+ * nameless TextBlock carrying text, a nameless grid and a Button named Go — the one element whose
+ * peer serves the Invoke provider the button checks exercise. */
 static size_t build_automation_document(unsigned char *doc)
 {
 	size_t at = begin_document(doc);
@@ -178,12 +183,64 @@ static size_t build_automation_document(unsigned char *doc)
 	at = set_property(doc, at, 648);                      /* Children */
 	at = create_type(doc, at, 442);                       /* the nameless grid */
 	doc[at++] = 0x02;                                     /* pop the nameless grid */
+	at = set_property(doc, at, 648);                      /* Children */
+	at = create_type(doc, at, 540);                       /* the button */
+	at = set_name(doc, at, "Go");                         /* x:Name */
+	doc[at++] = 0x02;                                     /* pop the button */
 	doc[at++] = 0x02;                                     /* pop the root grid */
 	const UINT32 nodes = (UINT32)(at - 168);
 	put32(doc, 8, nodes);
 	put32(doc, 164, nodes);
 	return at;
 }
+
+/* The Click handler the invoke checks count: the engine stores handlers through IUnknown and invokes
+ * the fourth slot with the element as sender, so the fixture declares the delegate shape locally. */
+struct fixture_click_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(void *This);
+	ULONG (STDMETHODCALLTYPE *Release)(void *This);
+	HRESULT (STDMETHODCALLTYPE *Invoke)(void *This, IInspectable *sender, void *args);
+};
+
+struct fixture_click {
+	const struct fixture_click_vtbl *lpVtbl;
+	LONG refs;
+	ULONG calls;
+};
+
+static HRESULT WINAPI fixture_click_query(void *This, REFIID riid, void **object)
+{
+	if (!object)
+		return E_POINTER;
+	*object = NULL;
+	(void)riid;
+	InterlockedIncrement(&((struct fixture_click *)This)->refs);
+	*object = This;
+	return S_OK;
+}
+
+static ULONG WINAPI fixture_click_addref(void *This)
+{
+	return (ULONG)InterlockedIncrement(&((struct fixture_click *)This)->refs);
+}
+
+static ULONG WINAPI fixture_click_release(void *This)
+{
+	return (ULONG)InterlockedDecrement(&((struct fixture_click *)This)->refs);
+}
+
+static HRESULT WINAPI fixture_click_invoke(void *This, IInspectable *sender, void *args)
+{
+	(void)sender;
+	(void)args;
+	((struct fixture_click *)This)->calls++;
+	return S_OK;
+}
+
+static const struct fixture_click_vtbl fixture_click_table = {
+	fixture_click_query, fixture_click_addref, fixture_click_release, fixture_click_invoke,
+};
 
 /* The name a GetName answer carries, compared against the fixture's ASCII expectations. */
 static int same_text(HSTRING value, const char *expected)
@@ -250,14 +307,15 @@ int raven_entry(void)
 		return 11;
 	struct fixture_vector *children = (struct fixture_vector *)children_collection;
 	UINT32 child_count = 0;
-	if (children->lpVtbl->get_Size(children, &child_count) != S_OK || child_count != 3) return 12;
+	if (children->lpVtbl->get_Size(children, &child_count) != S_OK || child_count != 4) return 12;
 	/* The element pointers the engine hands out: the Children vector's IUIElement entries, which are
 	 * the element objects themselves. The statics take them as the owners to bind peers to. */
-	ui_element1 *named_ui = NULL, *plain_ui = NULL, *inner_ui = NULL;
+	ui_element1 *named_ui = NULL, *plain_ui = NULL, *inner_ui = NULL, *button_ui = NULL;
 	{
 		if (children->lpVtbl->GetAt(children, 0, &named_ui) != S_OK || !named_ui) return 13;
 		if (children->lpVtbl->GetAt(children, 1, &plain_ui) != S_OK || !plain_ui) return 14;
 		if (children->lpVtbl->GetAt(children, 2, &inner_ui) != S_OK || !inner_ui) return 15;
+		if (children->lpVtbl->GetAt(children, 3, &button_ui) != S_OK || !button_ui) return 64;
 	}
 
 
@@ -311,6 +369,7 @@ int raven_entry(void)
 		&IID__x_ABI_CWindows_CUI_CXaml_CAutomation_CPeers_CIAutomationPeer, (void **)&automation) != S_OK || !automation)
 		return 29;
 	HSTRING name = NULL;
+	EventRegistrationToken token = {0};
 	if (automation->lpVtbl->GetName(automation, (uint64_t)(uintptr_t)&name) != S_OK || !name) return 30;
 	if (!same_text(name, "Caption")) return 31;
 	WindowsDeleteString(name);
@@ -403,6 +462,47 @@ int raven_entry(void)
 		ownerless->lpVtbl->Release(ownerless);
 	}
 
+	/* The button's peer: the one element kind whose peer serves a pattern provider. Its Click goes
+	 * through the handler the fixture registers on IButtonBase, and the Invoke provider raises it
+	 * synchronously — the count answers inside the call that invoked. */
+	{
+		__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase *button_base = NULL;
+		struct fixture_click click = { &fixture_click_table, 1, 0 };
+		framework_peer1 *button_peer = NULL;
+		automation1 *button_automation = NULL;
+		void *provider = NULL;
+		if (button_ui->lpVtbl->QueryInterface(button_ui,
+			&IID__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase, (void **)&button_base) != S_OK ||
+			!button_base) return 73;
+		if (button_base->lpVtbl->add_Click(button_base, (uint64_t)(uintptr_t)&click,
+			(uint64_t)(uintptr_t)&token) != S_OK) return 74;
+		button_base->lpVtbl->Release(button_base);
+		if (statics->lpVtbl->CreatePeerForElement(statics, (uint64_t)(uintptr_t)button_ui,
+			(uint64_t)(uintptr_t)&button_peer) != S_OK || !button_peer) return 75;
+		if (button_peer->lpVtbl->QueryInterface(button_peer,
+			&IID__x_ABI_CWindows_CUI_CXaml_CAutomation_CPeers_CIAutomationPeer,
+			(void **)&button_automation) != S_OK || !button_automation) return 76;
+		if (button_automation->lpVtbl->GetName(button_automation, (uint64_t)(uintptr_t)&name) != S_OK || !name)
+			return 77;
+		if (!same_text(name, "Go")) return 78;
+		WindowsDeleteString(name);
+		name = NULL;
+		/* Invoke is pattern 0; the button's peer serves it and nothing else. */
+		if (button_automation->lpVtbl->GetPattern(button_automation, 0,
+			(uint64_t)(uintptr_t)&provider) != S_OK || !provider) return 79;
+		__x_ABI_CWindows_CUI_CXaml_CAutomation_CProvider_CIInvokeProvider *invoke =
+			(__x_ABI_CWindows_CUI_CXaml_CAutomation_CProvider_CIInvokeProvider *)provider;
+		if (invoke->lpVtbl->Invoke(invoke) != S_OK) return 80;
+		if (click.calls != 1) return 81;
+		if (invoke->lpVtbl->Invoke(invoke) != S_OK) return 82;
+		if (click.calls != 2) return 83;
+		invoke->lpVtbl->Release(invoke);
+		if (button_automation->lpVtbl->GetPattern(button_automation, 1,
+			(uint64_t)(uintptr_t)&provider) != E_NOTIMPL || provider) return 84;
+		button_automation->lpVtbl->Release(button_automation);
+		button_peer->lpVtbl->Release(button_peer);
+	}
+
 	factory->lpVtbl->Release(factory);
 	composable->lpVtbl->Release(composable);
 	statics->lpVtbl->Release(statics);
@@ -416,6 +516,7 @@ int raven_entry(void)
 	inner_ui->lpVtbl->Release(inner_ui);
 	plain_ui->lpVtbl->Release(plain_ui);
 	named_ui->lpVtbl->Release(named_ui);
+	button_ui->lpVtbl->Release(button_ui);
 	children->lpVtbl->Release(children);
 	panel->lpVtbl->Release(panel);
 	root->lpVtbl->Release(root);

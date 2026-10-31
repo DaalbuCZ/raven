@@ -18,10 +18,14 @@
  * The peer answers IAutomationPeer (the interface the class inherits from AutomationPeer) and
  * IFrameworkElementAutomationPeer (its own default interface, which carries get_Owner). GetName is
  * real — the element's automation name through the readback in xaml_elements.c (xaml_automation.h);
- * IsContentElement and IsControlElement answer TRUE; GetPattern answers E_NOTIMPL for every pattern
- * because no pattern provider is implemented; the rest of the declared slots answer E_NOTIMPL at their
- * exact signatures. The versioned IAutomationPeer2..9 and the Overrides interfaces the base class also
- * carries are not answered yet, and neither are the interfaces only a subclass's projection would use.
+ * IsContentElement and IsControlElement answer TRUE; GetPattern answers the Invoke pattern for the
+ * peers of buttons — the one control the engine implements a provider for — and E_NOTIMPL for every
+ * other pattern and element; the rest of the declared slots answer E_NOTIMPL at their exact
+ * signatures. The IInvokeProvider the button peers hand out raises the button's Click through the
+ * button's own raise (raven_xaml_button_invoke in xaml_elements.c), independent of the click mode
+ * the way the real ButtonAutomationPeer.Invoke calls OnClick. The versioned IAutomationPeer2..9 and the Overrides
+ * interfaces the base class also carries are not answered yet, and neither are the interfaces only a
+ * subclass's projection would use.
  *
  * The factory answers IActivationFactory plus the two interfaces the winmd attaches to the class: the
  * statics (IFrameworkElementAutomationPeerStatics) and the composable factory
@@ -36,6 +40,8 @@
 #include <string.h>
 #include "windows_ui_xaml_uielement.h"
 #include "windows_ui_xaml_automation_peers.h"
+#include "windows_ui_xaml_automation_provider.h"
+#include "windows_ui_xaml_elements.h" /* the CIButton the invoke-serving decision asks the owner for */
 #include "xaml_automation.h"
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
@@ -50,6 +56,9 @@ typedef __x_ABI_CWindows_CUI_CXaml_CAutomation_CPeers_CIFrameworkElementAutomati
 typedef __x_ABI_CWindows_CUI_CXaml_CAutomation_CPeers_CIFrameworkElementAutomationPeerStaticsVtbl peer_statics1_vtbl;
 typedef __x_ABI_CWindows_CUI_CXaml_CAutomation_CPeers_CIFrameworkElementAutomationPeerFactory peer_composable1;
 typedef __x_ABI_CWindows_CUI_CXaml_CAutomation_CPeers_CIFrameworkElementAutomationPeerFactoryVtbl peer_composable1_vtbl;
+typedef __x_ABI_CWindows_CUI_CXaml_CAutomation_CProvider_CIInvokeProvider peer_invoke1;
+typedef __x_ABI_CWindows_CUI_CXaml_CAutomation_CProvider_CIInvokeProviderVtbl peer_invoke1_vtbl;
+typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIButton button1; /* the owner ask that decides the Invoke provider */
 
 /* The IUIElement the peers key on and get_Owner returns: the element pointer as the engine hands it
  * out (the Children vector's entry, which is the element object itself); every part of the element
@@ -94,16 +103,27 @@ struct peer;
  * the identity, the refcount and the owner living on the peer itself. */
 struct peer_automation_part { const peer_automation1_vtbl *lpVtbl; struct peer *owner; };
 struct peer_framework_part { const peer_framework1_vtbl *lpVtbl; struct peer *owner; };
+struct peer_invoke_part { const peer_invoke1_vtbl *lpVtbl; struct peer *owner; };
 
 struct peer {
 	const IInspectableVtbl *lpVtbl;
 	struct peer_automation_part automation;
 	struct peer_framework_part framework;
+	struct peer_invoke_part invoke;
 	LONG refs;
 	/* The element the peer answers for, AddRef'd through its IUIElement part: this is both the
 	 * registry key and what get_Owner returns. NULL for the default-constructed peer. */
 	ui_element *owner;
+	/* Whether the owner is a Button, the one element kind whose peer serves a pattern provider (the
+	 * Invoke provider reaching the button behavior). Set once at creation; the owner lives as long as
+	 * the peer does, so the answer never changes. */
+	BOOL button;
 };
+
+/* The PatternInterface values follow the winmd enumeration (Invoke through CustomNavigation, 34
+ * values; Invoke is the first, 0 — the same order the empty answer of the existing GetPattern check
+ * walks). */
+#define PATTERN_INVOKE 0u
 
 static HRESULT peer_query(IInspectable *This, REFIID iid, void **out);
 static ULONG peer_addref(struct peer *self);
@@ -163,9 +183,9 @@ static HRESULT WINAPI peer_stub1_in(peer_automation1 *This, uint64_t a1)
 	(void)a1;
 	return E_NOTIMPL;
 }
-/* The two-argument slots carry an out pointer in the second word (GetPattern, GetPeerFromPoint); no
- * pattern provider is implemented, so both answer E_NOTIMPL the way an empty GetPatternCore override
- * would surface through the base implementation. */
+/* The two-argument slots carry an out pointer in the second word (GetPeerFromPoint); no pattern
+ * provider other than the Invoke one below is implemented, so the slot answers E_NOTIMPL the way an
+ * empty GetPatternCore override would surface through the base implementation. */
 static HRESULT WINAPI peer_stub2(peer_automation1 *This, uint64_t a1, uint64_t a2)
 {
 	(void)This;
@@ -193,6 +213,69 @@ static HRESULT WINAPI peer_is_content_element(peer_automation1 *This, uint64_t o
 	*(boolean *)(uintptr_t)out = TRUE;
 	return S_OK;
 }
+
+/* GetPattern answers the Invoke pattern for the peers of buttons — the one control the engine
+ * implements a provider for — and keeps the empty answer for every other pattern and element: the
+ * callers that ask a non-button peer walk the whole declared pattern set and must see exactly what
+ * they saw before this provider existed. */
+static HRESULT WINAPI peer_get_pattern(peer_automation1 *This, uint64_t pattern, uint64_t out)
+{
+	struct peer *self = ((struct peer_automation_part *)This)->owner;
+	if (!out)
+		return E_POINTER;
+	*(void **)(uintptr_t)out = NULL;
+	if ((UINT32)(uintptr_t)pattern != PATTERN_INVOKE || !self->button)
+		return E_NOTIMPL;
+	*(void **)(uintptr_t)out = &self->invoke;
+	peer_addref(self);
+	return S_OK;
+}
+
+/* The Invoke provider the button peers hand out. Its lifetime is the peer's — every part answers for
+ * the same refcount the way the automation and framework parts do — and its one slot raises. */
+static HRESULT WINAPI peer_invoke_query(peer_invoke1 *This, REFIID iid, void **out)
+{
+	return peer_query((IInspectable *)((struct peer_invoke_part *)This)->owner, iid, out);
+}
+static ULONG WINAPI peer_invoke_addref(peer_invoke1 *This)
+{
+	return peer_addref(((struct peer_invoke_part *)This)->owner);
+}
+static ULONG WINAPI peer_invoke_release(peer_invoke1 *This)
+{
+	return peer_release(((struct peer_invoke_part *)This)->owner);
+}
+static HRESULT WINAPI peer_invoke_iids(peer_invoke1 *This, ULONG *count, IID **iids)
+{
+	(void)This;
+	return inspectable_iids(count, iids);
+}
+static HRESULT WINAPI peer_invoke_name(peer_invoke1 *This, HSTRING *name)
+{
+	(void)This;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(peer_class, (UINT32)lstrlenW(peer_class), name);
+}
+static HRESULT WINAPI peer_invoke_trust(peer_invoke1 *This, TrustLevel *level)
+{
+	(void)This;
+	return inspectable_trust(level);
+}
+static HRESULT WINAPI peer_invoke_invoke(peer_invoke1 *This)
+{
+	struct peer *self = ((struct peer_invoke_part *)This)->owner;
+	/* Synchronous like everything the CPU fallback runs: the raise completes inside the call, no
+	 * thread hop, and a handler failure is the application's business. */
+	if (self->owner)
+		raven_xaml_button_invoke((IInspectable *)self->owner);
+	return S_OK;
+}
+static const peer_invoke1_vtbl peer_invoke_table = {
+	peer_invoke_query, peer_invoke_addref, peer_invoke_release,
+	peer_invoke_iids, peer_invoke_name, peer_invoke_trust,
+	peer_invoke_invoke,
+};
 
 /* GetName reads the element's automation name through the readback in xaml_elements.c; the default-
  * constructed peer has no element to read a name from. */
@@ -249,7 +332,7 @@ static const peer_automation1_vtbl peer_automation_table = {
 	.GetTrustLevel = peer_automation_trust,
 	.get_EventsSource = peer_stub1,
 	.put_EventsSource = peer_stub1_in,
-	.GetPattern = peer_stub2,
+	.GetPattern = peer_get_pattern,
 	.RaiseAutomationEvent = peer_stub1_in,
 	.RaisePropertyChangedEvent = peer_stub3,
 	.GetAcceleratorKey = peer_stub1,
@@ -453,6 +536,8 @@ static void peer_init(struct peer *peer, ui_element *owner)
 	peer->automation.owner = peer;
 	peer->framework.lpVtbl = &peer_framework_table;
 	peer->framework.owner = peer;
+	peer->invoke.lpVtbl = &peer_invoke_table;
+	peer->invoke.owner = peer;
 	peer->owner = owner;
 }
 
@@ -475,6 +560,17 @@ static HRESULT peer_for_element(ui_element *element, void **out)
 	if (!peer)
 		return E_OUTOFMEMORY;
 	peer_init(peer, element);
+	/* The one kind with a pattern provider: a button owner's peer serves the Invoke provider. The
+	 * answer is asked once at creation; the owner lives as long as the peer does, so it never
+	 * changes under the callers that cached the answer. */
+	{
+		button1 *button = NULL;
+		if (element->lpVtbl->QueryInterface(element,
+			&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button) == S_OK && button) {
+			peer->button = TRUE;
+			button->lpVtbl->Release(button);
+		}
+	}
 	/* The creation holds one reference for the caller; the registry takes its own so the peer lives for the
 	 * process lifetime the registry promises. */
 	peer->refs = 1;

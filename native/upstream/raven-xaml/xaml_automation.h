@@ -13,4 +13,8 @@
 
 HRESULT raven_xaml_element_automation_name(IInspectable *element, HSTRING *out);
 
+/* The automation Invoke: raises the button's Click through the button's own raise, independent of the click mode, the way
+ * the real ButtonAutomationPeer.Invoke calls OnClick. A non-button answers nothing. */
+void raven_xaml_button_invoke(IInspectable *element);
+
 #endif

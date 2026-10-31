@@ -1383,6 +1383,19 @@ static void button_raise_click(struct button *self)
 	FREE(handlers);
 }
 
+/* The automation raise: the peer's Invoke reaches the button's Click through the button's own raise, the way the pointer
+ * behavior does, but independent of the click mode — the real ButtonAutomationPeer.Invoke calls OnClick directly, so a
+ * Release-mode button still clicks. A non-button answers nothing. */
+void raven_xaml_button_invoke(IInspectable *element)
+{
+	button1 *button = NULL;
+	if (!element || FAILED(element->lpVtbl->QueryInterface(element,
+		&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) || !button)
+		return;
+	button_raise_click(((struct button1_part *)button)->owner);
+	button->lpVtbl->Release(button);
+}
+
 /* The internal pointer behavior of the button, run before the application's handlers: IsPressed follows the press, and Click
  * follows the click mode — ClickMode.Release raises on a release within the button's bounds (the press reached the button
  * because it was the hit target, so only the release position needs the bounds check), ClickMode.Press on the press,
@@ -1836,6 +1849,7 @@ static int elements_name(IInspectable *object, const WCHAR *text, UINT32 length)
 {
 	grid1 *grid = NULL;
 	textblock1 *textblock = NULL;
+	button1 *button = NULL;
 	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
 		if (grid->lpVtbl == &grid1_table)
 			store_name(&((struct grid1_part *)grid)->owner->name, text, length);
@@ -1846,6 +1860,12 @@ static int elements_name(IInspectable *object, const WCHAR *text, UINT32 length)
 		if (textblock->lpVtbl == &textblock_table)
 			store_name(&((struct textblock *)textblock)->name, text, length);
 		textblock->lpVtbl->Release(textblock);
+		return 1;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
+		if (button->lpVtbl == &button1_table)
+			store_name(&((struct button1_part *)button)->owner->name, text, length);
+		button->lpVtbl->Release(button);
 		return 1;
 	}
 	return 0;
