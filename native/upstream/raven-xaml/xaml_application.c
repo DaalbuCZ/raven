@@ -6,8 +6,8 @@
  *
  * The class is what a XAML application derives from. This file provides its activation: the factory a program asks for by name,
  * the statics of the class, the composable factory and an application object with the three interfaces the type carries. The
- * members that need the XAML engine (resources, theme, events, startup) answer E_NOTIMPL for now; what is established here is the
- * exact ABI the .NET Native type loader binds to, taken from Windows.UI.Xaml.winmd by scripts/generate-winrt-header.py.
+ * implements application composition, current and startup, resource storage, and lifecycle event registration. Suspend and
+ * resume notifications are not delivered by the desktop host yet; other engine-dependent members remain unimplemented.
  *
  * The object is not a rendering surface: composition and the engine stages plug into the same factory later. */
 #define INITGUID
@@ -16,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include "windows_ui_xaml_application.h"
+#include "events.h"
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
@@ -78,14 +79,17 @@ struct application;
 struct application1_part { const __x_ABI_CWindows_CUI_CXaml_CIApplicationVtbl *lpVtbl; struct application *owner; };
 struct application2_part { const __x_ABI_CWindows_CUI_CXaml_CIApplication2Vtbl *lpVtbl; struct application *owner; };
 struct application3_part { const __x_ABI_CWindows_CUI_CXaml_CIApplication3Vtbl *lpVtbl; struct application *owner; };
+struct application_inner_part { const IInspectableVtbl *lpVtbl; struct application *owner; };
 
 struct application {
 	struct application1_part first;
 	struct application2_part second;
 	struct application3_part third;
+	struct application_inner_part inner;
 	LONG refs;
 	IInspectable *outer;
 	LONG exited;
+	struct raven_event_list suspending, resuming;
 	/* The ResourceDictionary the application assigns through put_Resources; a reference the application object owns. */
 	IInspectable *resources;
 };
@@ -139,10 +143,20 @@ STUB1(xaml_application1, application1_get_RequestedTheme)
 STUB1(xaml_application1, application1_put_RequestedTheme)
 STUB2(xaml_application1, application1_add_UnhandledException)
 STUB1(xaml_application1, application1_remove_UnhandledException)
-STUB2(xaml_application1, application1_add_Suspending)
-STUB1(xaml_application1, application1_remove_Suspending)
-STUB2(xaml_application1, application1_add_Resuming)
-STUB1(xaml_application1, application1_remove_Resuming)
+#define APPLICATION_EVENT(NAME, FIELD) \
+	static HRESULT WINAPI application1_add_##NAME(xaml_application1 *iface, uint64_t handler, uint64_t token) \
+	{ \
+		return raven_event_add(&((struct application1_part *)iface)->owner->FIELD, (IUnknown *)(uintptr_t)handler, \
+			(EventRegistrationToken *)(uintptr_t)token); \
+	} \
+	static HRESULT WINAPI application1_remove_##NAME(xaml_application1 *iface, uint64_t token) \
+	{ \
+		EventRegistrationToken value; \
+		value.value = (INT64)token; \
+		return raven_event_remove(&((struct application1_part *)iface)->owner->FIELD, value); \
+	}
+APPLICATION_EVENT(Suspending, suspending)
+APPLICATION_EVENT(Resuming, resuming)
 STUB1(xaml_application2, application2_get_FocusVisualKind)
 STUB1(xaml_application2, application2_put_FocusVisualKind)
 STUB1(xaml_application2, application2_get_RequiresPointerMode)
@@ -166,8 +180,10 @@ static ULONG application_release(struct application *self)
 {
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
-		if (self->outer)
-			IInspectable_Release(self->outer);
+		raven_event_close(&self->suspending);
+		raven_event_close(&self->resuming);
+		DeleteCriticalSection(&self->suspending.lock);
+		DeleteCriticalSection(&self->resuming.lock);
 		if (self->resources)
 			IInspectable_Release(self->resources);
 		FREE(self);
@@ -176,26 +192,35 @@ static ULONG application_release(struct application *self)
 	return (ULONG)refs;
 }
 
-static HRESULT application_query(struct application *self, REFIID iid, void **out)
+static HRESULT application_inner_query(struct application *self, REFIID iid, void **out)
 {
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
-		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication))
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable)) {
+		*out = self->outer ? (void *)&self->inner : (void *)&self->first;
+		application_addref(self);
+		return S_OK;
+	} else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication))
 		*out = &self->first;
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication2))
 		*out = &self->second;
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication3))
 		*out = &self->third;
-	else if (self->outer) {
-		/* Aggregation: the interfaces the base object does not carry belong to the composed application the runtime built
-		 * around it. The engine reaches the app's IXamlMetadataProvider this way. */
-		return ((IInspectable *)self->outer)->lpVtbl->QueryInterface(self->outer, iid, out);
-	} else
+	else
 		return E_NOINTERFACE;
-	application_addref(self);
+	if (self->outer)
+		IInspectable_AddRef(self->outer);
+	else
+		application_addref(self);
 	return S_OK;
+}
+
+static HRESULT application_query(struct application *self, REFIID iid, void **out)
+{
+	if (self->outer)
+		return IInspectable_QueryInterface(self->outer, iid, out);
+	return application_inner_query(self, iid, out);
 }
 
 static HRESULT WINAPI application1_query(xaml_application1 *iface, REFIID iid, void **out)
@@ -213,12 +238,14 @@ static HRESULT WINAPI application3_query(xaml_application3 *iface, REFIID iid, v
 	return application_query(((struct application3_part *)iface)->owner, iid, out);
 }
 
-static ULONG WINAPI application1_addref(xaml_application1 *iface) { return application_addref(((struct application1_part *)iface)->owner); }
-static ULONG WINAPI application2_addref(xaml_application2 *iface) { return application_addref(((struct application2_part *)iface)->owner); }
-static ULONG WINAPI application3_addref(xaml_application3 *iface) { return application_addref(((struct application3_part *)iface)->owner); }
-static ULONG WINAPI application1_release(xaml_application1 *iface) { return application_release(((struct application1_part *)iface)->owner); }
-static ULONG WINAPI application2_release(xaml_application2 *iface) { return application_release(((struct application2_part *)iface)->owner); }
-static ULONG WINAPI application3_release(xaml_application3 *iface) { return application_release(((struct application3_part *)iface)->owner); }
+static ULONG application_interface_addref(struct application *self) { return self->outer ? IInspectable_AddRef(self->outer) : application_addref(self); }
+static ULONG application_interface_release(struct application *self) { return self->outer ? IInspectable_Release(self->outer) : application_release(self); }
+static ULONG WINAPI application1_addref(xaml_application1 *iface) { return application_interface_addref(((struct application1_part *)iface)->owner); }
+static ULONG WINAPI application2_addref(xaml_application2 *iface) { return application_interface_addref(((struct application2_part *)iface)->owner); }
+static ULONG WINAPI application3_addref(xaml_application3 *iface) { return application_interface_addref(((struct application3_part *)iface)->owner); }
+static ULONG WINAPI application1_release(xaml_application1 *iface) { return application_interface_release(((struct application1_part *)iface)->owner); }
+static ULONG WINAPI application2_release(xaml_application2 *iface) { return application_interface_release(((struct application2_part *)iface)->owner); }
+static ULONG WINAPI application3_release(xaml_application3 *iface) { return application_interface_release(((struct application3_part *)iface)->owner); }
 
 static HRESULT WINAPI application1_iids(xaml_application1 *iface, ULONG *count, IID **iids)
 {
@@ -329,6 +356,20 @@ static const __x_ABI_CWindows_CUI_CXaml_CIApplication3Vtbl application3_table = 
 	.put_HighContrastAdjustment = application3_put_HighContrastAdjustment,
 };
 
+static HRESULT WINAPI inner_query(IInspectable *iface, REFIID iid, void **out)
+{
+	return application_inner_query(((struct application_inner_part *)iface)->owner, iid, out);
+}
+static ULONG WINAPI inner_addref(IInspectable *iface) { return application_addref(((struct application_inner_part *)iface)->owner); }
+static ULONG WINAPI inner_release(IInspectable *iface) { return application_release(((struct application_inner_part *)iface)->owner); }
+static HRESULT WINAPI inner_iids(IInspectable *iface, ULONG *count, IID **iids) { (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI inner_name(IInspectable *iface, HSTRING *name) { (void)iface; return runtime_class_name(name); }
+static HRESULT WINAPI inner_trust(IInspectable *iface, TrustLevel *level) { (void)iface; return inspectable_trust(level); }
+static const IInspectableVtbl inner_table = {
+	.QueryInterface = inner_query, .AddRef = inner_addref, .Release = inner_release,
+	.GetIids = inner_iids, .GetRuntimeClassName = inner_name, .GetTrustLevel = inner_trust,
+};
+
 static struct application *create_application(IInspectable *outer)
 {
 	struct application *application = ALLOC(sizeof *application);
@@ -340,10 +381,12 @@ static struct application *create_application(IInspectable *outer)
 	application->second.owner = application;
 	application->third.lpVtbl = &application3_table;
 	application->third.owner = application;
+	application->inner.lpVtbl = &inner_table;
+	application->inner.owner = application;
 	application->refs = 1;
 	application->outer = outer;
-	if (outer)
-		IInspectable_AddRef(outer);
+	InitializeCriticalSection(&application->suspending.lock);
+	InitializeCriticalSection(&application->resuming.lock);
 	InterlockedIncrement(&raven_xaml_objects);
 	return application;
 }
@@ -630,14 +673,15 @@ static HRESULT WINAPI factory_create(xaml_application_factory *iface, uint64_t o
 	if (!instance)
 		return E_POINTER;
 	*(void **)(uintptr_t)instance = NULL;
+	if (outer && !inner)
+		return E_POINTER;
 	if (inner)
 		*(void **)(uintptr_t)inner = NULL;
 	if (!(application = create_application((IInspectable *)(uintptr_t)outer)))
 		return E_OUTOFMEMORY;
-	/* shortcut: inner shares the base object's identity and lifetime, implement full aggregation when identity matters. */
-	if (outer && inner) {
-		application_addref(application);
-		*(void **)(uintptr_t)inner = &application->first;
+	if (outer) {
+		*(void **)(uintptr_t)inner = &application->inner;
+		IInspectable_AddRef(application->outer);
 	}
 	*(void **)(uintptr_t)instance = &application->first;
 	set_current(&application->first);

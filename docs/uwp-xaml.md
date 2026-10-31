@@ -1278,16 +1278,31 @@ the same day — see the two entries below. Evidence:
   `Windows.UI.Xaml.Application` and queries its composed inner object.
 - Application composition (2026-10-31, stage 7): `Application.Start` and
   the application's `CreateInstance` were reached, but the latter returned
-  a null inner object for a non-null outer. It now returns an independently
-  referenced base object through inner; the controls fixture queries and
-  releases it on x64 and x86. The inner currently shares the base object's
-  identity and lifetime, so this is not complete WinRT aggregation. With the
-  updated component, Shapr3D passes the former null read and originates
-  `0x80131508` (`Arg_IndexOutOfRangeException`); it later calls fail-fast
-  without an exception record. The origin trace reaches
-  `shapr3d.dll+0x1b768d4` through .NET Native's exception reporting; the
-  source of the index error remains to be established. The temporary
-  component used for this run was removed from the package prefix afterward.
+  a null inner object for a non-null outer. It now returns a nondelegating
+  inner; public interfaces delegate identity and lifetime to the outer, and
+  the inner borrows the outer to avoid a reference cycle. The controls fixture
+  checks both identities and release on x64 and x86. With the updated
+  component, Shapr3D passes the former null read and originates `0x80131508`
+  (`Arg_IndexOutOfRangeException`).
+- Native digits (2026-10-31, stage 7): instruction tracing found that .NET
+  reads ten digits from `LOCALE_SNATIVEDIGITS`; the en-US table returned `1`
+  rather than `0123456789`. The corrected shared table supplies both the
+  guest fast path and the host handler; `native_locale_cli` covers both,
+  length queries and insufficient buffers. Shapr3D proceeds to
+  `Application.add_Suspending`, which previously returned `E_NOTIMPL`.
+- Application lifecycle subscriptions (2026-10-31, stage 7): Suspending
+  and Resuming now retain handlers under distinct event tokens, support
+  removal and release remaining subscriptions with the application. The
+  desktop does not deliver suspend or resume lifecycle events yet.
+- The subsequent Shapr3D run passes lifecycle registration and reaches
+  `ApplicationData.LocalSettings`. Its getter returns `E_NOTIMPL`, which
+  .NET Native wraps in `TypeInitializationException` (`0x80131534`). A real
+  local settings container and values are the next observed startup need.
+- XBF input bounds (2026-10-31, stage 3): the loader validates metadata
+  and declared node-stream extents, variable-length values, truncated
+  operands and scope depth before returning a tree. Fixtures cover malformed
+  documents and declare node sizes including their substream tables, as in
+  the real `App.xbf`.
 
 ## Performance rules
 
@@ -1426,17 +1441,12 @@ remain passing after the trial implementation was removed.
    Done: provider resolution through `Application.Current` (see the 2026-10-28
    section under stage 3), and `Grid`/`TextBlock`/`Button` with children,
    text and content so a compiled page builds a real tree.
-   Next: apply the remaining node property forms against the element classes,
-   and give the tree its layout and rendering path (composition stage).
-   XBF-declared templates through the loader path and ContentPresenter
-   support landed the same day (see those entries); remaining there:
-   stable-index references in the type/property tables, and generalizing
-   the presenter beyond the button path. Stable-index references for
-   Template/ControlTemplate/ContentPresenter landed 2026-10-31; the
-   presenter bind rides the generic template-store path and
-   `ContentTemplate` 525 landed the same day (see the entries) —
-   remaining: further template-adjacent members (nested-template
-   application landed 2026-10-31, see that entry).
+   Next: apply the remaining node property forms and expand layout and
+   rendering beyond the implemented subset (see the stage 3 entries).
+   XBF-declared templates and ContentPresenter support include stable-index
+   references for Template/ControlTemplate/ContentPresenter, the generic
+   template-store path, `ContentTemplate` 525 and nested-template application.
+   Further template-adjacent members remain.
 4. ~~Extend DispatcherQueue with standalone controllers and deferred shutdown
    when required by app traces.~~ Done (2026-10-31): standalone controllers
    landed 2026-10-28 and deferred shutdown (ShutdownStarting deferrals
@@ -1465,8 +1475,3 @@ remain passing after the trial implementation was removed.
    that exist (`IActivatedEventArgs`, `ILaunchActivatedEventArgs`) are
    implemented; `IBackgroundActivatedEventArgs` was refused — no
    background activation is delivered.
-   Remaining there too: XBF-declared templates referencing
-   `Control.Template`/`ControlTemplate`/`ContentPresenter` by *stable
-   index* need entries in the stable property/type tables
-   (scripts/xbf-stable-indices.json) — only document-table references
-   resolve today (2026-10-31).

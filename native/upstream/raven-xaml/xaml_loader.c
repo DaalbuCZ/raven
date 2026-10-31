@@ -34,6 +34,7 @@
 struct reader {
 	const uint8_t *data;
 	size_t at, end;
+	int invalid;
 };
 
 struct metadata {
@@ -70,43 +71,63 @@ static uint64_t read_u64(const uint8_t *data)
 	return value;
 }
 
-static uint8_t next_byte(struct reader *r) { return r->at < r->end ? r->data[r->at++] : 0; }
+static uint8_t next_byte(struct reader *r)
+{
+	if (r->at >= r->end) {
+		r->invalid = 1;
+		return 0;
+	}
+	return r->data[r->at++];
+}
 static uint16_t next_u16(struct reader *r)
 {
-	uint16_t value = r->at + 2 <= r->end ? read_u16(r->data + r->at) : 0;
+	uint16_t value;
+	if (r->end - r->at < 2) {
+		r->invalid = 1;
+		return 0;
+	}
+	value = read_u16(r->data + r->at);
 	r->at += 2;
 	return value;
 }
 static int32_t next_i32(struct reader *r)
 {
-	int32_t value = r->at + 4 <= r->end ? (int32_t)read_u32(r->data + r->at) : 0;
+	int32_t value;
+	if (r->end - r->at < 4) {
+		r->invalid = 1;
+		return 0;
+	}
+	value = (int32_t)read_u32(r->data + r->at);
 	r->at += 4;
 	return value;
 }
 static double next_f32(struct reader *r)
 {
 	union { uint32_t bits; float number; } converter;
-	converter.bits = r->at + 4 <= r->end ? read_u32(r->data + r->at) : 0;
-	r->at += 4;
+	converter.bits = (uint32_t)next_i32(r);
 	return converter.number;
 }
 static int32_t next_vint(struct reader *r)
 {
-	int32_t value = 0;
-	int shift = 0;
-	for (;;) {
+	uint32_t value = 0;
+	for (int shift = 0; shift <= 28; shift += 7) {
 		const uint8_t byte = next_byte(r);
-		value |= (int32_t)(byte & 0x7F) << shift;
+		if (r->invalid || (shift == 28 && (byte & 0xf8))) {
+			r->invalid = 1;
+			return 0;
+		}
+		value |= (uint32_t)(byte & 0x7F) << shift;
 		if (!(byte & 0x80))
-			return value;
-		shift += 7;
+			return (int32_t)value;
 	}
+	r->invalid = 1;
+	return 0;
 }
 
 static HRESULT read_string_ref(struct reader *r, const WCHAR **text, UINT32 *length)
 {
 	const int32_t size = next_i32(r);
-	if (size < 0 || (size_t)size > (r->end - r->at) / 2)
+	if (r->invalid || size < 0 || (size_t)size > (r->end - r->at) / 2)
 		return E_INVALIDARG;
 	*text = (const WCHAR *)(const void *)(r->data + r->at);
 	*length = (UINT32)size;
@@ -136,17 +157,17 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 	m->size = size;
 	if (start + 56 > size)
 		return E_INVALIDARG;
-	for (int index = 0; index < 6; ++index)
+	for (int index = 0; index < 6; ++index) {
 		offsets[index] = read_u64(data + start + 8 + index * 8);
+		if (offsets[index] > size - start || size - start - (size_t)offsets[index] < 4)
+			return E_INVALIDARG;
+	}
 	m->strings = start + (size_t)offsets[0];
 	m->assemblies = start + (size_t)offsets[1];
 	m->namespaces = start + (size_t)offsets[2];
 	m->types = start + (size_t)offsets[3];
 	m->properties = start + (size_t)offsets[4];
 	m->xmlns = start + (size_t)offsets[5];
-	if (m->strings + 4 > size || m->assemblies + 4 > size || m->namespaces + 4 > size ||
-		m->types + 4 > size || m->properties + 4 > size || m->xmlns + 4 > size)
-		return E_INVALIDARG;
 	m->string_count = read_u32(data + m->strings);
 	m->assembly_count = read_u32(data + m->assemblies);
 	m->namespace_count = read_u32(data + m->namespaces);
@@ -164,14 +185,15 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 		position = m->strings + 4;
 		for (uint32_t index = 0; index < m->string_count; ++index) {
 			int32_t length;
-			if (position + 4 > size)
+			if (position > size || size - position < 4)
 				return E_INVALIDARG;
 			length = (int32_t)read_u32(data + position);
-			if (length < 0 || (size_t)length > (size - position) / 2)
+			if (length < 0 || (size_t)length > (size - position - 4) / 2)
 				return E_INVALIDARG;
-			position += 4 + (size_t)length * 2 + (terminated ? 2 : 0);
-			if (position > size)
+			position += 4 + (size_t)length * 2;
+			if (terminated && size - position < 2)
 				return E_INVALIDARG;
+			position += terminated ? 2 : 0;
 		}
 		if (position == m->assemblies) {
 			m->null_terminated = terminated;
@@ -339,22 +361,28 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	case 3:
 		v->kind = value_float;
 		v->real = next_f32(r);
-		return S_OK;
+		return r->invalid ? E_INVALIDARG : S_OK;
 	case 4:
 		v->kind = value_integer;
 		v->integer = next_i32(r);
-		return S_OK;
+		return r->invalid ? E_INVALIDARG : S_OK;
 	case 5: {
 		const uint16_t reference = next_u16(r);
+		if (r->invalid)
+			return E_INVALIDARG;
 		if (reference & 0x8000)
 			return S_OK;
 		v->kind = value_string;
 		return metadata_string(m, reference, &v->text, &v->length);
 	}
 	case 6:
+		if (r->end - r->at < 16)
+			return E_INVALIDARG;
 		r->at += 16;
 		break;
 	case 7:
+		if (r->end - r->at < 8)
+			return E_INVALIDARG;
 		r->at += 8;
 		break;
 	case 8:
@@ -362,8 +390,7 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 		if (kind == 11)
 			next_u16(r);
 		v->kind = value_integer;
-		v->integer = (int32_t)(r->at + 4 <= r->end ? read_u32(r->data + r->at) : 0);
-		r->at += 4;
+		v->integer = next_i32(r);
 		break;
 	case 9:
 		v->kind = value_string;
@@ -373,7 +400,7 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	default:
 		return E_NOTIMPL;
 	}
-	return r->at <= r->end ? S_OK : E_INVALIDARG;
+	return r->invalid ? E_INVALIDARG : S_OK;
 }
 
 static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 length, const struct value *value)
@@ -414,7 +441,7 @@ struct scope {
 
 static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root)
 {
-	struct reader r = {m->data, begin, end};
+	struct reader r = {m->data, begin, end, 0};
 	struct scope stack[LOADER_DEPTH];
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
@@ -431,6 +458,9 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				stack[depth].deferred_name = NULL;
 				stack[depth].deferred_length = 0;
 				++depth;
+			} else {
+				status = E_INVALIDARG;
+				goto done;
 			}
 			break;
 		case 2: case 33: case 39: case 40:
@@ -457,6 +487,10 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const uint16_t reference = next_u16(&r);
 			IInspectable *object = NULL;
 			struct value value = {value_none, NULL, 0, 0, 0};
+			if (r.invalid || depth == LOADER_DEPTH) {
+				status = E_INVALIDARG;
+				goto done;
+			}
 			if (kind != 20) {
 				status = read_constant(&r, m, &value);
 				if (FAILED(status))
@@ -546,6 +580,10 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const uint16_t reference = next_u16(&r);
 			IInspectable *object = NULL;
 			struct value value = {value_none, NULL, 0, 0, 0};
+			if (r.invalid) {
+				status = E_INVALIDARG;
+				goto done;
+			}
 			if (kind != 23) {
 				status = read_constant(&r, m, &value);
 				if (FAILED(status))
@@ -613,7 +651,11 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const int32_t statics = next_vint(&r);
 			const int32_t themes = next_vint(&r);
 			(void)substream;
-			for (int32_t index = 0; index < statics + themes; ++index)
+			if (r.invalid || (uint64_t)statics + (uint64_t)themes > (r.end - r.at) / 2) {
+				status = E_INVALIDARG;
+				goto done;
+			}
+			for (uint64_t index = 0; index < (uint64_t)statics + (uint64_t)themes; ++index)
 				next_u16(&r);
 			break;
 		}
@@ -637,6 +679,10 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			status = E_NOTIMPL;
 			goto done;
 		}
+		if (r.invalid) {
+			status = E_INVALIDARG;
+			goto done;
+		}
 	}
 done:
 	/* The scopes unwind without their deferred applications: a failed document never half-applies the templates it
@@ -653,7 +699,7 @@ __declspec(dllexport) HRESULT WINAPI RavenXamlLoad(const void *data, uint32_t si
 {
 	const uint8_t *bytes = (const uint8_t *)data;
 	uint32_t metadata_size, node_size, count;
-	size_t table, substreams;
+	size_t table, node_end, substreams;
 	struct metadata metadata;
 	HRESULT status;
 	if (!root)
@@ -663,22 +709,30 @@ __declspec(dllexport) HRESULT WINAPI RavenXamlLoad(const void *data, uint32_t si
 		return E_INVALIDARG;
 	metadata_size = read_u32(bytes + 4);
 	node_size = read_u32(bytes + 8);
-	table = (size_t)12 + metadata_size;
-	if (table + 4 > size || (size_t)node_size > size - table)
+	if (metadata_size > size - 12)
 		return E_INVALIDARG;
-	status = metadata_parse(&metadata, bytes, size);
+	table = (size_t)12 + metadata_size;
+	if (node_size < 4 || (size_t)node_size > size - table)
+		return E_INVALIDARG;
+	node_end = table + node_size;
+	status = metadata_parse(&metadata, bytes, table);
 	if (FAILED(status))
 		return status;
 	count = read_u32(bytes + table);
-	substreams = table + 4 + (size_t)count * 8;
-	if (substreams > size)
+	if ((size_t)count > (node_end - table - 4) / 8)
 		return E_INVALIDARG;
+	substreams = table + 4 + (size_t)count * 8;
+	/* Validate every extent before creating any objects; a later invalid stream cannot leak the first root. */
 	for (uint32_t index = 0; index < count; ++index) {
-		const uint32_t node_offset = read_u32(bytes + table + 4 + index * 8);
-		const uint32_t line_offset = read_u32(bytes + table + 4 + index * 8 + 4);
-		const size_t begin = substreams + node_offset, end = substreams + line_offset;
-		if (end > size || begin > end)
+		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
+		const uint32_t line_offset = read_u32(bytes + table + 4 + (size_t)index * 8 + 4);
+		if (node_offset > line_offset || line_offset > node_end - substreams)
 			return E_INVALIDARG;
+	}
+	for (uint32_t index = 0; index < count; ++index) {
+		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
+		const uint32_t line_offset = read_u32(bytes + table + 4 + (size_t)index * 8 + 4);
+		const size_t begin = substreams + node_offset, end = substreams + line_offset;
 		status = load_nodes(&metadata, begin, end, root);
 		if (FAILED(status)) {
 			if (*root) {

@@ -316,7 +316,7 @@ static size_t build_input_document(unsigned char *doc)
 	doc[at++] = 0x02;                                     /* pop the red grid */
 	doc[at++] = 0x02;                                     /* pop the blue grid */
 	const UINT32 nodes = (UINT32)(at - 168);
-	put32(doc, 8, nodes);
+	put32(doc, 8, nodes + 12);
 	put32(doc, 164, nodes);
 	return at;
 }

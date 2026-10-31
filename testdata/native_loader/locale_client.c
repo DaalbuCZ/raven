@@ -115,5 +115,12 @@ int raven_entry(void)
 	if (ResolveLocaleName(L"zz", name, LOCALE_NAME_MAX_LENGTH) || GetLastError() != ERROR_INVALID_PARAMETER) return 46;
 	SetLastError(0);
 	if (ResolveLocaleName(L"en", name, 3) || GetLastError() != ERROR_INSUFFICIENT_BUFFER) return 47;
+	/* Native digits are a ten-character sequence, not the number-substitution mode. The null-buffer length and short-buffer
+	 * checks reach the host handler; the full buffers exercise the guest-side fast path for both locale APIs. */
+	if (GetLocaleInfoEx(L"en-US", LOCALE_SNATIVEDIGITS, NULL, 0) != 11) return 48;
+	if (GetLocaleInfoEx(L"en-US", LOCALE_SNATIVEDIGITS, text, 64) != 11 || !same(text, L"0123456789")) return 49;
+	if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SNATIVEDIGITS, text, 64) != 11 || !same(text, L"0123456789")) return 50;
+	SetLastError(0);
+	if (GetLocaleInfoEx(L"en-US", LOCALE_SNATIVEDIGITS, text, 10) || GetLastError() != ERROR_INSUFFICIENT_BUFFER) return 51;
 	return 0;
 }

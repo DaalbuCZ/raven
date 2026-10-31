@@ -121,7 +121,7 @@ static size_t build_stable_template_document(unsigned char *doc)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 144);
-	put32(doc, 8, 40);
+	put32(doc, 8, 52);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 0x78);
@@ -184,7 +184,7 @@ static size_t build_stable_content_template_document(unsigned char *doc)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 144);
-	put32(doc, 8, 46);
+	put32(doc, 8, 58);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 0x78);
@@ -230,7 +230,7 @@ static size_t build_stable_flow_document(unsigned char *doc)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 144);
-	put32(doc, 8, 65);
+	put32(doc, 8, 77);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 0x78);
@@ -321,10 +321,27 @@ int raven_entry(void)
 	if (statics->lpVtbl->get_Current(statics, (uint64_t)(uintptr_t)&current) != S_OK || !current) return 13;
 	if (current != application) return 14;
 	current->lpVtbl->Release(current);
+	/* Both events retain each registration, remove only their own token, and release outstanding handlers on destruction. */
+	struct callback lifecycle = {&callback_table, 1, 0, 0};
+	uint64_t suspend_token = 0, resume_token = 0, other_token = 0;
+	if (application->lpVtbl->add_Suspending(application, 0, (uint64_t)(uintptr_t)&suspend_token) != E_POINTER ||
+		application->lpVtbl->add_Resuming(application, (uint64_t)(uintptr_t)&lifecycle, 0) != E_POINTER) return 101;
+	if (application->lpVtbl->add_Suspending(application, (uint64_t)(uintptr_t)&lifecycle,
+		(uint64_t)(uintptr_t)&suspend_token) != S_OK || !suspend_token || lifecycle.refs != 2) return 102;
+	if (application->lpVtbl->add_Resuming(application, (uint64_t)(uintptr_t)&lifecycle,
+		(uint64_t)(uintptr_t)&resume_token) != S_OK || !resume_token || resume_token == suspend_token || lifecycle.refs != 3) return 103;
+	if (application->lpVtbl->remove_Resuming(application, suspend_token) != S_OK || lifecycle.refs != 3 ||
+		application->lpVtbl->remove_Suspending(application, suspend_token) != S_OK || lifecycle.refs != 2 ||
+		application->lpVtbl->remove_Suspending(application, suspend_token) != S_OK || lifecycle.refs != 2) return 104;
+	if (application->lpVtbl->add_Suspending(application, (uint64_t)(uintptr_t)&lifecycle,
+		(uint64_t)(uintptr_t)&other_token) != S_OK || !other_token || lifecycle.refs != 3) return 105;
 	latest->lpVtbl->Release(latest);
 	later->lpVtbl->Release(later);
 	application->lpVtbl->Release(application);
 	((IUnknown *)instance)->lpVtbl->Release((IUnknown *)instance);
+	IInspectable *replacement = NULL;
+	if (activation->lpVtbl->ActivateInstance(activation, &replacement) != S_OK || !replacement || lifecycle.refs != 1) return 106;
+	replacement->lpVtbl->Release(replacement);
 	factory->lpVtbl->Release(factory);
 	statics->lpVtbl->Release(statics);
 	activation->lpVtbl->Release(activation);

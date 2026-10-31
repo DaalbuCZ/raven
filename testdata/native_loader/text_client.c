@@ -181,7 +181,7 @@ static size_t build_text_document(unsigned char *doc)
 	doc[at++] = 0x02;                                     /* pop the text block */
 	doc[at++] = 0x02;                                     /* pop the blue grid */
 	const UINT32 nodes = (UINT32)(at - 168);
-	put32(doc, 8, nodes);
+	put32(doc, 8, nodes + 12);
 	put32(doc, 164, nodes);
 	return at;
 }
@@ -432,7 +432,7 @@ int raven_entry(void)
 		extent_document[at++] = 0x02;                         /* pop the red grid */
 		extent_document[at++] = 0x02;                         /* pop the blue grid */
 		const UINT32 extent_nodes = (UINT32)(at - 168);
-		put32(extent_document, 8, extent_nodes);
+		put32(extent_document, 8, extent_nodes + 12);
 		put32(extent_document, 164, extent_nodes);
 		if (load(extent_document, (uint32_t)at, &extent_page) != S_OK || !extent_page) return 70;
 		IInspectable *extent_grid_object = NULL;

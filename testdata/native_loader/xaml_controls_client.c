@@ -291,7 +291,7 @@ static size_t build_tree_document(unsigned char *doc)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 144);
-	put32(doc, 8, 35);
+	put32(doc, 8, 47);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 0x78);
@@ -339,7 +339,7 @@ static size_t build_text_document(unsigned char *doc)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 144);
-	put32(doc, 8, 38);
+	put32(doc, 8, 50);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 0x78);
@@ -389,7 +389,7 @@ static size_t build_content_template_document(unsigned char *doc)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 144);
-	put32(doc, 8, 32);
+	put32(doc, 8, 44);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 0x78);
@@ -448,7 +448,7 @@ static size_t build_provider_document(unsigned char *doc)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 216);
-	put32(doc, 8, 3);
+	put32(doc, 8, 15);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 120);
@@ -504,7 +504,7 @@ static size_t build_template_document(unsigned char *doc)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 332);
-	put32(doc, 8, 40);
+	put32(doc, 8, 52);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 120);
@@ -603,7 +603,9 @@ struct fixture_provider {
 	const markup_providerVtbl *lpVtbl;
 	LONG refs;
 	struct fixture_type *type;
+	IInspectable *inner;
 };
+static ULONG fixture_inner_remaining = (ULONG)-1;
 
 static HRESULT WINAPI fixture_marker_query(IInspectable *iface, REFIID iid, void **out)
 {
@@ -829,13 +831,17 @@ static struct fixture_type *fixture_type_create(const WCHAR *name, IInspectable 
 
 static HRESULT WINAPI fixture_provider_query(markup_provider *iface, REFIID iid, void **out)
 {
+	struct fixture_provider *self = (struct fixture_provider *)iface;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
 	if (!IsEqualGUID(iid, &IID_IUnknown) && !IsEqualGUID(iid, &IID_IInspectable) &&
-		!IsEqualGUID(iid, &IID__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider))
+		!IsEqualGUID(iid, &IID__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider)) {
+		if (self->inner)
+			return self->inner->lpVtbl->QueryInterface(self->inner, iid, out);
 		return E_NOINTERFACE;
-	InterlockedIncrement(&((struct fixture_provider *)iface)->refs);
+	}
+	InterlockedIncrement(&self->refs);
 	*out = iface;
 	return S_OK;
 }
@@ -850,6 +856,8 @@ static ULONG WINAPI fixture_provider_release(markup_provider *iface)
 	struct fixture_provider *self = (struct fixture_provider *)iface;
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		if (self->inner)
+			fixture_inner_remaining = self->inner->lpVtbl->Release(self->inner);
 		if (self->type)
 			self->type->lpVtbl->Release((markup_type *)self->type);
 		HeapFree(GetProcessHeap(), 0, self);
@@ -1001,6 +1009,39 @@ int raven_entry(void)
 	HMODULE component = LoadLibraryW(L"raven-xaml.dll");
 	load_function load = component ? (load_function)GetProcAddress(component, "RavenXamlLoad") : NULL;
 	if (!load) return 18;
+	/* Malformed XBF must fail without returning a partial tree. */
+	unsigned char bad_fixture[256];
+	IInspectable *bad_root = NULL;
+	build_fixture(bad_fixture, 509);
+	put32(bad_fixture, 164, 2); /* incomplete CreateType reference */
+	if (load(bad_fixture, 172, &bad_root) != E_INVALIDARG || bad_root) return 700;
+	build_fixture(bad_fixture, 509);
+	bad_fixture[168] = 13; bad_fixture[169] = 9; bad_fixture[170] = 1; bad_fixture[171] = 0;
+	if (load(bad_fixture, 172, &bad_root) != E_INVALIDARG || bad_root) return 701;
+	build_fixture(bad_fixture, 509);
+	bad_fixture[168] = 17; bad_fixture[169] = 0; bad_fixture[170] = 0; bad_fixture[171] = 0x80;
+	if (load(bad_fixture, 172, &bad_root) != E_INVALIDARG || bad_root) return 702;
+	build_fixture(bad_fixture, 509);
+	put64(bad_fixture, 20, UINT64_MAX); /* metadata offset wraps on 32- and 64-bit hosts */
+	if (load(bad_fixture, 172, &bad_root) != E_INVALIDARG || bad_root) return 703;
+	build_fixture(bad_fixture, 509);
+	put32(bad_fixture, 8, 77); put32(bad_fixture, 164, 65);
+	for (size_t index = 0; index < 65; ++index) bad_fixture[168 + index] = 1;
+	if (load(bad_fixture, 233, &bad_root) != E_INVALIDARG || bad_root) return 704;
+	build_fixture(bad_fixture, 509);
+	put32(bad_fixture, 8, 24); put32(bad_fixture, 156, 2);
+	put32(bad_fixture, 160, 0); put32(bad_fixture, 164, 4);
+	put32(bad_fixture, 168, 4); put32(bad_fixture, 172, 100);
+	bad_fixture[176] = 20; bad_fixture[177] = 0xfd; bad_fixture[178] = 0x81; bad_fixture[179] = 2;
+	if (load(bad_fixture, 180, &bad_root) != E_INVALIDARG || bad_root) return 705;
+	build_fixture(bad_fixture, 509);
+	put32(bad_fixture, 8, 12); /* bytes beyond the declared node section are not node data */
+	if (load(bad_fixture, 172, &bad_root) != E_INVALIDARG || bad_root) return 706;
+	build_fixture(bad_fixture, 509);
+	put32(bad_fixture, 8, 20); put32(bad_fixture, 164, 8);
+	bad_fixture[168] = 17; bad_fixture[169] = 0; bad_fixture[170] = 0;
+	for (size_t index = 171; index < 176; ++index) bad_fixture[index] = 0xff;
+	if (load(bad_fixture, 176, &bad_root) != E_INVALIDARG || bad_root) return 707;
 	unsigned char fixture[172];
 	IInspectable *loaded = NULL;
 	if (load(fixture, (uint32_t)build_fixture(fixture, 509), &loaded) != S_OK || !loaded) return 19;
@@ -1509,13 +1550,24 @@ int raven_entry(void)
 		(void **)&app_factory) != S_OK || !app_factory) return 676;
 	void *app_inner = NULL;
 	IInspectable *app_instance = NULL;
+	IInspectable *invalid_instance = (IInspectable *)1;
+	if (app_factory->lpVtbl->CreateInstance(app_factory, (uint64_t)(uintptr_t)provider, 0,
+		(uint64_t)(uintptr_t)&invalid_instance) != E_POINTER || invalid_instance) return 691;
 	if (app_factory->lpVtbl->CreateInstance(app_factory, (uint64_t)(uintptr_t)provider,
 		(uint64_t)(uintptr_t)&app_inner, (uint64_t)(uintptr_t)&app_instance) != S_OK || !app_instance || !app_inner) return 677;
+	provider->inner = app_inner;
+	IUnknown *inner_identity = NULL;
+	if (((IInspectable *)app_inner)->lpVtbl->QueryInterface((IInspectable *)app_inner, &IID_IUnknown,
+		(void **)&inner_identity) != S_OK || (void *)inner_identity != app_inner || (void *)inner_identity == (void *)provider) return 690;
+	inner_identity->lpVtbl->Release(inner_identity);
 	IInspectable *inner_application = NULL;
 	if (((IInspectable *)app_inner)->lpVtbl->QueryInterface((IInspectable *)app_inner,
 		&IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&inner_application) != S_OK || !inner_application) return 686;
+	IUnknown *identity = NULL;
+	if (inner_application->lpVtbl->QueryInterface(inner_application, &IID_IUnknown, (void **)&identity) != S_OK ||
+		(void *)identity != (void *)provider) return 687;
+	identity->lpVtbl->Release(identity);
 	inner_application->lpVtbl->Release(inner_application);
-	((IInspectable *)app_inner)->lpVtbl->Release((IInspectable *)app_inner);
 	markup_provider *resolved = NULL;
 	if (app_instance->lpVtbl->QueryInterface(app_instance, &IID__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider,
 		(void **)&resolved) != S_OK || !resolved) return 678;
@@ -1545,10 +1597,14 @@ int raven_entry(void)
 		!navigated_app) return 686;
 	WindowsDeleteString(app_page_key);
 	app_instance->lpVtbl->Release(app_instance);
+	/* Replacing Current releases the component's reference to the outer. Its last release must also free its inner. */
+	IInspectable *replacement = NULL;
+	if (app_activation->lpVtbl->ActivateInstance(app_activation, &replacement) != S_OK || !replacement) return 688;
+	replacement->lpVtbl->Release(replacement);
+	if (provider->lpVtbl->Release((markup_provider *)provider) != 0 || fixture_inner_remaining != 0) return 689;
 	app_factory->lpVtbl->Release(app_factory);
 	app_activation->lpVtbl->Release(app_activation);
 	WindowsDeleteString(app_key);
-	provider->lpVtbl->Release((markup_provider *)provider);
 	fixture_type->lpVtbl->Release((markup_type *)fixture_type);
 	marker->lpVtbl->Release(marker);
 

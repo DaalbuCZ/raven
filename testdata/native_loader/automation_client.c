@@ -189,7 +189,7 @@ static size_t build_automation_document(unsigned char *doc)
 	doc[at++] = 0x02;                                     /* pop the button */
 	doc[at++] = 0x02;                                     /* pop the root grid */
 	const UINT32 nodes = (UINT32)(at - 168);
-	put32(doc, 8, nodes);
+	put32(doc, 8, nodes + 12);
 	put32(doc, 164, nodes);
 	return at;
 }
