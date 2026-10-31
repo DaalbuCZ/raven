@@ -447,6 +447,43 @@ built for both.
   order log asserts child-parent-grandparent per event kind, the
   click-once round, the not-hovered release and the non-bubbling hover
   events.
+- CoreCursor (2026-10-31, stage 4): `Windows.UI.Core.CoreCursor` is a
+  runtime class of the component — activation answers the default arrow,
+  and the factory's `CreateCursor` builds any built-in type (an
+  out-of-range type `E_INVALIDARG`, `Custom` `E_NOTIMPL`: a custom cursor
+  loads a bitmap the emulated desktop has no source for; mingw's
+  `ICoreCursor` surfaces `get_Id`/`get_Type`, and the 32x32 standard size
+  of the built-ins is documented where the class is defined). The catalog
+  routes the class name to the component. The CoreWindow's
+  `get_PointerCursor`/`put_PointerCursor` are real at exact signatures: the
+  put stores the application's object (AddRef, swapped under the window
+  lock), a NULL put restores the platform default, and both answer
+  `RO_E_CLOSED` after close. The pointer snapshot's `KeyModifiers` and the
+  `IPointerPointProperties` set were verified already honest from the
+  sample; `GetIntermediatePoints` stays unimplemented — the desktop input
+  has no history buffer, so the snapshot carries exactly one point.
+  `native_core_desktop_x64`/`_x32` (and the parallel variants) drive the
+  cursor round through `RoGetActivationFactory`: activation types, factory
+  construction and rejection, the window default, put/identity/NULL-put
+  restore.
+- Styled setters on the tree (2026-10-31, stage 4): `put_Style` applies on
+  the element classes with real settable state — each setter routes through
+  the same store the loader and the direct property puts use, so the pixel
+  follows a styled value the way it follows a `put_Background`, and the
+  re-render comes from the same hook; the render-readback override that
+  re-applied setters at every paint is gone. `BasedOn` walks the chain
+  (base setters first, the style's own after, derived wins; a depth cap of
+  32 guards cycles), and the whole chain validates in a check-only pass
+  before anything mutates, so a wrong-kind value fails the put with
+  `E_INVALIDARG` and leaves the element untouched; a property the engine
+  has no storage for is skipped, since without DependencyProperty it cannot
+  tell a name it does not store from one it will. Replacement re-applies
+  and does not revert — a property the old style set and the new one skips
+  stays where the old one left it (documented). Templates,
+  DependencyProperty, TargetType checking and unmerge stay unimplemented.
+  `native_style_x64`/`_x32` drive the styled grid and text block through
+  pixels and re-measured runs, the BasedOn precedence round, the
+  wrong-kind failure rounds and the `get_Style` round-trip.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
