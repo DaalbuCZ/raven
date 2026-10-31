@@ -752,13 +752,49 @@ built for both.
   only engine element with a slot today, and a future kind needs only a
   dispatch case. `ContentPresenter.ContentTemplate` (stable 525, verified
   by the established index convention) is stored on the presenter through
-  the same routing — **storage only**: the render still resolves the
-  templated parent's Content, and binding the presenters inside a content
-  template waits for the nested-template stage rather than promising a
-  render the engine cannot deliver. `native_xaml_application_x64`/`_x32`
+  the same routing and now applies — see the nested-template entry below.
+  `native_xaml_application_x64`/`_x32`
   load a stable-index XBF declaring a template under property 525 and
   verify the stored template's identity and root, and
   `native_style_x64`/`_x32` re-cover the generalized bind pixel-exactly.
+- Nested-template application (2026-10-31, stage 4): a stored content
+  template now applies, riding the existing machinery with no second hook:
+  the presenter's `template_child` hook — the same one the button's
+  template root answers from — resolves the templated parent's Content
+  through the existing `IContentControl` path and, when a content template
+  is stored, answers the content template's root in both measure and
+  paint. The content template's own presenters bind lazily at resolution
+  time with the **resolved Content object** as the walk's owner (not the
+  templated control) — the same walk, the same non-owning back-pointer,
+  idempotent and self-correcting when Content changes. Content NULL
+  renders nothing; content that is not a ContentControl or is a
+  non-element value stops the walk and inner presenters answer nothing
+  rather than something invented. Unbind-on-replace/clear is cascaded: a
+  replaced or cleared template leaves no bound back-pointer behind,
+  including the stored content template's inner presenters, and the store
+  raises `raven_render_changed()`. Pixel-proved in
+  `native_style_x64`/`_x32` (green-over-blue direct content becomes
+  green-over-red flowing through the content template's tree; after
+  `put_Template(NULL)` both presenters answer nothing and content renders
+  directly) and covered in `native_xaml_application_x64`/`_x32` (an inner
+  presenter resolves the content button's Content, proving binding to the
+  content object).
+- Stable-index coverage (2026-10-31, stage 3): a full inventory of what
+  the loader/appliers resolve end-to-end registered three more properties
+  — `ContentControl.ContentTemplate` (833), `TextElement.FontSize` (251),
+  `TextElement.Foreground` (255) — all verified against the established
+  index convention and exercised through fully stable-index XBFs
+  (`native_xaml_controls_x64`/`_x32` codes 4000–4116): a deferred
+  content-template application with a TextBlock root, and a stable-only
+  text document proving `get_FontSize` reads back 21.5 against the 14
+  default. All 33 pre-existing registrations were re-verified against
+  `scripts/xbf-stable-indices.json`. Honest refusals (no end-to-end
+  resolution): presenter Content/FontSize/Foreground (no such surfaces),
+  Border/StackPanel/Canvas types (no factories), HorizontalAlignment/
+  Margin/VerticalAlignment/Style (no appliers), enum types, and
+  RowDefinition.Height/ColumnDefinition.Width (the vtables exist but the
+  loader's float dispatch does not route Width/Height to definitions —
+  the next candidate unlock).
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -1254,8 +1290,8 @@ remain passing after the trial implementation was removed.
    Template/ControlTemplate/ContentPresenter landed 2026-10-31; the
    presenter bind rides the generic template-store path and
    `ContentTemplate` 525 landed the same day (see the entries) —
-   remaining: nested-template application (content templates are stored
-   only) and further template-adjacent members.
+   remaining: further template-adjacent members (nested-template
+   application landed 2026-10-31, see that entry).
 4. ~~Extend DispatcherQueue with standalone controllers and deferred shutdown
    when required by app traces.~~ Done (2026-10-31): standalone controllers
    landed 2026-10-28 and deferred shutdown (ShutdownStarting deferrals
