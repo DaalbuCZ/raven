@@ -11,18 +11,28 @@
  *
  *   - PointerEntered/Exited fire per element when the pointer starts or stops being over it. Every recorded hit-testable
  *     element containing the position hovers — ancestry and occlusion between siblings are not modeled, because the flat
- *     projection has no tree to walk; moving onto a button therefore also moves onto the grid behind it.
- *   - PointerPressed and PointerWheelChanged go to the topmost element under the pointer.
+ *     projection has no tree to walk; moving onto a button therefore also moves onto the grid behind it. They never bubble:
+ *     each element's own transition is its own delivery.
+ *   - PointerPressed and PointerWheelChanged go to the topmost element under the pointer, then bubble: every recorded
+ *     element that also contains the position receives its instance handlers, in reverse paint order (the immediate parent
+ *     first, the root last). Under the flat projection the containment chain stands in for ancestry.
  *   - PointerReleased goes to the pressed element even when the pointer moved away — the minimal capture semantics of this
  *     stage: the press holds the target until the release, and the release checks its own position against the pressed
  *     element's bounds (the ClickMode.Release contract). Without a pressed element the release goes to the element under
- *     the pointer.
- *   - PointerCaptureLost goes to the pressed element, which also ends the press.
+ *     the pointer. The release bubbles through the pressed element's chain read from the hover set; a pressed element that
+ *     no longer hovers has no walkable chain (the flat geometry has no tree), so it receives the release alone.
+ *   - PointerCaptureLost goes to the pressed element, which also ends the press. It never bubbles.
  *
- * Delivery goes through the element classes (raven_xaml_element_pointer), which run the element's own behavior and then the
- * application's handlers; a failing handler never breaks the routing. The subscription and the geometry end when the hosted
- * tree is replaced or the CoreWindow closes, which the routing observes through the window's Closed event. Everything here
- * runs on the hosting UI thread — the render pass and the routed events both do — so there is no lock between them. */
+ * Bubbling runs the instance handlers only (raven_xaml_element_bubble) — the element's own behavior is the target's alone,
+ * so a button under another button's handler must not click twice. The routed arguments are the CoreWindow's
+ * PointerEventArgs snapshot handed across as PointerRoutedEventArgs; that snapshot carries no Handled property, so an
+ * application handler cannot stop a bubbling pass — every element of the chain receives the event, whatever the handlers
+ * return or fail with.
+ *
+ * Delivery goes through the element classes (raven_xaml_element_pointer, raven_xaml_element_bubble); a failing handler never
+ * breaks the routing. The subscription and the geometry end when the hosted tree is replaced or the CoreWindow closes, which
+ * the routing observes through the window's Closed event. Everything here runs on the hosting UI thread — the render pass
+ * and the routed events both do — so there is no lock between them. */
 #define INITGUID
 #define CONST_VTABLE
 #define CINTERFACE
@@ -193,6 +203,79 @@ static void hover_update(struct input_root *root, const point1 *position, pointe
 	root->hover_count = fresh_count;
 }
 
+/* The bubbling pass: the chain members receive the instance handlers only (raven_xaml_element_bubble), immediate parent
+ * first, each held by its own reference across the deliveries because a handler can re-render — and so clear the recorded
+ * geometry the chain was read from — at any point. The routed args carry no Handled property, so the pass cannot be stopped:
+ * a handler's return value or failure ends nothing, the whole chain runs unless the root itself dies mid-pass. */
+static void input_bubble_chain(enum raven_element_pointer kind, IUnknown **chain, UINT32 count, pointer_args1 *args,
+	LONG generation)
+{
+	for (UINT32 index = 0; index < count; ++index) {
+		raven_xaml_element_bubble((IInspectable *)chain[index], kind, args);
+		if (input_generation != generation)
+			break; /* the root died mid-pass; the chain references are the walker's own and released there */
+	}
+}
+
+/* The bubbling chain of an event whose target is the element under the pointer (pressed, wheel, and a release without a
+ * pressed element): the recorded elements that also contain the position, taken in reverse paint order — the first
+ * containing element after the target is its immediate parent, the last is the root. The flat projection has no tree to
+ * walk, so the containment chain stands in for ancestry: an overlapping sibling painted before the target would receive
+ * the pass too, the same trade the hover set already makes. */
+static void input_bubble_geometry(struct input_root *root, const IUnknown *target, enum raven_element_pointer kind,
+	const point1 *position, pointer_args1 *args, LONG generation)
+{
+	IUnknown **chain = NULL;
+	UINT32 count = 0;
+	int past_target = FALSE;
+	if (!root->count)
+		return;
+	chain = ALLOC((size_t)root->count * sizeof *chain);
+	if (!chain)
+		return; /* no chain, no pass: the target's own delivery already ran */
+	for (UINT32 index = root->count; index > 0; --index) {
+		struct input_hit *hit = &root->hits[index - 1];
+		if (!hit->element || !hit_contains(hit, position) || !hit_visible(hit))
+			continue;
+		if (!past_target) {
+			/* The target delivered already; the chain starts at its immediate parent. */
+			if (hit->element == target)
+				past_target = TRUE;
+			continue;
+		}
+		IUnknown_AddRef(hit->element);
+		chain[count++] = hit->element;
+	}
+	input_bubble_chain(kind, chain, count, args, generation);
+	for (UINT32 index = 0; index < count; ++index)
+		IUnknown_Release(chain[index]);
+	FREE(chain);
+}
+
+/* The bubbling chain of a release of a pressed element: read from the hover set, which holds every element containing the
+ * position in paint order, so the members before the pressed element are its chain, closest first. A pressed element that
+ * no longer hovers has no walkable chain — the flat geometry has no tree to walk — so it receives the release alone and
+ * nothing bubbles. */
+static void input_bubble_hovered(struct input_root *root, UINT32 pressed_index,
+	enum raven_element_pointer kind, pointer_args1 *args, LONG generation)
+{
+	IUnknown **chain = NULL;
+	UINT32 count = 0;
+	if (!pressed_index)
+		return; /* the pressed element is the root: nothing above it */
+	chain = ALLOC((size_t)pressed_index * sizeof *chain);
+	if (!chain)
+		return;
+	for (UINT32 index = pressed_index; index > 0; --index) {
+		IUnknown_AddRef(root->hovered[index - 1]);
+		chain[count++] = root->hovered[index - 1];
+	}
+	input_bubble_chain(kind, chain, count, args, generation);
+	for (UINT32 index = 0; index < count; ++index)
+		IUnknown_Release(chain[index]);
+	FREE(chain);
+}
+
 static void input_dispatch(struct input_root *root, enum input_event event, pointer_args1 *args)
 {
 	const LONG generation = input_generation;
@@ -228,13 +311,24 @@ static void input_dispatch(struct input_root *root, enum input_event event, poin
 		if (root->pressed)
 			IUnknown_Release(root->pressed);
 		root->pressed = target; /* the press holds the target until the release */
+		/* The press bubbles through the containment chain under the target, immediate parent first; the target's own
+		 * behavior (a button's IsPressed/Click tracking) ran with its delivery and never runs on the chain. */
+		input_bubble_geometry(root, target, RAVEN_ELEMENT_POINTER_PRESSED, &position, args, generation);
 		break;
 	}
 	case INPUT_RELEASED: {
 		IUnknown *target = root->pressed;
-		if (target)
+		UINT32 pressed_index = 0;
+		int from_press = FALSE;
+		if (target) {
 			root->pressed = NULL; /* take the reference over before delivering */
-		else {
+			from_press = TRUE;
+			/* The chain to bubble through is the pressed element's, read from the hover set before any delivery — a
+			 * handler can re-render, which rewrites the recorded geometry, though not the hover set. A pressed element
+			 * that no longer hovers is delivered alone: without a tree to walk its chain is unknown, so nothing bubbles. */
+			while (pressed_index < root->hover_count && root->hovered[pressed_index] != target)
+				++pressed_index;
+		} else {
 			struct input_hit *hit = hit_test(root, &position);
 			target = hit ? hit->element : NULL;
 			if (target)
@@ -242,14 +336,32 @@ static void input_dispatch(struct input_root *root, enum input_event event, poin
 		}
 		if (target) {
 			raven_xaml_element_pointer((IInspectable *)target, RAVEN_ELEMENT_POINTER_RELEASED, args);
+			if (input_generation == generation) {
+				if (from_press) {
+					/* The hover set is in paint order, so the members before the pressed element are its chain; the
+					 * element is the root (or no longer hovered) when the index sits at the end of the set. */
+					if (pressed_index < root->hover_count)
+						input_bubble_hovered(root, pressed_index, RAVEN_ELEMENT_POINTER_RELEASED, args, generation);
+				} else {
+					/* A release without a pressed element routes like a press: the element under the pointer, then
+					 * its containment chain. */
+					input_bubble_geometry(root, target, RAVEN_ELEMENT_POINTER_RELEASED, &position, args, generation);
+				}
+			}
 			IUnknown_Release(target);
 		}
 		break;
 	}
 	case INPUT_WHEEL: {
 		struct input_hit *hit = hit_test(root, &position);
-		if (hit)
-			raven_xaml_element_pointer((IInspectable *)hit->element, RAVEN_ELEMENT_POINTER_WHEEL, args);
+		if (hit) {
+			IUnknown *target = hit->element;
+			IUnknown_AddRef(target);
+			raven_xaml_element_pointer((IInspectable *)target, RAVEN_ELEMENT_POINTER_WHEEL, args);
+			if (input_generation == generation)
+				input_bubble_geometry(root, target, RAVEN_ELEMENT_POINTER_WHEEL, &position, args, generation);
+			IUnknown_Release(target);
+		}
 		break;
 	}
 	case INPUT_EXITED:

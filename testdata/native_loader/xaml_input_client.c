@@ -2,12 +2,16 @@
  * Copyright (c) 2026 Mirko Brombin
  * See LICENSES/MIT.txt.
  */
-/* The input fixture: pointer events route from the desktop messages through the CoreWindow to the element tree. A compiled
- * page hosts a full-size blue grid carrying a 200x50 button; the client subscribes the button's Click (IButtonBase) and the
- * grid's PointerEntered/Exited (IUIElement), injects mouse messages on the interop HWND with client coordinates, and asserts
- * observable state: the enter/exit transitions of the grid, IsPressed across the press, exactly one Click for a press and
- * release on the button, none for a press and release off it, a failing handler not stopping the others, and the CoreWindow's
- * own pointer events still firing alongside the routing. State, not pixels. */
+/* The input fixture: pointer events route from the desktop messages through the CoreWindow to the element tree, and the
+ * pressed, released and wheel events bubble. A compiled page hosts a full-window blue grid (the grandparent) carrying a
+ * 300x300 red grid (the parent) that carries a 100x100 green grid (the child) that carries a 200x50 button; the client
+ * stores PointerPressed/Released/WheelChanged handlers on all three grids through the public IUIElement event slots (each
+ * appending its id — child 1, parent 2, grandparent 3 — to a shared call-order log), the button's Click (IButtonBase) and
+ * enter/exit handlers on the outer grids, injects mouse messages on the interop HWND, and asserts observable state: a press,
+ * release or wheel on the child runs the child's handler first, then the parent's, then the grandparent's; a button press
+ * clicks exactly once even though the grids above it hold PointerPressed handlers; a pressed element that no longer hovers
+ * receives its release alone; and entered/exited never bubble — a parent's entered handler fires once per hover entry, never
+ * again as a bubble of the child's delivery. State, not pixels. */
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID
 #define CONST_VTABLE
@@ -75,13 +79,29 @@ struct children_vector_vtbl {
 	HRESULT (STDMETHODCALLTYPE *ReplaceAll)(void *This, UINT32 count, IInspectable **items);
 };
 
-/* The element-side handlers: one that fails (the routing must deliver past it) and ones that count. */
+/* The element-side handlers: one that fails (the routing must deliver past it) and ones that count. The counting handlers
+ * also append their id to the shared call-order log the bubble checks compare after each dispatch; id zero logs nothing. */
 struct element_state {
 	const element_pointer_table *lpVtbl;
 	LONG refs;
 	int *count;
 	HRESULT result;
+	int id;
 };
+
+/* The shared call-order log: reset before each injected event, compared after it. */
+static int order_log[32];
+static int order_count;
+
+static int order_is(const int *expected, int count)
+{
+	if (order_count != count)
+		return 0;
+	for (int index = 0; index < count; ++index)
+		if (order_log[index] != expected[index])
+			return 0;
+	return 1;
+}
 
 static HRESULT WINAPI element_query(element_pointer_handler *iface, REFIID iid, void **out)
 {
@@ -101,6 +121,8 @@ static HRESULT WINAPI element_invoke(element_pointer_handler *iface, uielement1 
 	(void)sender;
 	(void)args;
 	++*handler->count;
+	if (handler->id && order_count < (int)(sizeof order_log / sizeof *order_log))
+		order_log[order_count++] = handler->id;
 	return handler->result;
 }
 static const element_pointer_table element_table = {element_query, element_addref, element_release, element_invoke};
@@ -265,19 +287,33 @@ static size_t set_float(unsigned char *doc, size_t at, UINT16 stable, float valu
 	return at + 4;
 }
 
-/* A page whose content is a blue grid carrying a button sized by its own Width and Height. */
+/* A page whose content is a full-window blue grid carrying a 300x300 red grid that carries a 100x100 green grid that carries
+ * a button sized by its own Width and Height. The blue grid must paint (a non-zero background) for its descendants to render
+ * — and so to be recorded into the hit-test geometry — at every level of the nesting. */
 static size_t build_input_document(unsigned char *doc)
 {
 	size_t at = begin_document(doc);
 	at = create_type(doc, at, 525);                       /* Page */
 	at = set_property(doc, at, 999);                      /* Content */
-	at = create_type(doc, at, 442);                       /* blue grid */
+	at = create_type(doc, at, 442);                       /* blue grid (grandparent, fills the window) */
 	at = set_string(doc, at, 647, "Blue");                /* Background */
+	at = set_property(doc, at, 648);                      /* Children */
+	at = create_type(doc, at, 442);                       /* red grid (parent) */
+	at = set_string(doc, at, 647, "Red");                 /* Background */
+	at = set_float(doc, at, 409, 300.0f);                 /* Width */
+	at = set_float(doc, at, 393, 300.0f);                 /* Height */
+	at = set_property(doc, at, 648);                      /* Children */
+	at = create_type(doc, at, 442);                       /* green grid (child) */
+	at = set_string(doc, at, 647, "Green");               /* Background */
+	at = set_float(doc, at, 409, 100.0f);                 /* Width */
+	at = set_float(doc, at, 393, 100.0f);                 /* Height */
 	at = set_property(doc, at, 648);                      /* Children */
 	at = create_type(doc, at, 540);                       /* Button */
 	at = set_float(doc, at, 409, 200.0f);                 /* Width */
 	at = set_float(doc, at, 393, 50.0f);                  /* Height */
 	doc[at++] = 0x02;                                     /* pop the button */
+	doc[at++] = 0x02;                                     /* pop the green grid */
+	doc[at++] = 0x02;                                     /* pop the red grid */
 	doc[at++] = 0x02;                                     /* pop the blue grid */
 	const UINT32 nodes = (UINT32)(at - 168);
 	put32(doc, 8, nodes);
@@ -330,110 +366,258 @@ int raven_entry(void)
 	if (window_current->lpVtbl->get_Current(window_current, (uint64_t)(uintptr_t)&xaml_window) != S_OK || !xaml_window) return 10;
 	if (xaml_window->lpVtbl->put_Content(xaml_window, (uint64_t)(uintptr_t)page) != S_OK) return 11;
 
-	/* Reach the tree: the page's grid and the button it hosts. */
+	/* Reach the tree: the page's grandparent grid, the parent grid inside it, the child grid inside that, and the button. */
 	content_control1 *page_content = NULL;
 	if (page->lpVtbl->QueryInterface(page, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl,
 		(void **)&page_content) != S_OK || !page_content) return 12;
-	IInspectable *grid_object = NULL;
-	if (page_content->lpVtbl->get_Content(page_content, (uint64_t)(uintptr_t)&grid_object) != S_OK || !grid_object) return 13;
+	IInspectable *outer_object = NULL;
+	if (page_content->lpVtbl->get_Content(page_content, (uint64_t)(uintptr_t)&outer_object) != S_OK || !outer_object) return 13;
 	page_content->lpVtbl->Release(page_content);
-	panel1 *grid_panel = NULL;
-	if (grid_object->lpVtbl->QueryInterface(grid_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
-		(void **)&grid_panel) != S_OK || !grid_panel) return 14;
-	void *children = NULL;
-	if (grid_panel->lpVtbl->get_Children(grid_panel, (uint64_t)(uintptr_t)&children) != S_OK || !children) return 15;
-	const struct children_vector_vtbl *children_vtbl = ((struct children_vector *)children)->lpVtbl;
+	panel1 *outer_panel = NULL;
+	if (outer_object->lpVtbl->QueryInterface(outer_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+		(void **)&outer_panel) != S_OK || !outer_panel) return 14;
+	void *outer_children = NULL;
+	if (outer_panel->lpVtbl->get_Children(outer_panel, (uint64_t)(uintptr_t)&outer_children) != S_OK || !outer_children) return 15;
+	const struct children_vector_vtbl *outer_children_vtbl = ((struct children_vector *)outer_children)->lpVtbl;
+	IInspectable *middle_object = NULL;
+	if (outer_children_vtbl->GetAt(outer_children, 0, &middle_object) != S_OK || !middle_object) return 16;
+	if (outer_children_vtbl->Release(outer_children) != 1) return 17;
+	outer_panel->lpVtbl->Release(outer_panel);
+	panel1 *middle_panel = NULL;
+	if (middle_object->lpVtbl->QueryInterface(middle_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+		(void **)&middle_panel) != S_OK || !middle_panel) return 18;
+	void *middle_children = NULL;
+	if (middle_panel->lpVtbl->get_Children(middle_panel, (uint64_t)(uintptr_t)&middle_children) != S_OK || !middle_children)
+		return 19;
+	const struct children_vector_vtbl *middle_children_vtbl = ((struct children_vector *)middle_children)->lpVtbl;
+	IInspectable *child_object = NULL;
+	if (middle_children_vtbl->GetAt(middle_children, 0, &child_object) != S_OK || !child_object) return 20;
+	if (middle_children_vtbl->Release(middle_children) != 1) return 21;
+	middle_panel->lpVtbl->Release(middle_panel);
+	panel1 *child_panel = NULL;
+	if (child_object->lpVtbl->QueryInterface(child_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+		(void **)&child_panel) != S_OK || !child_panel) return 22;
+	void *child_children = NULL;
+	if (child_panel->lpVtbl->get_Children(child_panel, (uint64_t)(uintptr_t)&child_children) != S_OK || !child_children) return 23;
+	const struct children_vector_vtbl *child_children_vtbl = ((struct children_vector *)child_children)->lpVtbl;
 	IInspectable *button_object = NULL;
-	if (children_vtbl->GetAt(children, 0, &button_object) != S_OK || !button_object) return 16;
-	if (children_vtbl->Release(children) != 1) return 17;
-	grid_panel->lpVtbl->Release(grid_panel);
+	if (child_children_vtbl->GetAt(child_children, 0, &button_object) != S_OK || !button_object) return 24;
+	if (child_children_vtbl->Release(child_children) != 1) return 25;
+	child_panel->lpVtbl->Release(child_panel);
 	uielement1 *button_ui = NULL;
 	if (button_object->lpVtbl->QueryInterface(button_object, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement,
-		(void **)&button_ui) != S_OK || !button_ui) return 18;
-	uielement1 *grid_ui = NULL;
-	if (grid_object->lpVtbl->QueryInterface(grid_object, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement,
-		(void **)&grid_ui) != S_OK || !grid_ui) return 19;
+		(void **)&button_ui) != S_OK || !button_ui) return 26;
+	uielement1 *outer_ui = NULL;
+	if (outer_object->lpVtbl->QueryInterface(outer_object, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement,
+		(void **)&outer_ui) != S_OK || !outer_ui) return 27;
+	uielement1 *middle_ui = NULL;
+	if (middle_object->lpVtbl->QueryInterface(middle_object, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement,
+		(void **)&middle_ui) != S_OK || !middle_ui) return 28;
+	uielement1 *child_ui = NULL;
+	if (child_object->lpVtbl->QueryInterface(child_object, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement,
+		(void **)&child_ui) != S_OK || !child_ui) return 29;
 	IUnknown *button_identity = NULL;
 	if (button_object->lpVtbl->QueryInterface(button_object, &IID_IUnknown, (void **)&button_identity) != S_OK || !button_identity)
-		return 23;
+		return 30;
 
-	/* The subscriptions: the grid's enter and exit (one failing handler first), the button's Click, the CoreWindow's own moves. */
-	int entered_count = 0, failed_count = 0, exited_count = 0, click_count = 0, core_moves = 0;
-	struct element_state failing_entered = {&element_table, 1, &failed_count, E_ACCESSDENIED};
-	struct element_state counting_entered = {&element_table, 1, &entered_count, S_OK};
-	struct element_state counting_exited = {&element_table, 1, &exited_count, S_OK};
+	/* The subscriptions: enter/exit on the outer grids (one failing handler first), the pressed/released/wheel handlers on
+	 * all three grids through the public IUIElement slots (ids 1, 2, 3 in the call-order log), the button's Click, and the
+	 * CoreWindow's own moves. */
+	int entered_count = 0, failed_count = 0, middle_entered_count = 0, exited_count = 0, click_count = 0, core_moves = 0;
+	int child_pressed_count = 0, middle_pressed_count = 0, outer_pressed_count = 0;
+	int child_released_count = 0, middle_released_count = 0, outer_released_count = 0;
+	int child_wheel_count = 0, middle_wheel_count = 0, outer_wheel_count = 0;
+	struct element_state failing_entered = {&element_table, 1, &failed_count, E_ACCESSDENIED, 0};
+	struct element_state counting_entered = {&element_table, 1, &entered_count, S_OK, 0};
+	struct element_state middle_entered = {&element_table, 1, &middle_entered_count, S_OK, 0};
+	struct element_state counting_exited = {&element_table, 1, &exited_count, S_OK, 0};
+	struct element_state child_pressed = {&element_table, 1, &child_pressed_count, S_OK, 1};
+	struct element_state middle_pressed = {&element_table, 1, &middle_pressed_count, S_OK, 2};
+	struct element_state outer_pressed = {&element_table, 1, &outer_pressed_count, S_OK, 3};
+	struct element_state child_released = {&element_table, 1, &child_released_count, S_OK, 1};
+	struct element_state middle_released = {&element_table, 1, &middle_released_count, S_OK, 2};
+	struct element_state outer_released = {&element_table, 1, &outer_released_count, S_OK, 3};
+	struct element_state child_wheel = {&element_table, 1, &child_wheel_count, S_OK, 1};
+	struct element_state middle_wheel = {&element_table, 1, &middle_wheel_count, S_OK, 2};
+	struct element_state outer_wheel = {&element_table, 1, &outer_wheel_count, S_OK, 3};
 	struct click_state click_handler = {&click_table_value, 1, &click_count, button_identity};
 	struct core_state core_handler = {&core_table_value, 1, &core_moves};
-	EventRegistrationToken fail_token = {0}, entered_token = {0}, exited_token = {0}, click_token = {0}, core_token = {0};
-	if (grid_ui->lpVtbl->add_PointerEntered(grid_ui, (uint64_t)(uintptr_t)&failing_entered,
-		(uint64_t)(uintptr_t)&fail_token) != S_OK || !fail_token.value) return 24;
-	if (grid_ui->lpVtbl->add_PointerEntered(grid_ui, (uint64_t)(uintptr_t)&counting_entered,
-		(uint64_t)(uintptr_t)&entered_token) != S_OK || !entered_token.value) return 25;
-	if (grid_ui->lpVtbl->add_PointerExited(grid_ui, (uint64_t)(uintptr_t)&counting_exited,
-		(uint64_t)(uintptr_t)&exited_token) != S_OK || !exited_token.value) return 26;
+	EventRegistrationToken fail_token = {0}, entered_token = {0}, middle_entered_token = {0}, exited_token = {0};
+	EventRegistrationToken child_pressed_token = {0}, middle_pressed_token = {0}, outer_pressed_token = {0};
+	EventRegistrationToken child_released_token = {0}, middle_released_token = {0}, outer_released_token = {0};
+	EventRegistrationToken child_wheel_token = {0}, middle_wheel_token = {0}, outer_wheel_token = {0};
+	EventRegistrationToken click_token = {0}, core_token = {0};
+	if (outer_ui->lpVtbl->add_PointerEntered(outer_ui, (uint64_t)(uintptr_t)&failing_entered,
+		(uint64_t)(uintptr_t)&fail_token) != S_OK || !fail_token.value) return 31;
+	if (outer_ui->lpVtbl->add_PointerEntered(outer_ui, (uint64_t)(uintptr_t)&counting_entered,
+		(uint64_t)(uintptr_t)&entered_token) != S_OK || !entered_token.value) return 32;
+	if (middle_ui->lpVtbl->add_PointerEntered(middle_ui, (uint64_t)(uintptr_t)&middle_entered,
+		(uint64_t)(uintptr_t)&middle_entered_token) != S_OK || !middle_entered_token.value) return 33;
+	if (outer_ui->lpVtbl->add_PointerExited(outer_ui, (uint64_t)(uintptr_t)&counting_exited,
+		(uint64_t)(uintptr_t)&exited_token) != S_OK || !exited_token.value) return 34;
+	if (child_ui->lpVtbl->add_PointerPressed(child_ui, (uint64_t)(uintptr_t)&child_pressed,
+		(uint64_t)(uintptr_t)&child_pressed_token) != S_OK || !child_pressed_token.value) return 35;
+	if (middle_ui->lpVtbl->add_PointerPressed(middle_ui, (uint64_t)(uintptr_t)&middle_pressed,
+		(uint64_t)(uintptr_t)&middle_pressed_token) != S_OK || !middle_pressed_token.value) return 36;
+	if (outer_ui->lpVtbl->add_PointerPressed(outer_ui, (uint64_t)(uintptr_t)&outer_pressed,
+		(uint64_t)(uintptr_t)&outer_pressed_token) != S_OK || !outer_pressed_token.value) return 37;
+	if (child_ui->lpVtbl->add_PointerReleased(child_ui, (uint64_t)(uintptr_t)&child_released,
+		(uint64_t)(uintptr_t)&child_released_token) != S_OK || !child_released_token.value) return 38;
+	if (middle_ui->lpVtbl->add_PointerReleased(middle_ui, (uint64_t)(uintptr_t)&middle_released,
+		(uint64_t)(uintptr_t)&middle_released_token) != S_OK || !middle_released_token.value) return 39;
+	if (outer_ui->lpVtbl->add_PointerReleased(outer_ui, (uint64_t)(uintptr_t)&outer_released,
+		(uint64_t)(uintptr_t)&outer_released_token) != S_OK || !outer_released_token.value) return 40;
+	if (child_ui->lpVtbl->add_PointerWheelChanged(child_ui, (uint64_t)(uintptr_t)&child_wheel,
+		(uint64_t)(uintptr_t)&child_wheel_token) != S_OK || !child_wheel_token.value) return 41;
+	if (middle_ui->lpVtbl->add_PointerWheelChanged(middle_ui, (uint64_t)(uintptr_t)&middle_wheel,
+		(uint64_t)(uintptr_t)&middle_wheel_token) != S_OK || !middle_wheel_token.value) return 42;
+	if (outer_ui->lpVtbl->add_PointerWheelChanged(outer_ui, (uint64_t)(uintptr_t)&outer_wheel,
+		(uint64_t)(uintptr_t)&outer_wheel_token) != S_OK || !outer_wheel_token.value) return 43;
 	buttonbase1 *button_base = NULL;
 	if (button_object->lpVtbl->QueryInterface(button_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase,
-		(void **)&button_base) != S_OK || !button_base) return 27;
+		(void **)&button_base) != S_OK || !button_base) return 44;
 	if (button_base->lpVtbl->add_Click(button_base, (uint64_t)(uintptr_t)&click_handler,
-		(uint64_t)(uintptr_t)&click_token) != S_OK || !click_token.value) return 28;
-	if (ICoreWindow_add_PointerMoved(window, (void *)&core_handler, &core_token) != S_OK || !core_token.value) return 29;
+		(uint64_t)(uintptr_t)&click_token) != S_OK || !click_token.value) return 45;
+	if (ICoreWindow_add_PointerMoved(window, (void *)&core_handler, &core_token) != S_OK || !core_token.value) return 46;
 
 	/* An element is hit-testable until the application says otherwise; the flag round-trips. */
 	boolean visible = FALSE;
-	if (grid_ui->lpVtbl->get_IsHitTestVisible(grid_ui, (uint64_t)(uintptr_t)&visible) != S_OK || !visible) return 30;
-	if (grid_ui->lpVtbl->put_IsHitTestVisible(grid_ui, (uint64_t)FALSE) != S_OK) return 31;
-	if (grid_ui->lpVtbl->get_IsHitTestVisible(grid_ui, (uint64_t)(uintptr_t)&visible) != S_OK || visible) return 32;
-	if (grid_ui->lpVtbl->put_IsHitTestVisible(grid_ui, (uint64_t)TRUE) != S_OK ||
-		grid_ui->lpVtbl->get_IsHitTestVisible(grid_ui, (uint64_t)(uintptr_t)&visible) != S_OK || !visible) return 33;
-	if (button_ui->lpVtbl->get_IsHitTestVisible(button_ui, (uint64_t)(uintptr_t)&visible) != S_OK || !visible) return 34;
+	if (outer_ui->lpVtbl->get_IsHitTestVisible(outer_ui, (uint64_t)(uintptr_t)&visible) != S_OK || !visible) return 47;
+	if (outer_ui->lpVtbl->put_IsHitTestVisible(outer_ui, (uint64_t)FALSE) != S_OK) return 48;
+	if (outer_ui->lpVtbl->get_IsHitTestVisible(outer_ui, (uint64_t)(uintptr_t)&visible) != S_OK || visible) return 49;
+	if (outer_ui->lpVtbl->put_IsHitTestVisible(outer_ui, (uint64_t)TRUE) != S_OK ||
+		outer_ui->lpVtbl->get_IsHitTestVisible(outer_ui, (uint64_t)(uintptr_t)&visible) != S_OK || !visible) return 50;
+	if (button_ui->lpVtbl->get_IsHitTestVisible(button_ui, (uint64_t)(uintptr_t)&visible) != S_OK || !visible) return 51;
 	enum raven_xaml_click_mode mode = raven_xaml_click_hover;
 	if (button_base->lpVtbl->get_ClickMode(button_base, (uint64_t)(uintptr_t)&mode) != S_OK ||
-		mode != raven_xaml_click_release) return 35;
+		mode != raven_xaml_click_release) return 52;
 
-	/* A move into the button: the grid enters (through the failing handler first), and the CoreWindow's own move still fires. */
-	SendMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(100, 25));
-	if (entered_count != 1 || failed_count != 1 || exited_count != 0 || core_moves != 1) return 36;
+	/* A move onto the child's own background: the child, its parent and its grandparent all enter — the flat hover set — and
+	 * each entered handler fires exactly once. Entered never bubbles: the parent's and grandparent's deliveries are their
+	 * own hover entries, not a second run triggered by the child's delivery. */
+	SendMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(75, 75));
+	if (entered_count != 1 || failed_count != 1 || middle_entered_count != 1 || exited_count != 0 || core_moves != 1) return 53;
 
-	/* Press and release on the button: IsPressed crosses the press, Click raises exactly once. */
-	SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(100, 25));
+	/* A release with no pressed element routes like a press: the child is the topmost element under the pointer, and the
+	 * release bubbles through the parent, then the grandparent. */
+	order_count = 0;
+	SendMessageW(hwnd, WM_LBUTTONUP, 0, MAKELPARAM(75, 75));
+	{
+		static const int expected[] = {1, 2, 3};
+		if (!order_is(expected, 3)) return 54;
+	}
+	if (child_released_count != 1 || middle_released_count != 1 || outer_released_count != 1) return 55;
+
+	/* A wheel over the child bubbles the same way: child first, then parent, then grandparent. The wheel message carries
+	 * screen coordinates, so the point goes through ClientToScreen first. */
+	order_count = 0;
+	POINT wheel_point = {75, 75};
+	ClientToScreen(hwnd, &wheel_point);
+	SendMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, 120), MAKELPARAM(wheel_point.x, wheel_point.y));
+	{
+		static const int expected[] = {1, 2, 3};
+		if (!order_is(expected, 3)) return 56;
+	}
+	if (child_wheel_count != 1 || middle_wheel_count != 1 || outer_wheel_count != 1) return 57;
+
+	/* A move onto the button, then a press on it: the button is the target and its own behavior tracks the press, while the
+	 * press bubbles through the child, the parent and the grandparent — each grid's pressed handler runs once, in order. */
+	SendMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(25, 10));
+	if (core_moves != 2) return 58;
+	order_count = 0;
+	SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(25, 10));
+	{
+		static const int expected[] = {1, 2, 3};
+		if (!order_is(expected, 3)) return 59;
+	}
+	if (child_pressed_count != 1 || middle_pressed_count != 1 || outer_pressed_count != 1) return 60;
 	boolean pressed = FALSE;
-	if (button_base->lpVtbl->get_IsPressed(button_base, (uint64_t)(uintptr_t)&pressed) != S_OK || !pressed) return 37;
-	SendMessageW(hwnd, WM_LBUTTONUP, 0, MAKELPARAM(100, 25));
-	if (click_count != 1) return 38;
-	if (button_base->lpVtbl->get_IsPressed(button_base, (uint64_t)(uintptr_t)&pressed) != S_OK || pressed) return 39;
+	if (button_base->lpVtbl->get_IsPressed(button_base, (uint64_t)(uintptr_t)&pressed) != S_OK || !pressed) return 61;
 
-	/* Out of the window: every hovered element exits, the grid among them. */
+	/* The release: the pressed element (the button) still hovers, so the release bubbles through its chain read from the
+	 * hover set — child, parent, grandparent — and the Click behavior raises exactly once despite the grids' pressed
+	 * handlers having run with the press. */
+	order_count = 0;
+	SendMessageW(hwnd, WM_LBUTTONUP, 0, MAKELPARAM(25, 10));
+	{
+		static const int expected[] = {1, 2, 3};
+		if (!order_is(expected, 3)) return 62;
+	}
+	if (click_count != 1) return 63;
+	if (child_released_count != 2 || middle_released_count != 2 || outer_released_count != 2) return 64;
+	if (button_base->lpVtbl->get_IsPressed(button_base, (uint64_t)(uintptr_t)&pressed) != S_OK || pressed) return 65;
+
+	/* Back over the child's own background, a press there: the child is the target this time and the same chain runs. */
+	SendMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(75, 75));
+	order_count = 0;
+	SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(75, 75));
+	{
+		static const int expected[] = {1, 2, 3};
+		if (!order_is(expected, 3)) return 66;
+	}
+	if (child_pressed_count != 2 || middle_pressed_count != 2 || outer_pressed_count != 2) return 67;
+
+	/* Out of the window: every hovered element exits, the outer grid among them, and the hover set clears. */
 	SendMessageW(hwnd, WM_MOUSELEAVE, 0, 0);
-	if (exited_count != 1) return 40;
+	if (exited_count != 1) return 68;
 
-	/* Back over the grid background, then a press and release off the button: the grid is pressed, the button is not, and no
-	 * Click fires. The grid stays hovered over its own background, so no further exit. */
-	SendMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(400, 300));
-	if (entered_count != 2 || failed_count != 2 || core_moves != 2 || exited_count != 1) return 41;
-	SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(400, 300));
+	/* The release lands while the pressed child is no longer hovered: the child receives it alone — the flat geometry has
+	 * no tree to walk, so nothing bubbles for a pressed element outside the hover set. */
+	order_count = 0;
 	SendMessageW(hwnd, WM_LBUTTONUP, 0, MAKELPARAM(400, 300));
-	if (click_count != 1) return 42;
-	if (button_base->lpVtbl->get_IsPressed(button_base, (uint64_t)(uintptr_t)&pressed) != S_OK || pressed) return 43;
+	{
+		static const int expected[] = {1};
+		if (!order_is(expected, 1)) return 69;
+	}
+	if (child_released_count != 3 || middle_released_count != 2 || outer_released_count != 2 || click_count != 1) return 70;
 
-	/* The failing handler never stopped the others; revocation removes exactly what add handed out. */
-	if (grid_ui->lpVtbl->remove_PointerEntered(grid_ui, (uint64_t)fail_token.value) != S_OK) return 44;
-	if (grid_ui->lpVtbl->remove_PointerEntered(grid_ui, (uint64_t)entered_token.value) != S_OK) return 45;
-	if (grid_ui->lpVtbl->remove_PointerExited(grid_ui, (uint64_t)exited_token.value) != S_OK) return 46;
-	if (button_base->lpVtbl->remove_Click(button_base, (uint64_t)click_token.value) != S_OK) return 47;
+	/* Back in: the child, parent and grandparent enter again, each entered handler firing exactly once per entry — the
+	 * child's entered delivery did not bubble into a second parent run. */
+	SendMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(75, 75));
+	if (entered_count != 2 || failed_count != 2 || middle_entered_count != 2 || core_moves != 4) return 71;
+
+	/* Revocation removes exactly what add handed out; after it the routing delivers nothing to the elements. */
+	if (outer_ui->lpVtbl->remove_PointerEntered(outer_ui, (uint64_t)fail_token.value) != S_OK) return 72;
+	if (outer_ui->lpVtbl->remove_PointerEntered(outer_ui, (uint64_t)entered_token.value) != S_OK) return 73;
+	if (middle_ui->lpVtbl->remove_PointerEntered(middle_ui, (uint64_t)middle_entered_token.value) != S_OK) return 74;
+	if (outer_ui->lpVtbl->remove_PointerExited(outer_ui, (uint64_t)exited_token.value) != S_OK) return 75;
+	if (child_ui->lpVtbl->remove_PointerPressed(child_ui, (uint64_t)child_pressed_token.value) != S_OK) return 76;
+	if (middle_ui->lpVtbl->remove_PointerPressed(middle_ui, (uint64_t)middle_pressed_token.value) != S_OK) return 77;
+	if (outer_ui->lpVtbl->remove_PointerPressed(outer_ui, (uint64_t)outer_pressed_token.value) != S_OK) return 78;
+	if (child_ui->lpVtbl->remove_PointerReleased(child_ui, (uint64_t)child_released_token.value) != S_OK) return 79;
+	if (middle_ui->lpVtbl->remove_PointerReleased(middle_ui, (uint64_t)middle_released_token.value) != S_OK) return 80;
+	if (outer_ui->lpVtbl->remove_PointerReleased(outer_ui, (uint64_t)outer_released_token.value) != S_OK) return 81;
+	if (child_ui->lpVtbl->remove_PointerWheelChanged(child_ui, (uint64_t)child_wheel_token.value) != S_OK) return 82;
+	if (middle_ui->lpVtbl->remove_PointerWheelChanged(middle_ui, (uint64_t)middle_wheel_token.value) != S_OK) return 83;
+	if (outer_ui->lpVtbl->remove_PointerWheelChanged(outer_ui, (uint64_t)outer_wheel_token.value) != S_OK) return 84;
+	if (button_base->lpVtbl->remove_Click(button_base, (uint64_t)click_token.value) != S_OK) return 85;
 	SendMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(500, 400));
-	if (entered_count != 2 || failed_count != 2 || core_moves != 3) return 48;
+	POINT late_wheel = {500, 400};
+	ClientToScreen(hwnd, &late_wheel);
+	SendMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, 120), MAKELPARAM(late_wheel.x, late_wheel.y));
+	if (entered_count != 2 || failed_count != 2 || middle_entered_count != 2 || exited_count != 1 || core_moves != 5 ||
+		child_pressed_count != 2 || middle_pressed_count != 2 || outer_pressed_count != 2 ||
+		child_released_count != 3 || middle_released_count != 2 || outer_released_count != 2 ||
+		child_wheel_count != 1 || middle_wheel_count != 1 || outer_wheel_count != 1 || click_count != 1) return 86;
 
 	/* Closing the window unsubscribes the routing; the tree below survives the close intact. */
-	if (ICoreWindow_Close(window) != S_OK) return 49;
+	if (ICoreWindow_Close(window) != S_OK) return 87;
 
 	button_base->lpVtbl->Release(button_base);
-	if (failing_entered.refs != 1 || counting_entered.refs != 1 || counting_exited.refs != 1 ||
-		click_handler.refs != 1 || core_handler.refs != 1) return 50;
+	if (failing_entered.refs != 1 || counting_entered.refs != 1 || middle_entered.refs != 1 || counting_exited.refs != 1 ||
+		child_pressed.refs != 1 || middle_pressed.refs != 1 || outer_pressed.refs != 1 ||
+		child_released.refs != 1 || middle_released.refs != 1 || outer_released.refs != 1 ||
+		child_wheel.refs != 1 || middle_wheel.refs != 1 || outer_wheel.refs != 1 ||
+		click_handler.refs != 1 || core_handler.refs != 1) return 88;
 	IUnknown_Release(button_identity);
 	button_ui->lpVtbl->Release(button_ui);
-	grid_ui->lpVtbl->Release(grid_ui);
+	child_ui->lpVtbl->Release(child_ui);
+	middle_ui->lpVtbl->Release(middle_ui);
+	outer_ui->lpVtbl->Release(outer_ui);
 	button_object->lpVtbl->Release(button_object);
-	grid_object->lpVtbl->Release(grid_object);
+	child_object->lpVtbl->Release(child_object);
+	middle_object->lpVtbl->Release(middle_object);
+	outer_object->lpVtbl->Release(outer_object);
 	xaml_window->lpVtbl->Release(xaml_window);
 	window_current->lpVtbl->Release(window_current);
 	window_activation->lpVtbl->Release(window_activation);

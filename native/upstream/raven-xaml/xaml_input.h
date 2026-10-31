@@ -10,8 +10,10 @@
  * The render pass records the DIP rectangle of every element it projects (raven_input_record, in paint order), the routing
  * subscribes once to the hosting CoreWindow's pointer events (raven_input_hosted) and hit-tests each event's DIP position
  * against the recorded geometry, and delivery (raven_xaml_element_pointer, implemented with the element classes) invokes the
- * handlers the application stored on the element's IUIElement. The plumbing is declared here rather than in xaml_internal.h so
- * the guest clients can build handlers against the same shapes the engine dispatches. */
+ * handlers the application stored on the element's IUIElement. The pressed, released and wheel events then bubble: every
+ * element of the target's chain receives its instance handlers (raven_xaml_element_bubble) from the immediate parent up to
+ * the root — the args snapshot carries no Handled property, so a bubbling pass cannot be stopped. The plumbing is declared
+ * here rather than in xaml_internal.h so the guest clients can build handlers against the same shapes the engine dispatches. */
 
 #include <windows.h>
 #include <inspectable.h>
@@ -95,6 +97,14 @@ BOOL raven_input_element_contains(IInspectable *element, const __x_ABI_CWindows_
  * the handlers the application stored on its IUIElement, each with the CoreWindow's event args and the element as sender.
  * Handler failures never propagate; the routing stays alive whatever an application handler returns. */
 void raven_xaml_element_pointer(IInspectable *element, enum raven_element_pointer kind,
+	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args);
+
+/* Deliver one pointer event to an element during the bubbling pass the routing runs above the target: the handlers the
+ * application stored on its IUIElement only — never the element's own behavior, which belongs to the event's target alone, so
+ * a button under another button's press does not click twice. The routed arguments are the CoreWindow's snapshot, which
+ * carries no Handled property, so nothing an application handler does can stop the pass; the routing walks the whole chain
+ * whatever the handlers return. */
+void raven_xaml_element_bubble(IInspectable *element, enum raven_element_pointer kind,
 	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args);
 
 #endif

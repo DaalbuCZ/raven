@@ -355,21 +355,15 @@ static void element_ui_release(struct element_ui *self)
 	}
 }
 
-/* The delivery the routing reaches: the element's own behavior first (a button tracks IsPressed and raises Click), then the
- * handlers the application stored, each with the element as sender and the CoreWindow's snapshot as the routed arguments. A
- * handler failure is the application's business and never reaches the caller; the routing stays alive whatever it returns. */
-void raven_xaml_element_pointer(IInspectable *element, enum raven_element_pointer kind,
-	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args)
+/* The instance handlers the application stored on the element's IUIElement, each with the element as sender and the
+ * CoreWindow's snapshot as the routed arguments. A handler failure is the application's business and never reaches the
+ * caller; the routing stays alive whatever it returns. Both the target delivery and the bubbling pass reach the handlers
+ * through here. */
+static void element_deliver_handlers(struct element_ui *self, __x_ABI_CWindows_CUI_CXaml_CIUIElement *ui,
+	enum raven_element_pointer kind, __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args)
 {
-	__x_ABI_CWindows_CUI_CXaml_CIUIElement *ui = NULL;
 	IUnknown **handlers = NULL;
 	ULONG count = 0;
-	if (!element || !args ||
-		FAILED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui)) || !ui)
-		return;
-	struct element_ui *self = (struct element_ui *)ui;
-	if (self->behavior)
-		self->behavior(self->owner, element, kind, args);
 	if (raven_event_snapshot(&self->events[kind], &handlers, &count) == S_OK) {
 		for (ULONG index = 0; index < count; ++index) {
 			__FITypedEventHandler_2_Windows__CUI__CXaml__CUIElement_Windows__CUI__CXaml__CInput__CPointerRoutedEventArgs *handler =
@@ -379,6 +373,35 @@ void raven_xaml_element_pointer(IInspectable *element, enum raven_element_pointe
 		}
 		FREE(handlers);
 	}
+}
+
+/* The target delivery: the element's own behavior first (a button tracks IsPressed and raises Click), then the handlers the
+ * application stored. */
+void raven_xaml_element_pointer(IInspectable *element, enum raven_element_pointer kind,
+	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args)
+{
+	__x_ABI_CWindows_CUI_CXaml_CIUIElement *ui = NULL;
+	if (!element || !args ||
+		FAILED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui)) || !ui)
+		return;
+	struct element_ui *self = (struct element_ui *)ui;
+	if (self->behavior)
+		self->behavior(self->owner, element, kind, args);
+	element_deliver_handlers(self, ui, kind, args);
+	ui->lpVtbl->Release(ui);
+}
+
+/* The bubbling pass the routing reaches for every element above the target: the instance handlers only, never the element's
+ * own behavior — the behavior belongs to the event's target alone, so a button under another button's press must not click
+ * twice. Elements that do not answer IUIElement (the page and frame wrappers) receive nothing. */
+void raven_xaml_element_bubble(IInspectable *element, enum raven_element_pointer kind,
+	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args)
+{
+	__x_ABI_CWindows_CUI_CXaml_CIUIElement *ui = NULL;
+	if (!element || !args ||
+		FAILED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui)) || !ui)
+		return;
+	element_deliver_handlers((struct element_ui *)ui, ui, kind, args);
 	ui->lpVtbl->Release(ui);
 }
 
