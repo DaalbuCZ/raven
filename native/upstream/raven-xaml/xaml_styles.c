@@ -42,7 +42,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include <string.h>
+#include <stddef.h>
 #include "windows_ui_xaml_style.h"
+#include "windows_ui_xaml_dictionary.h" /* the boxed string __FIReference_1_HSTRING; mingw precomputes no instantiation */
+#include "windows_ui_xaml_elements.h" /* the CITextBlock and CIButton IIDs the default attach dispatches on */
 #include "xaml_styles.h"
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
@@ -961,7 +964,7 @@ __declspec(dllexport) HRESULT raven_style_add_setter(IInspectable *style, const 
 	return result;
 }
 
-HRESULT raven_style_setter_count(IInspectable *style, UINT32 *count)
+__declspec(dllexport) HRESULT raven_style_setter_count(IInspectable *style, UINT32 *count)
 {
 	struct style_object *self = style_of(style);
 	if (!count)
@@ -981,7 +984,7 @@ HRESULT raven_style_setter_count(IInspectable *style, UINT32 *count)
 	return S_OK;
 }
 
-HRESULT raven_style_setter_at(IInspectable *style, UINT32 index, const WCHAR **property,
+__declspec(dllexport) HRESULT raven_style_setter_at(IInspectable *style, UINT32 index, const WCHAR **property,
 	UINT32 *length, IInspectable **value)
 {
 	struct style_object *self = style_of(style);
@@ -1052,4 +1055,351 @@ HRESULT raven_style_apply(IInspectable *style,
 	if (!apply)
 		return E_POINTER;
 	return style_apply_walk(style_of(style), 0, apply, context, check_only);
+}
+
+/* The authored default styles.
+ *
+ * One engine Style per control class the put_Style application supports, built lazily on first attach from the same
+ * raven_style_add_setter path application code uses and put on the element through raven_xaml_element_put_style — the
+ * constructor's initial assignment, so a control that never sees an explicit put_Style still carries the documented
+ * default values through the same setter pipeline, and a later put_Style replaces the default the way any assignment
+ * does. The values are the ones the element constructors already answer: a property the constructor hardcodes moves into
+ * the style only when the application stores it (the text block's FontSize 14 and black foreground), and a class with no
+ * honest setter the application supports authors only what its zero state already is (the button's transparent
+ * background) — no extent is authored, because neither control's real default style fixes one.
+ *
+ * The objects are SHARED between every instance of the class and SEALED at authoring: an application holding get_Style's
+ * answer cannot mutate what all of them point at, because every mutation slot of a sealed style rejects (the Setters
+ * vector's append and clear, a Setter's put_Value, put_TargetType and put_BasedOn answer E_INVALIDARG once sealed). The
+ * defaults live for the component's lifetime — they are engine state, not per-instance state. */
+
+static const WCHAR textblock_target[] = L"Windows.UI.Xaml.Controls.TextBlock";
+static const WCHAR button_target[] = L"Windows.UI.Xaml.Controls.Button";
+static const WCHAR boxed_string_class[] = L"Windows.Foundation.IReference`1<Windows.Foundation.HSTRING>";
+static const WCHAR boxed_number_class[] = L"Windows.Foundation.IReference`1<Windows.Foundation.Double>";
+
+/* The boxed values the defaults carry: the IReference`1 boxes a WinRT caller passes as a string and a number setter
+ * value, hand-rolled the way the element layer's setter readers consume them. One COM object per box: the IInspectable
+ * part is the object, the IReference part answers for it. */
+
+struct boxed_string {
+	const IInspectableVtbl *inspectable;
+	struct { const __FIReference_1_HSTRINGVtbl *lpVtbl; } reference; /* the part the QI hands out a pointer into */
+	LONG refs;
+	HSTRING value;
+};
+
+struct boxed_number {
+	const IInspectableVtbl *inspectable;
+	struct { const __FIReference_1_DOUBLEVtbl *lpVtbl; } reference;
+	LONG refs;
+	double value;
+};
+
+static ULONG boxed_string_release_any(struct boxed_string *self)
+{
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->value)
+			WindowsDeleteString(self->value);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static ULONG boxed_number_release_any(struct boxed_number *self)
+{
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI string_box_query(IInspectable *This, REFIID iid, void **out)
+{
+	struct boxed_string *self = (struct boxed_string *)This;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable))
+		*out = This;
+	else if (equal_iid(iid, &IID___FIReference_1_HSTRING))
+		*out = (void *)&self->reference;
+	else
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	return S_OK;
+}
+
+static HRESULT WINAPI number_box_query(IInspectable *This, REFIID iid, void **out)
+{
+	struct boxed_number *self = (struct boxed_number *)This;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable))
+		*out = This;
+	else if (equal_iid(iid, &IID___FIReference_1_DOUBLE))
+		*out = (void *)&self->reference;
+	else
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	return S_OK;
+}
+
+static HRESULT WINAPI string_box_iids(IInspectable *This, ULONG *count, IID **iids)
+{ (void)This; return inspectable_iids(count, iids); }
+static HRESULT WINAPI number_box_iids(IInspectable *This, ULONG *count, IID **iids)
+{ (void)This; return inspectable_iids(count, iids); }
+static HRESULT WINAPI string_box_trust(IInspectable *This, TrustLevel *level)
+{ (void)This; return inspectable_trust(level); }
+static HRESULT WINAPI number_box_trust(IInspectable *This, TrustLevel *level)
+{ (void)This; return inspectable_trust(level); }
+
+static HRESULT WINAPI string_box_name(IInspectable *This, HSTRING *name)
+{
+	(void)This;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(boxed_string_class, (UINT32)lstrlenW(boxed_string_class), name);
+}
+
+static HRESULT WINAPI number_box_name(IInspectable *This, HSTRING *name)
+{
+	(void)This;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(boxed_number_class, (UINT32)lstrlenW(boxed_number_class), name);
+}
+
+static ULONG WINAPI string_box_addref(IInspectable *This)
+{
+	return (ULONG)InterlockedIncrement(&((struct boxed_string *)This)->refs);
+}
+
+static ULONG WINAPI string_box_release(IInspectable *This)
+{
+	return boxed_string_release_any((struct boxed_string *)This);
+}
+
+static ULONG WINAPI number_box_addref(IInspectable *This)
+{
+	return (ULONG)InterlockedIncrement(&((struct boxed_number *)This)->refs);
+}
+
+static ULONG WINAPI number_box_release(IInspectable *This)
+{
+	return boxed_number_release_any((struct boxed_number *)This);
+}
+
+static HRESULT WINAPI string_box_part_query(__FIReference_1_HSTRING *This, REFIID iid, void **out)
+{
+	return string_box_query((IInspectable *)((char *)This - offsetof(struct boxed_string, reference)), iid, out);
+}
+
+static ULONG WINAPI string_box_part_addref(__FIReference_1_HSTRING *This)
+{
+	return string_box_addref((IInspectable *)((char *)This - offsetof(struct boxed_string, reference)));
+}
+
+static ULONG WINAPI string_box_part_release(__FIReference_1_HSTRING *This)
+{
+	return boxed_string_release_any((struct boxed_string *)((char *)This - offsetof(struct boxed_string, reference)));
+}
+
+static HRESULT WINAPI string_box_part_iids(__FIReference_1_HSTRING *This, ULONG *count, IID **iids)
+{ (void)This; return inspectable_iids(count, iids); }
+static HRESULT WINAPI string_box_part_trust(__FIReference_1_HSTRING *This, TrustLevel *level)
+{ (void)This; return inspectable_trust(level); }
+static HRESULT WINAPI string_box_part_name(__FIReference_1_HSTRING *This, HSTRING *name)
+{ return string_box_name((IInspectable *)((char *)This - offsetof(struct boxed_string, reference)), name); }
+
+static HRESULT WINAPI number_box_part_query(__FIReference_1_DOUBLE *This, REFIID iid, void **out)
+{
+	return number_box_query((IInspectable *)((char *)This - offsetof(struct boxed_number, reference)), iid, out);
+}
+
+static ULONG WINAPI number_box_part_addref(__FIReference_1_DOUBLE *This)
+{
+	return number_box_addref((IInspectable *)((char *)This - offsetof(struct boxed_number, reference)));
+}
+
+static ULONG WINAPI number_box_part_release(__FIReference_1_DOUBLE *This)
+{
+	return boxed_number_release_any((struct boxed_number *)((char *)This - offsetof(struct boxed_number, reference)));
+}
+
+static HRESULT WINAPI number_box_part_iids(__FIReference_1_DOUBLE *This, ULONG *count, IID **iids)
+{ (void)This; return inspectable_iids(count, iids); }
+static HRESULT WINAPI number_box_part_trust(__FIReference_1_DOUBLE *This, TrustLevel *level)
+{ (void)This; return inspectable_trust(level); }
+static HRESULT WINAPI number_box_part_name(__FIReference_1_DOUBLE *This, HSTRING *name)
+{ return number_box_name((IInspectable *)((char *)This - offsetof(struct boxed_number, reference)), name); }
+
+/* The application copies a string box's payload synchronously and deletes the duplicate, the way every setter reader
+ * already does, so get_Value hands out a duplicate of the stored string. */
+static HRESULT WINAPI string_box_value(__FIReference_1_HSTRING *This, HSTRING *value)
+{
+	struct boxed_string *self = (struct boxed_string *)((char *)This - offsetof(struct boxed_string, reference));
+	if (!value)
+		return E_POINTER;
+	*value = NULL;
+	return WindowsDuplicateString(self->value, value);
+}
+
+static HRESULT WINAPI number_box_value(__FIReference_1_DOUBLE *This, double *value)
+{
+	struct boxed_number *self = (struct boxed_number *)((char *)This - offsetof(struct boxed_number, reference));
+	if (!value)
+		return E_POINTER;
+	*value = self->value;
+	return S_OK;
+}
+
+static const IInspectableVtbl string_box_inspectable_table = {
+	string_box_query, string_box_addref, string_box_release, string_box_iids, string_box_name, string_box_trust,
+};
+
+static const __FIReference_1_HSTRINGVtbl string_box_reference_table = {
+	string_box_part_query, string_box_part_addref, string_box_part_release,
+	string_box_part_iids, string_box_part_name, string_box_part_trust,
+	string_box_value,
+};
+
+static const IInspectableVtbl number_box_inspectable_table = {
+	number_box_query, number_box_addref, number_box_release, number_box_iids, number_box_name, number_box_trust,
+};
+
+static const __FIReference_1_DOUBLEVtbl number_box_reference_table = {
+	number_box_part_query, number_box_part_addref, number_box_part_release,
+	number_box_part_iids, number_box_part_name, number_box_part_trust,
+	number_box_value,
+};
+
+static struct boxed_string *create_boxed_string(const WCHAR *text)
+{
+	struct boxed_string *box = ALLOC(sizeof *box);
+	if (!box)
+		return NULL;
+	box->inspectable = &string_box_inspectable_table;
+	box->reference.lpVtbl = &string_box_reference_table;
+	box->refs = 1;
+	if (text && WindowsCreateString(text, (UINT32)lstrlenW(text), &box->value) != S_OK) {
+		FREE(box);
+		return NULL;
+	}
+	InterlockedIncrement(&raven_xaml_objects);
+	return box;
+}
+
+static struct boxed_number *create_boxed_number(double value)
+{
+	struct boxed_number *box = ALLOC(sizeof *box);
+	if (!box)
+		return NULL;
+	box->inspectable = &number_box_inspectable_table;
+	box->reference.lpVtbl = &number_box_reference_table;
+	box->refs = 1;
+	box->value = value;
+	InterlockedIncrement(&raven_xaml_objects);
+	return box;
+}
+
+/* The authoring: a fresh engine Style carrying the TargetType and the pairs, sealed once every pair landed. A pair that
+ * fails to store abandons the whole style — a default that silently misses a value would render as the zero state instead
+ * of the documented default. */
+struct default_pair {
+	const WCHAR *property;
+	IInspectable *value;
+};
+
+static struct style_object *author_default(const WCHAR *target, const struct default_pair *pairs, UINT32 count)
+{
+	struct style_object *style = create_style();
+	if (!style)
+		return NULL;
+	store_name(&style->target_type, target, (UINT32)lstrlenW(target));
+	style->target_kind = TypeKind_Metadata;
+	for (UINT32 index = 0; index < count; ++index) {
+		if (FAILED(raven_style_add_setter((IInspectable *)style, pairs[index].property,
+			(UINT32)lstrlenW(pairs[index].property), pairs[index].value))) {
+			style_release((__x_ABI_CWindows_CUI_CXaml_CIStyle *)style);
+			return NULL;
+		}
+	}
+	style->sealed = TRUE;
+	setters_seal(style->setters);
+	return style;
+}
+
+static struct style_object *button_default;
+static struct style_object *textblock_default;
+static LONG defaults_ready; /* 0 = not built, 1 = building, 2 = built; a failed build stays at 2 and attach answers the fault */
+
+static void build_defaults(void)
+{
+	/* The text block's pairs are the constructor's own hardcodes: FontSize 14 and the light theme's black foreground,
+	 * both properties the put_Style application stores on the element. */
+	struct boxed_number *fourteen = create_boxed_number(14.0);
+	struct boxed_string *black = create_boxed_string(L"Black");
+	struct boxed_string *transparent = create_boxed_string(L"Transparent");
+	if (fourteen && black) {
+		const struct default_pair textblock_pairs[2] = {
+			{L"FontSize", (IInspectable *)fourteen},
+			{L"Foreground", (IInspectable *)black},
+		};
+		textblock_default = author_default(textblock_target, textblock_pairs, 2);
+	}
+	if (transparent) {
+		const struct default_pair button_pairs[1] = {
+			{L"Background", (IInspectable *)transparent},
+		};
+		button_default = author_default(button_target, button_pairs, 1);
+	}
+	if (black)
+		boxed_string_release_any(black);
+	if (fourteen)
+		boxed_number_release_any(fourteen);
+	if (transparent)
+		boxed_string_release_any(transparent);
+}
+
+static void ensure_defaults(void)
+{
+	if (InterlockedCompareExchange(&defaults_ready, 1, 0) == 0) {
+		build_defaults();
+		InterlockedExchange(&defaults_ready, 2);
+	} else {
+		while (InterlockedCompareExchange(&defaults_ready, 2, 2) != 2)
+			Sleep(0);
+	}
+}
+
+__declspec(dllexport) HRESULT raven_style_default_attach(IInspectable *element)
+{
+	__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock *textblock = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CControls_CIButton *button = NULL;
+	struct style_object *style;
+	if (!element)
+		return E_POINTER;
+	ensure_defaults();
+	if (!textblock_default || !button_default)
+		return E_OUTOFMEMORY;
+	/* The QI picks the class; a foreign implementation the QI let through dies at put_Style's vtable check, which
+	 * answers S_FALSE for an element that is not one of the engine's own. */
+	if (SUCCEEDED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+		(void **)&textblock)) && textblock) {
+		textblock->lpVtbl->Release(textblock);
+		style = textblock_default;
+	} else if (SUCCEEDED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+		(void **)&button)) && button) {
+		button->lpVtbl->Release(button);
+		style = button_default;
+	} else {
+		return S_FALSE;
+	}
+	return raven_xaml_element_put_style(element, (IInspectable *)style);
 }

@@ -2875,11 +2875,16 @@ static HRESULT WINAPI element_factory_activate(IActivationFactory *iface, IInspe
 		if (!textblock)
 			return E_OUTOFMEMORY;
 		*out = (IInspectable *)textblock;
+		/* The constructor's initial style: the engine's authored default for the class. */
+		if (raven_style_default_attach(*out) != S_OK)
+			return E_OUTOFMEMORY;
 	} else if (self->kind == element_button) {
 		struct button *button = create_button();
 		if (!button)
 			return E_OUTOFMEMORY;
 		*out = (IInspectable *)&button->first;
+		if (raven_style_default_attach(*out) != S_OK)
+			return E_OUTOFMEMORY;
 	} else if (self->kind == element_row_definition) {
 		struct row_definition *definition = create_row_definition();
 		if (!definition)

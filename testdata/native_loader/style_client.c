@@ -14,7 +14,11 @@
  * emulated GDI surface the rendering fixture uses; the text re-measure asserts bounds instead of pixels, the way the text
  * fixture does, because the face the host font service picks decides the exact extent. A second grid without the style
  * keeps its own background, the style round-trips through a ResourceDictionary under a string key and still applies,
- * TargetType round-trips the interop TypeName and the Setters Size reflects the stored pairs. Freestanding C like the
+ * TargetType round-trips the interop TypeName and the Setters Size reflects the stored pairs. The authored default styles
+ * round last: a fresh control the engine attached its default to answers get_Style with an engine Style whose setter
+ * pairs carry the authored values (the button's transparent Background, the text block's FontSize 14 and black
+ * Foreground), the defaults render through the same pipeline a put drives, an explicit put_Style overrides the default
+ * and get_Style answers the app's style, and put_Style(NULL) clears as before without reverting. Freestanding C like the
  * other guests: hand-rolled COM, no CRT beyond the freestanding one the build links. */
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID
@@ -57,12 +61,22 @@ typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
 typedef HRESULT (*add_setter_function)(IInspectable *, const WCHAR *, UINT32, IInspectable *);
 typedef HRESULT (*put_style_function)(IInspectable *, IInspectable *);
 typedef HRESULT (*get_style_function)(IInspectable *, IInspectable **);
+typedef HRESULT (*default_attach_function)(IInspectable *);
+typedef HRESULT (*setter_count_function)(IInspectable *, UINT32 *);
+typedef HRESULT (*setter_at_function)(IInspectable *, UINT32, const WCHAR **, UINT32 *, IInspectable **);
 
 static int same_text(HSTRING value, const WCHAR *expected)
 {
 	UINT32 length = 0;
 	const WCHAR *text = WindowsGetStringRawBuffer(value, &length);
 	return length == lstrlenW(expected) && CompareStringOrdinal(text, (int)length, expected, -1, FALSE) == CSTR_EQUAL;
+}
+
+/* The property name setter_at hands out: a raw buffer with its own length, not an HSTRING. */
+static int same_raw(const WCHAR *text, UINT32 length, const WCHAR *expected)
+{
+	return text && length == (UINT32)lstrlenW(expected) &&
+		CompareStringOrdinal(text, (int)length, expected, -1, FALSE) == CSTR_EQUAL;
 }
 
 static int same_unknown(void *left, void *right)
@@ -429,6 +443,7 @@ int raven_entry(void)
 	static const WCHAR style_name[] = L"Windows.UI.Xaml.Style";
 	static const WCHAR grid_name[] = L"Windows.UI.Xaml.Controls.Grid";
 	static const WCHAR textblock_name[] = L"Windows.UI.Xaml.Controls.TextBlock";
+	static const WCHAR button_name[] = L"Windows.UI.Xaml.Controls.Button";
 	static const WCHAR dictionary_name[] = L"Windows.UI.Xaml.ResourceDictionary";
 	static const WCHAR core_name[] = L"Windows.UI.Core.CoreWindow";
 	static const WCHAR window_name[] = L"Windows.UI.Xaml.Window";
@@ -448,8 +463,9 @@ int raven_entry(void)
 	IInspectable *grid_plain = NULL, *grid_styled = NULL, *style = NULL, *found = NULL, *compositor_object = NULL;
 	IInspectable *style2 = NULL, *textblock = NULL, *base_style = NULL, *derived_style = NULL;
 	IInspectable *bad_style = NULL, *bad_style2 = NULL, *skip_style = NULL, *roundtrip = NULL;
+	IInspectable *default_button = NULL, *default_textblock = NULL, *override_style = NULL;
 	style_i *style_iface = NULL, *derived_iface = NULL;
-	textblock_i *text_iface = NULL;
+	textblock_i *text_iface = NULL, *default_text_iface = NULL;
 	panel_i *plain_panel = NULL, *styled_panel = NULL;
 	compositor_i *compositor = NULL;
 	brush_i *brush = NULL;
@@ -461,9 +477,12 @@ int raven_entry(void)
 	add_setter_function add_setter = NULL;
 	put_style_function put_style = NULL;
 	get_style_function get_style = NULL;
+	default_attach_function default_attach = NULL;
+	setter_count_function setter_count = NULL;
+	setter_at_function setter_at = NULL;
 	struct fixture_box *red = NULL, *key = NULL, *probe = NULL, *blue = NULL, *red2 = NULL, *blue2 = NULL;
-	struct fixture_number *size32 = NULL, *size14 = NULL, *seven = NULL, *three = NULL;
-	UINT count14 = 0, count32 = 0;
+	struct fixture_number *size32 = NULL, *size14 = NULL, *seven = NULL, *three = NULL, *size8 = NULL;
+	UINT count14 = 0, count32 = 0, count_default = 0, count_override = 0;
 	float font_size = 0;
 	if (!initialize || !get_factory)
 		return 1;
@@ -497,7 +516,10 @@ int raven_entry(void)
 	add_setter = component ? (add_setter_function)GetProcAddress(component, "raven_style_add_setter") : NULL;
 	put_style = component ? (put_style_function)GetProcAddress(component, "raven_xaml_element_put_style") : NULL;
 	get_style = component ? (get_style_function)GetProcAddress(component, "raven_xaml_element_get_style") : NULL;
-	if (!add_setter || !put_style || !get_style)
+	default_attach = component ? (default_attach_function)GetProcAddress(component, "raven_style_default_attach") : NULL;
+	setter_count = component ? (setter_count_function)GetProcAddress(component, "raven_style_setter_count") : NULL;
+	setter_at = component ? (setter_at_function)GetProcAddress(component, "raven_style_setter_at") : NULL;
+	if (!add_setter || !put_style || !get_style || !default_attach || !setter_count || !setter_at)
 		return 12;
 	/* the plain grid: its own blue background through the real brush slot, set before any style exists */
 	if (activate(grid_name, &grid_plain) != S_OK || !grid_plain)
@@ -766,6 +788,163 @@ int raven_entry(void)
 		return 103;
 	if (color_at(hwnd, 300, 200, RGB(0, 0, 255)))
 		return 104;
+	/* The authored default styles. The engine authors one sealed Style per control class from the same setter path the
+	 * rounds above use, and the constructor attaches it: a fresh control already answers get_Style with the engine's
+	 * own object and a later put_Style replaces it. The button first: the pickup is automatic — no explicit attach —
+	 * and the default carries the authored Background pair; the explicit attach entry point re-puts the same default. */
+	if (activate(button_name, &default_button) != S_OK || !default_button)
+		return 106;
+	if (get_style(default_button, &roundtrip) != S_OK || !roundtrip)
+		return 107;
+	if (default_attach(default_button) != S_OK)
+		return 108;
+	{
+		IInspectable *reput = NULL;
+		if (get_style(default_button, &reput) != S_OK || reput != roundtrip)
+			return 109;
+		reput->lpVtbl->Release(reput);
+	}
+	{
+		UINT32 pairs = 0;
+		const WCHAR *property = NULL;
+		UINT32 length = 0;
+		IInspectable *value = NULL;
+		boxed_string_i *string_box = NULL;
+		HSTRING text_value = NULL;
+		if (setter_count(roundtrip, &pairs) != S_OK || pairs != 1)
+			return 110;
+		if (setter_at(roundtrip, 0, &property, &length, &value) != S_OK || !property || !value)
+			return 111;
+		if (!same_raw(property, length, L"Background"))
+			return 112;
+		if (value->lpVtbl->QueryInterface(value, &IID___FIReference_1_HSTRING, (void **)&string_box) != S_OK ||
+			!string_box)
+			return 113;
+		if (string_box->lpVtbl->get_Value(string_box, &text_value) != S_OK || !text_value)
+			return 114;
+		if (!same_text(text_value, L"Transparent"))
+			return 115;
+		WindowsDeleteString(text_value);
+		string_box->lpVtbl->Release(string_box);
+		value->lpVtbl->Release(value);
+	}
+	roundtrip->lpVtbl->Release(roundtrip);
+	roundtrip = NULL;
+	/* the text block default: the constructor's own FontSize 14 and black foreground, authored as setter pairs and
+	 * attached by the constructor the same way */
+	if (activate(textblock_name, &default_textblock) != S_OK || !default_textblock)
+		return 116;
+	if (default_textblock->lpVtbl->QueryInterface(default_textblock,
+		&IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock, (void **)&default_text_iface) != S_OK ||
+		!default_text_iface)
+		return 117;
+	{
+		HSTRING text_value = NULL;
+		static const WCHAR text_w[] = L"Default";
+		if (WindowsCreateString(text_w, ARRAYSIZE(text_w) - 1, &text_value) != S_OK)
+			return 118;
+		if (default_text_iface->lpVtbl->put_Text(default_text_iface, (uint64_t)(uintptr_t)text_value) != S_OK) {
+			WindowsDeleteString(text_value);
+			return 118;
+		}
+		WindowsDeleteString(text_value);
+	}
+	if (get_style(default_textblock, &roundtrip) != S_OK || !roundtrip)
+		return 120;
+	{
+		UINT32 pairs = 0;
+		int font_size_seen = 0, foreground_seen = 0;
+		if (setter_count(roundtrip, &pairs) != S_OK || pairs != 2)
+			return 121;
+		for (UINT32 index = 0; index < pairs; ++index) {
+			const WCHAR *property = NULL;
+			UINT32 length = 0;
+			IInspectable *value = NULL;
+			if (setter_at(roundtrip, index, &property, &length, &value) != S_OK || !property || !value)
+				return 122;
+			if (same_raw(property, length, L"FontSize")) {
+				boxed_number_i *number_box = NULL;
+				double read = 0;
+				if (value->lpVtbl->QueryInterface(value, &IID___FIReference_1_DOUBLE, (void **)&number_box) != S_OK ||
+					!number_box)
+					return 123;
+				if (number_box->lpVtbl->get_Value(number_box, &read) != S_OK || read != 14.0)
+					return 124;
+				number_box->lpVtbl->Release(number_box);
+				font_size_seen = 1;
+			} else if (same_raw(property, length, L"Foreground")) {
+				boxed_string_i *string_box = NULL;
+				HSTRING text_value = NULL;
+				if (value->lpVtbl->QueryInterface(value, &IID___FIReference_1_HSTRING, (void **)&string_box) != S_OK ||
+					!string_box)
+					return 125;
+				if (string_box->lpVtbl->get_Value(string_box, &text_value) != S_OK || !text_value)
+					return 126;
+				if (!same_text(text_value, L"Black"))
+					return 127;
+				WindowsDeleteString(text_value);
+				string_box->lpVtbl->Release(string_box);
+				foreground_seen = 1;
+			}
+			value->lpVtbl->Release(value);
+		}
+		if (!font_size_seen || !foreground_seen)
+			return 128;
+	}
+	/* the authored defaults render: the default text block appended to the hosted blue grid draws its black 14pt run */
+	{
+		void *children = NULL;
+		struct fixture_children *vector = NULL;
+		if (plain_panel->lpVtbl->get_Children(plain_panel, (uint64_t)(uintptr_t)&children) != S_OK || !children)
+			return 129;
+		if (((IInspectable *)children)->lpVtbl->QueryInterface((IInspectable *)children, &IID___FIVector_1_UIElement,
+			(void **)&vector) != S_OK || !vector) {
+			((IInspectable *)children)->lpVtbl->Release((IInspectable *)children);
+			return 130;
+		}
+		((IInspectable *)children)->lpVtbl->Release((IInspectable *)children);
+		if (vector->lpVtbl->Append(vector, default_textblock) != S_OK) {
+			vector->lpVtbl->Release(vector);
+			return 131;
+		}
+		vector->lpVtbl->Release(vector);
+		/* the children append does not invalidate by itself — only the definition vectors re-render on append — so the
+		 * re-host presents the new child, the way the engine's own puts re-render */
+		if (xaml_window->lpVtbl->put_Content(xaml_window, (uint64_t)(uintptr_t)grid_plain) != S_OK)
+			return 131;
+	}
+	count_default = count_foreground(hwnd, 0, 0, 220, 40, RGB(0, 0, 0));
+	if (!count_default)
+		return 132;
+	/* an explicit put_Style overrides the default: get_Style answers the app's style and the value follows it */
+	if (activate(style_name, &override_style) != S_OK || !override_style)
+		return 133;
+	if (!(size8 = make_number(8.0)))
+		return 134;
+	if (add_setter(override_style, L"FontSize", (UINT32)lstrlenW(L"FontSize"), (IInspectable *)size8) != S_OK)
+		return 135;
+	if (put_style(default_textblock, override_style) != S_OK)
+		return 136;
+	if (get_style(default_textblock, &roundtrip) != S_OK || !roundtrip)
+		return 137;
+	if (!same_unknown(roundtrip, override_style))
+		return 138;
+	roundtrip->lpVtbl->Release(roundtrip);
+	roundtrip = NULL;
+	if (default_text_iface->lpVtbl->get_FontSize(default_text_iface, (uint64_t)(uintptr_t)&font_size) != S_OK ||
+		font_size != 8.0f)
+		return 139;
+	count_override = count_foreground(hwnd, 0, 0, 220, 40, RGB(0, 0, 0));
+	if (!count_override || count_override >= count_default)
+		return 140;
+	/* put_Style(NULL) clears as before: no style answers, the engine does not revert, and the run re-renders unchanged */
+	if (put_style(default_textblock, NULL) != S_OK)
+		return 141;
+	if (get_style(default_textblock, &roundtrip) != S_OK || roundtrip)
+		return 142;
+	if (default_text_iface->lpVtbl->get_FontSize(default_text_iface, (uint64_t)(uintptr_t)&font_size) != S_OK ||
+		font_size != 8.0f)
+		return 143;
 	/* release everything: the window's own reference goes with Close, and clearing the content detaches the hosted tree
 	 * from the render and input roots. The component cannot answer DllCanUnloadNow with S_OK after a render — the
 	 * composition target keeps the presented visual tree until the process ends, which is why the rendering fixture never
@@ -801,8 +980,11 @@ int raven_entry(void)
 	fixture_number_release(size14);
 	fixture_number_release(seven);
 	fixture_number_release(three);
+	fixture_number_release(size8);
 	if (derived_iface)
 		derived_iface->lpVtbl->Release(derived_iface);
+	if (default_text_iface)
+		default_text_iface->lpVtbl->Release(default_text_iface);
 	if (style_iface)
 		style_iface->lpVtbl->Release(style_iface);
 	if (style)
@@ -819,6 +1001,12 @@ int raven_entry(void)
 		bad_style2->lpVtbl->Release(bad_style2);
 	if (skip_style)
 		skip_style->lpVtbl->Release(skip_style);
+	if (override_style)
+		override_style->lpVtbl->Release(override_style);
+	if (default_textblock)
+		default_textblock->lpVtbl->Release(default_textblock);
+	if (default_button)
+		default_button->lpVtbl->Release(default_button);
 	if (found)
 		found->lpVtbl->Release(found);
 	if (textblock)
