@@ -28,10 +28,11 @@ struct client {
 	IDispatcherQueue2 *access;
 	IDispatcherQueueTimer *timer;
 	IDispatcherQueueShutdownStartingEventArgs *args;
+	IDeferral *deferral;
 	IAsyncAction *shutdown;
 	struct handler enqueue[4], last, starting, completed, action_done;
 	DWORD controller_thread;
-	HANDLE ran;
+	HANDLE ran, deferral_taken;
 	int mode, failure, used, sequence[16], shutdown_events, action_calls;
 };
 #define CHECK(condition) do { if (!(condition)) { self->failure = __LINE__; return E_FAIL; } } while (0)
@@ -52,7 +53,20 @@ static HRESULT last_invoke(void *iface)
 {
 	struct client *self = ((struct handler *)iface)->client;
 	/* The final operation enqueued from ShutdownStarting still dispatches before the loop exits. */
-	return record(self, 5);
+	HRESULT result = record(self, 5);
+	if (self->deferral && self->mode == 0) {
+		/* Mode 0 completes the deferral while the queued close work has not run yet; a second Complete is a
+		 * no-op, so the shutdown must still finish exactly once. */
+		CHECK(IDeferral_Complete(self->deferral) == S_OK);
+		CHECK(IDeferral_Complete(self->deferral) == S_OK);
+		IDeferral_Release(self->deferral);
+		self->deferral = NULL;
+	} else if (self->deferral) {
+		/* Mode 1 leaves the deferral outstanding: the close work below every priority runs first and skips, and
+		 * the shutdown only finishes when the waiting thread completes the deferral cross-thread. */
+		SetEvent(self->deferral_taken);
+	}
+	return result;
 }
 static HRESULT starting_invoke(void *iface, IDispatcherQueue *sender, IDispatcherQueueShutdownStartingEventArgs *args)
 {
@@ -61,11 +75,14 @@ static HRESULT starting_invoke(void *iface, IDispatcherQueue *sender, IDispatche
 	self->shutdown_events = 1;
 	self->args = args;
 	IDispatcherQueueShutdownStartingEventArgs_AddRef(args);
-	IDeferral *deferral = (void *)1;
-	CHECK(IDispatcherQueueShutdownStartingEventArgs_GetDeferral(args, &deferral) == E_NOTIMPL && !deferral);
+	IDeferral *deferral = NULL;
+	CHECK(IDispatcherQueueShutdownStartingEventArgs_GetDeferral(args, &deferral) == S_OK && deferral);
+	self->deferral = deferral;
 	boolean accepted = FALSE;
+	/* The deferral keeps the queue open: work posted from ShutdownStarting still dispatches before the drain. */
 	CHECK(IDispatcherQueue_TryEnqueue(sender, (void *)&self->last, &accepted) == S_OK && accepted);
-	/* A failing handler must not stall the shutdown; the drain and the completed event still follow. */
+	/* A failing handler must not stall the shutdown; the drain and the completed event still follow, waiting on
+	 * the deferral the handler took before failing. */
 	return self->mode == 1 ? E_ACCESSDENIED : S_OK;
 }
 static HRESULT completed_invoke(void *iface, IDispatcherQueue *sender, IInspectable *args)
@@ -182,6 +199,17 @@ static ULONG WINAPI action_done_release(IAsyncActionCompletedHandler *iface) { r
 static HRESULT WINAPI action_done_invoke_abi(IAsyncActionCompletedHandler *iface, IAsyncAction *action, AsyncStatus status) { return action_done_invoke(iface, action, status); }
 static const IAsyncActionCompletedHandlerVtbl action_done_table = {action_done_query, action_done_addref, action_done_release, action_done_invoke_abi};
 
+/* Mode 1: completes the deferral after the close work has already skipped past, from outside the queue's thread. */
+static DWORD WINAPI complete_deferral(void *context)
+{
+	struct client *self = context;
+	if (WaitForSingleObject(self->deferral_taken, 5000) != WAIT_OBJECT_0) return 1;
+	if (IDeferral_Complete(self->deferral) != S_OK || IDeferral_Complete(self->deferral) != S_OK) return 2;
+	IDeferral_Release(self->deferral);
+	self->deferral = NULL;
+	return 0;
+}
+
 static int check_queue_post_shutdown(struct client *self)
 {
 	boolean accepted = TRUE;
@@ -237,6 +265,11 @@ static int run_checks(struct client *self)
 	HMODULE component = GetModuleHandleW(L"raven-xaml.dll");
 	HRESULT (WINAPI *unload)(void) = component ? (void *)GetProcAddress(component, "DllCanUnloadNow") : NULL;
 	if (!unload || unload() != S_FALSE) return 13;
+	HANDLE completer = NULL;
+	if (self->mode == 1) {
+		completer = CreateThread(NULL, 0, complete_deferral, self, 0, NULL);
+		if (!completer) return 23;
+	}
 	if (IDispatcherQueueController_ShutdownQueueAsync(self->controller, &self->shutdown) != S_OK || !self->shutdown) return 14;
 	if (IAsyncAction_put_Completed(self->shutdown, (void *)&self->action_done) != S_OK || self->action_calls != 1) return 15;
 	if (IAsyncAction_put_Completed(self->shutdown, (void *)&self->action_done) != (HRESULT)0x80000018) return 16;
@@ -254,6 +287,11 @@ static int run_checks(struct client *self)
 	int queue_result = check_queue_post_shutdown(self);
 	if (queue_result) return queue_result;
 	if (self->shutdown_events != 2 || self->used != 4 || self->sequence[3] != 5) return 20;
+	if (completer) {
+		DWORD code = 0;
+		if (WaitForSingleObject(completer, 5000) != WAIT_OBJECT_0 || !GetExitCodeThread(completer, &code) || code) return 24;
+		CloseHandle(completer);
+	}
 	IAsyncAction *repeat = (void *)1;
 	if (IDispatcherQueueController_ShutdownQueueAsync(self->controller, &repeat) != (HRESULT)0x8000000e || repeat) return 21;
 	if (unload() != S_FALSE) return 22;
@@ -291,6 +329,7 @@ int raven_entry(void)
 		self->queue_statics = queue_statics;
 		self->mode = mode;
 		self->ran = CreateEventW(NULL, FALSE, FALSE, NULL);
+		self->deferral_taken = CreateEventW(NULL, FALSE, FALSE, NULL);
 		int values[] = {2, 3, 1};
 		for (int i = 0; i < 3; ++i) self->enqueue[i] = (struct handler){&enqueue_table, 1, self, values[i]};
 		self->enqueue[3] = (struct handler){&ping_table, 1, self, 0};
@@ -298,7 +337,7 @@ int raven_entry(void)
 		self->starting = (struct handler){&starting_table, 1, self, 0};
 		self->completed = (struct handler){&completed_table, 1, self, 0};
 		self->action_done = (struct handler){&action_done_table, 1, self, 0};
-		if (!self->ran) return 7;
+		if (!self->ran || !self->deferral_taken) return 7;
 		if (IDispatcherQueueControllerStatics_CreateOnDedicatedThread(controller_statics, &self->controller) != S_OK || !self->controller) return 8;
 		int result = run_checks(self);
 		if (self->failure) return self->failure;
@@ -311,6 +350,7 @@ int raven_entry(void)
 		IAsyncAction_Release(self->shutdown);
 		IDispatcherQueueController_Release(self->controller);
 		CloseHandle(self->ran);
+		CloseHandle(self->deferral_taken);
 		for (int i = 0; i < 4; ++i) if (self->enqueue[i].refs != 1) return 10;
 		if (self->last.refs != 1 || self->starting.refs != 1 || self->completed.refs != 1 || self->action_done.refs != 1) return 11;
 		if (unload() != S_OK) return 12;

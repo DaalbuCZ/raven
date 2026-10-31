@@ -72,6 +72,9 @@ static HRESULT starting_invoke(void *iface, IDispatcherQueue *sender, IDispatche
 	self->shutdown = 1;
 	self->shutdown_args = args;
 	IDispatcherQueueShutdownStartingEventArgs_AddRef(args);
+	/* The immediate CoreWindow-owned close cannot wait for a deferral; only the controller's pump honors them. */
+	IDeferral *deferral = (void *)1;
+	CHECK(IDispatcherQueueShutdownStartingEventArgs_GetDeferral(args, &deferral) == E_NOTIMPL && !deferral);
 	boolean accepted = TRUE;
 	CHECK(IDispatcherQueue_TryEnqueue(sender, (void *)&self->enqueue[0], &accepted) == S_OK && !accepted);
 	return self->mode == 1 ? E_ACCESSDENIED : S_OK;

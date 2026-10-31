@@ -36,6 +36,10 @@ struct queue {
 	CRITICAL_SECTION lock;
 	BOOL closed;
 	BOOL shutdown_started;
+	/* Deferred controller shutdown: the count of outstanding ShutdownStarting deferrals keeps the queue open and
+	 * close_deferred records that the close work ran while one was outstanding, so the last Complete re-posts it. */
+	int shutdown_deferrals;
+	BOOL close_deferred;
 	ICoreWindow *window;
 	HWND hwnd;
 	struct timer *timers;
@@ -453,7 +457,9 @@ HRESULT raven_dispatcher_queue_timer(IDispatcherQueue *iface, UINT_PTR id, BOOL 
 	return result;
 }
 
-struct shutdown_args { IDispatcherQueueShutdownStartingEventArgs iface; LONG refs; };
+struct shutdown_args { IDispatcherQueueShutdownStartingEventArgs iface; LONG refs; struct queue *queue; BOOL deferral_ok; };
+/* Built with the deferral object section below; forward-declared because the args vtable needs it first. */
+static HRESULT queue_deferral_create(struct queue *queue, IDeferral **out);
 static HRESULT WINAPI shutdown_query(IDispatcherQueueShutdownStartingEventArgs *iface, REFIID iid, void **out)
 {
 	if (!out) return E_POINTER;
@@ -473,17 +479,21 @@ static ULONG WINAPI shutdown_release(IDispatcherQueueShutdownStartingEventArgs *
 static HRESULT WINAPI shutdown_iids(IDispatcherQueueShutdownStartingEventArgs *iface, ULONG *count, IID **iids) { return no_iids(count, iids); }
 static HRESULT WINAPI shutdown_class(IDispatcherQueueShutdownStartingEventArgs *iface, HSTRING *out) { return class_string(L"Windows.System.DispatcherQueueShutdownStartingEventArgs", out); }
 static HRESULT WINAPI shutdown_trust(IDispatcherQueueShutdownStartingEventArgs *iface, TrustLevel *out) { return trust(out); }
-static HRESULT WINAPI shutdown_deferral(IDispatcherQueueShutdownStartingEventArgs *iface, IDeferral **out)
+static HRESULT WINAPI shutdown_get_deferral(IDispatcherQueueShutdownStartingEventArgs *iface, IDeferral **out)
 {
 	if (!out) return E_POINTER;
 	*out = NULL;
-	/* shortcut: CoreWindow shutdown is immediate; implement deferrals with a DispatcherQueueController shutdown pump. */
-	return E_NOTIMPL;
+	struct shutdown_args *self = (void *)iface;
+	/* Refusal: the immediate CoreWindow-owned close (raven_dispatcher_queue_close) finishes synchronously on the
+	 * window thread and cannot wait for a deferral. Deferrals are honored on the controller's own pump, where the
+	 * close work is an ordinary queued item that can be re-posted. */
+	if (!self->deferral_ok) return E_NOTIMPL;
+	return queue_deferral_create(self->queue, out);
 }
 static const IDispatcherQueueShutdownStartingEventArgsVtbl shutdown_table = {
-	shutdown_query, shutdown_addref, shutdown_release, shutdown_iids, shutdown_class, shutdown_trust, shutdown_deferral
+	shutdown_query, shutdown_addref, shutdown_release, shutdown_iids, shutdown_class, shutdown_trust, shutdown_get_deferral
 };
-static HRESULT notify_shutdown(struct queue *queue, BOOL starting)
+static HRESULT notify_shutdown(struct queue *queue, BOOL starting, BOOL deferral_ok)
 {
 	IUnknown **handlers;
 	ULONG count;
@@ -493,7 +503,13 @@ static HRESULT notify_shutdown(struct queue *queue, BOOL starting)
 	if (starting && count) {
 		args = ALLOC(sizeof *args);
 		if (!args) result = E_OUTOFMEMORY;
-		else { args->iface.lpVtbl = &shutdown_table; args->refs = 1; InterlockedIncrement(&raven_xaml_objects); }
+		else {
+			args->iface.lpVtbl = &shutdown_table;
+			args->refs = 1;
+			args->queue = queue;
+			args->deferral_ok = deferral_ok;
+			InterlockedIncrement(&raven_xaml_objects);
+		}
 	}
 	for (ULONG i = 0; i < count; ++i) {
 		if (SUCCEEDED(result)) {
@@ -505,6 +521,79 @@ static HRESULT notify_shutdown(struct queue *queue, BOOL starting)
 	FREE(handlers);
 	if (args) shutdown_release(&args->iface);
 	return result;
+}
+
+/* A ShutdownStarting deferral: outstanding deferrals keep the controller queue open so the handler can keep posting
+ * work; the last Complete re-posts the close work below every client priority. The deferral owns a queue reference,
+ * so a deferral held past ShutdownQueueAsync cannot free the queue out from under the drain. */
+static void post_close_work(struct queue *queue);
+struct queue_deferral {
+	IDeferral iface;
+	LONG refs;
+	struct queue *queue;
+	BOOL completed;
+};
+static HRESULT WINAPI deferral_query(IDeferral *iface, REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IInspectable) &&
+		!IsEqualIID(iid, &IID___x_ABI_CWindows_CFoundation_CIDeferral)) return E_NOINTERFACE;
+	*out = iface;
+	InterlockedIncrement(&((struct queue_deferral *)iface)->refs);
+	return S_OK;
+}
+static ULONG WINAPI deferral_addref(IDeferral *iface) { return InterlockedIncrement(&((struct queue_deferral *)iface)->refs); }
+static ULONG WINAPI deferral_release(IDeferral *iface)
+{
+	struct queue_deferral *self = (void *)iface;
+	LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		IDispatcherQueue_Release(&self->queue->iface);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return refs;
+}
+static HRESULT WINAPI deferral_iids(IDeferral *iface, ULONG *count, IID **iids) { return no_iids(count, iids); }
+static HRESULT WINAPI deferral_class(IDeferral *iface, HSTRING *out) { return class_string(L"Windows.Foundation.Deferral", out); }
+static HRESULT WINAPI deferral_trust(IDeferral *iface, TrustLevel *out) { return trust(out); }
+static HRESULT WINAPI deferral_complete(IDeferral *iface)
+{
+	struct queue_deferral *self = (void *)iface;
+	struct queue *queue = self->queue;
+	/* Complete is idempotent: only the first call counts against the queue's outstanding-deferral tally. */
+	BOOL post = FALSE;
+	EnterCriticalSection(&queue->lock);
+	if (!self->completed) {
+		self->completed = TRUE;
+		if (queue->shutdown_deferrals && !--queue->shutdown_deferrals && queue->close_deferred && !queue->closed) {
+			queue->close_deferred = FALSE;
+			post = TRUE;
+		}
+	}
+	LeaveCriticalSection(&queue->lock);
+	if (post) post_close_work(queue);
+	return S_OK;
+}
+static const IDeferralVtbl deferral_table = {
+	deferral_query, deferral_addref, deferral_release, deferral_iids, deferral_class, deferral_trust, deferral_complete
+};
+static HRESULT queue_deferral_create(struct queue *queue, IDeferral **out)
+{
+	struct queue_deferral *deferral = ALLOC(sizeof *deferral);
+	if (!deferral) return E_OUTOFMEMORY;
+	deferral->iface.lpVtbl = &deferral_table;
+	deferral->refs = 1;
+	deferral->completed = FALSE;
+	deferral->queue = queue;
+	IDispatcherQueue_AddRef(&queue->iface);
+	EnterCriticalSection(&queue->lock);
+	++queue->shutdown_deferrals;
+	LeaveCriticalSection(&queue->lock);
+	InterlockedIncrement(&raven_xaml_objects);
+	*out = &deferral->iface;
+	return S_OK;
 }
 static HRESULT WINAPI queue_add_starting(IDispatcherQueue *iface, starting_handler *handler, EventRegistrationToken *token)
 {
@@ -555,7 +644,7 @@ HRESULT raven_dispatcher_queue_close(IDispatcherQueue *iface)
 	BOOL raise_starting = !queue->shutdown_started;
 	queue->shutdown_started = TRUE;
 	LeaveCriticalSection(&queue->lock);
-	HRESULT result = raise_starting ? notify_shutdown(queue, TRUE) : S_OK;
+	HRESULT result = raise_starting ? notify_shutdown(queue, TRUE, FALSE) : S_OK;
 	EnterCriticalSection(&queue->lock);
 	struct timer *timer = queue->timers;
 	if (timer) timer_addref(&timer->iface);
@@ -571,7 +660,7 @@ HRESULT raven_dispatcher_queue_close(IDispatcherQueue *iface)
 		timer_release(&timer->iface);
 		timer = next;
 	}
-	HRESULT completed = notify_shutdown(queue, FALSE);
+	HRESULT completed = notify_shutdown(queue, FALSE, FALSE);
 	raven_event_close(&queue->starting);
 	raven_event_close(&queue->completed);
 	return FAILED(result) ? result : completed;
@@ -796,6 +885,17 @@ static HRESULT WINAPI shutdown_work_invoke(IDispatchedHandler *iface)
 {
 	struct shutdown_work *self = (void *)iface;
 	if (self->close) {
+		struct queue *queue = (void *)self->queue;
+		/* An outstanding ShutdownStarting deferral defers the close: the last Complete re-posts this work, so the
+		 * drain keeps dispatching the work posted during the deferral window first. */
+		BOOL defer = FALSE;
+		EnterCriticalSection(&queue->lock);
+		if (queue->shutdown_deferrals) {
+			queue->close_deferred = TRUE;
+			defer = TRUE;
+		}
+		LeaveCriticalSection(&queue->lock);
+		if (defer) return S_OK;
 		/* The window closes on its own thread, completing pending actions and raising ShutdownCompleted with the queue close. */
 		ICoreWindow_Close(self->window);
 		return S_OK;
@@ -805,7 +905,7 @@ static HRESULT WINAPI shutdown_work_invoke(IDispatchedHandler *iface)
 	BOOL raise = !queue->closed && !queue->shutdown_started;
 	if (raise) queue->shutdown_started = TRUE;
 	LeaveCriticalSection(&queue->lock);
-	if (raise) notify_shutdown(queue, TRUE);
+	if (raise) notify_shutdown(queue, TRUE, TRUE);
 	/* A failing ShutdownStarting handler must not stall the drain. */
 	return S_OK;
 }
@@ -823,6 +923,16 @@ static struct shutdown_work *new_shutdown_work(IDispatcherQueue *queue, ICoreWin
 	if (window) ICoreWindow_AddRef(window);
 	InterlockedIncrement(&raven_xaml_objects);
 	return work;
+}
+/* The re-posted close: queued below every client priority so work posted during the deferral window drains first.
+ * A rejected post means the window already closed some other way and the queue went down with it. */
+static void post_close_work(struct queue *queue)
+{
+	struct shutdown_work *closer = new_shutdown_work(&queue->iface, queue->window, TRUE);
+	if (!closer) return;
+	boolean accepted = FALSE;
+	raven_window_post(queue->window, &closer->iface, CoreDispatcherPriority_Idle - 1, &accepted);
+	shutdown_work_release(&closer->iface);
 }
 
 /* A standalone controller owns a dedicated thread whose CoreWindow carries the queue, like every thread-owned queue here.
