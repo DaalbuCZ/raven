@@ -408,6 +408,17 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("RaiseFailFastException", 3, [](ApiCall &call) {
 		const uint32_t code = call[0] ? call.load<uint32_t>(call[0]) : 0xc0000602U;
 		std::fprintf(stderr, "raven: fail fast exception %x\n", code);
+		if (call[0] && std::getenv("RAVEN_TRACE_EXCEPTIONS")) try {
+			const bool wide = call.pointer_width() == 8;
+			const uint32_t count = std::min(call.load<uint32_t>(call[0] + (wide ? 0x18 : 0x10)), 15U);
+			std::fprintf(stderr, "raven:   flags %x address %llx parameters", call.load<uint32_t>(call[0] + 4),
+				(unsigned long long)call.load_pointer(call[0] + (wide ? 0x10 : 0x0c)));
+			for (uint32_t index = 0; index < count; ++index)
+				std::fprintf(stderr, " %llx", (unsigned long long)call.load_pointer(call[0] + (wide ? 0x20 : 0x14) + index * call.pointer_width()));
+			std::fprintf(stderr, "\n");
+		} catch (const ApiFault &) {
+			std::fprintf(stderr, "raven:   fail fast record unreadable\n");
+		}
 		call.process.abandon_call();
 		throw ProcessExit{code, 0, true};
 	});

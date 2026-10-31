@@ -1510,7 +1510,12 @@ int raven_entry(void)
 	void *app_inner = NULL;
 	IInspectable *app_instance = NULL;
 	if (app_factory->lpVtbl->CreateInstance(app_factory, (uint64_t)(uintptr_t)provider,
-		(uint64_t)(uintptr_t)&app_inner, (uint64_t)(uintptr_t)&app_instance) != S_OK || !app_instance) return 677;
+		(uint64_t)(uintptr_t)&app_inner, (uint64_t)(uintptr_t)&app_instance) != S_OK || !app_instance || !app_inner) return 677;
+	IInspectable *inner_application = NULL;
+	if (((IInspectable *)app_inner)->lpVtbl->QueryInterface((IInspectable *)app_inner,
+		&IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&inner_application) != S_OK || !inner_application) return 686;
+	inner_application->lpVtbl->Release(inner_application);
+	((IInspectable *)app_inner)->lpVtbl->Release((IInspectable *)app_inner);
 	markup_provider *resolved = NULL;
 	if (app_instance->lpVtbl->QueryInterface(app_instance, &IID__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider,
 		(void **)&resolved) != S_OK || !resolved) return 678;

@@ -621,8 +621,7 @@ static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable *
 	return S_OK;
 }
 
-/* CreateInstance(outer, inner, instance): a composable class creates its base object and reports that it has no separate inner
- * object, as a Windows Runtime class without aggregation does. */
+/* CreateInstance returns the base object through inner when composing with an outer application. */
 static HRESULT WINAPI factory_create(xaml_application_factory *iface, uint64_t outer, uint64_t inner, uint64_t instance)
 {
 	struct application *application;
@@ -635,8 +634,11 @@ static HRESULT WINAPI factory_create(xaml_application_factory *iface, uint64_t o
 		*(void **)(uintptr_t)inner = NULL;
 	if (!(application = create_application((IInspectable *)(uintptr_t)outer)))
 		return E_OUTOFMEMORY;
-	/* The .NET Native runtime takes the created base as both the inner absence and the instance, and composes the managed class
-	 * itself; returning the outer here stops its application initialization. */
+	/* shortcut: inner shares the base object's identity and lifetime, implement full aggregation when identity matters. */
+	if (outer && inner) {
+		application_addref(application);
+		*(void **)(uintptr_t)inner = &application->first;
+	}
 	*(void **)(uintptr_t)instance = &application->first;
 	set_current(&application->first);
 	return S_OK;

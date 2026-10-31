@@ -1266,6 +1266,29 @@ the same day — see the two entries below. Evidence:
   `xaml_window_client.c` 25–28 (window weak source, resolve identity,
   agile refusal pinned).
 
+- Exception diagnosis (2026-10-31, stage 7): `RAVEN_TRACE_EXCEPTIONS`
+  now includes the flags, address and bounded parameter list of a
+  `RaiseFailFastException` record. In the Shapr3D run the record contains
+  code `0x1004`, flags 1, address 0 and no parameters, so it does not
+  reveal an HRESULT. No `RoOriginateLanguageException` call was observed.
+  The earlier exception trace reveals a null read at
+  `sharedlibrary.dll+0x82c8ef`. Unwinding identifies the actual caller as
+  `shapr3d.dll+0x1a755a2`; the earlier stack-scan entry
+  `shapr3d.dll+0x1374d30` is data, not a return address. The caller uses
+  `Windows.UI.Xaml.Application` and queries its composed inner object.
+- Application composition (2026-10-31, stage 7): `Application.Start` and
+  the application's `CreateInstance` were reached, but the latter returned
+  a null inner object for a non-null outer. It now returns an independently
+  referenced base object through inner; the controls fixture queries and
+  releases it on x64 and x86. The inner currently shares the base object's
+  identity and lifetime, so this is not complete WinRT aggregation. With the
+  updated component, Shapr3D passes the former null read and originates
+  `0x80131508` (`Arg_IndexOutOfRangeException`); it later calls fail-fast
+  without an exception record. The origin trace reaches
+  `shapr3d.dll+0x1b768d4` through .NET Native's exception reporting; the
+  source of the index error remains to be established. The temporary
+  component used for this run was removed from the package prefix afterward.
+
 ## Performance rules
 
 - One GPU compositor; XAML visuals and the 3D viewport composite on the GPU.
