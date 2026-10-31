@@ -1639,29 +1639,39 @@ STUB1(content_control, content_put_transitions)
  * directions — unbind the replaced root, bind the new one. */
 static void presenter_bind_walk(IInspectable *element, IInspectable *owner, int clear, int depth);
 
-static void button_store_template(struct button *self, IInspectable *template_object)
+/* The element-agnostic template store: every engine element that carries a template slot stores through here, so the
+ * presenter binding rides the store and not the button — the loader's deferred template-scope application, the style
+ * applier and the direct put all land on the same walk. The store takes the OWNER element (the IInspectable the
+ * presenters' non-owning back-pointer answers) and the slot; today the button is the only engine element with a
+ * template slot (raven_xaml_element_put_template dispatches to it), and a kind that gains one rides this store
+ * unchanged. The presenters inside the replaced root lose their back-pointer first: the old template releases with the
+ * swap, and a binding that outlived the owning element would dangle. The bindings of the new root follow the store —
+ * the loader defers the apply until the template's root is attached, so every store sees the final tree. */
+static void element_store_template(IInspectable *owner, IInspectable **slot, IInspectable *template_object)
 {
-	/* The presenters inside the replaced root lose their back-pointer first: the old template releases with the swap,
-	 * and a binding that outlived the owning button would dangle. The bindings of the new root follow the store — the
-	 * loader defers the apply until the template's root is attached, so every store sees the final tree. */
 	IInspectable *old_root = NULL;
-	if (self->template_value && raven_xaml_control_template_root(self->template_value, &old_root) == S_OK && old_root) {
+	if (*slot && raven_xaml_control_template_root(*slot, &old_root) == S_OK && old_root) {
 		presenter_bind_walk(old_root, NULL, 1, 0);
 		old_root->lpVtbl->Release(old_root);
 	}
 	if (template_object)
 		template_object->lpVtbl->AddRef(template_object);
-	if (self->template_value)
-		self->template_value->lpVtbl->Release(self->template_value);
-	self->template_value = template_object;
+	if (*slot)
+		(*slot)->lpVtbl->Release(*slot);
+	*slot = template_object;
 	if (template_object) {
 		IInspectable *new_root = NULL;
 		if (raven_xaml_control_template_root(template_object, &new_root) == S_OK && new_root) {
-			presenter_bind_walk(new_root, (IInspectable *)&self->first, 0, 0);
+			presenter_bind_walk(new_root, owner, 0, 0);
 			new_root->lpVtbl->Release(new_root);
 		}
 	}
 	raven_render_changed();
+}
+
+static void button_store_template(struct button *self, IInspectable *template_object)
+{
+	element_store_template((IInspectable *)&self->first, &self->template_value, template_object);
 }
 
 static HRESULT button_put_template(struct button *self, IInspectable *template_object)
@@ -2090,13 +2100,14 @@ static struct column_definition *create_column_definition(void)
  * raven_xaml_element_template_child hook the render walk already consults first for a templated control, so both the
  * measure and the paint pick the content up through the existing single-child path with no render-pass change.
  *
- * The templated parent is a NON-OWNING back-pointer bound when a button stores a template (bind_template_presenters
- * walks the template root and marks every presenter inside it). The bound button owns the template, the template owns
- * the root, and the root is the only thing that can hold this presenter, so the pointer cannot outlive the button that
- * owns it; button_store_template clears the bindings of the replaced root first, which covers the replace and the clear,
- * and a presenter the application retained across a clear answers no content (the pointer reads NULL) rather than a
- * dangling one. Presenters are created through the engine-internal elements factory (the loader's known-class path and
- * the raven_xaml_content_presenter_factory seam); the runtime catalog in xaml.c does not list the class yet. */
+ * The templated parent is a NON-OWNING back-pointer bound when an element stores a template (element_store_template
+ * walks the template root and marks every presenter inside it — the button is today the only engine element with a
+ * template slot). The bound element owns the template, the template owns the root, and the root is the only thing that
+ * can hold this presenter, so the pointer cannot outlive the element that owns it; the store clears the bindings of the
+ * replaced root first, which covers the replace and the clear, and a presenter the application retained across a clear
+ * answers no content (the pointer reads NULL) rather than a dangling one. Presenters are created through the
+ * engine-internal elements factory (the loader's known-class path and the raven_xaml_content_presenter_factory seam);
+ * the runtime catalog in xaml.c does not list the class yet. */
 static const WCHAR presenter_class[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
 
 struct content_presenter {
@@ -2104,6 +2115,10 @@ struct content_presenter {
 	LONG refs;
 	/* Non-owning; see the constraint comment above. */
 	IInspectable *templated_parent;
+	/* The ContentPresenter.ContentTemplate the loader stores (an owned reference; stable property 525). Stored only —
+	 * the render path does not apply a nested template yet, so this waits for that stage like the other template
+	 * rendering the engine has not grown. NULL clears, a non-template value answers E_INVALIDARG. */
+	IInspectable *content_template;
 };
 
 static HRESULT WINAPI presenter_query(IInspectable *iface, REFIID iid, void **out)
@@ -2128,6 +2143,8 @@ static ULONG WINAPI presenter_release(IInspectable *iface)
 	struct content_presenter *self = (struct content_presenter *)iface;
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		if (self->content_template)
+			self->content_template->lpVtbl->Release(self->content_template);
 		FREE(self);
 		InterlockedDecrement(&raven_xaml_objects);
 	}
@@ -2187,6 +2204,51 @@ static struct content_presenter *presenter_from_object(IInspectable *object)
 		(struct content_presenter *)inspectable : NULL;
 	inspectable->lpVtbl->Release(inspectable);
 	return presenter;
+}
+
+/* The ContentPresenter.ContentTemplate store (the loader's "ContentTemplate" object property, stable 525): an engine
+ * ControlTemplate only, the same wrong-kind answer put_Template gives; re-put replaces, NULL clears. The stored
+ * template is NOT applied — the presenter keeps resolving its templated parent's Content at render time until the
+ * nested-template stage, so the store does not raise a re-render and the presenters inside a content template stay
+ * unbound (binding them to the templated parent would promise a render the engine cannot deliver). S_FALSE for an
+ * object that is not an engine presenter, the skip convention. */
+static HRESULT presenter_store_content_template(IInspectable *object, IInspectable *value)
+{
+	struct content_presenter *presenter = presenter_from_object(object);
+	if (!presenter)
+		return S_FALSE;
+	if (value) {
+		IInspectable *root = NULL;
+		const HRESULT kind = raven_xaml_control_template_root(value, &root);
+		if (root)
+			root->lpVtbl->Release(root);
+		if (kind != S_OK)
+			return E_INVALIDARG;
+	}
+	if (value)
+		value->lpVtbl->AddRef(value);
+	if (presenter->content_template)
+		presenter->content_template->lpVtbl->Release(presenter->content_template);
+	presenter->content_template = value;
+	return S_OK;
+}
+
+/* The fixture-facing readback of the stored ContentTemplate: S_OK with the reference (or NULL — a cleared presenter is
+ * a valid answer) for an engine presenter, S_FALSE otherwise. The export only exists because the presenter carries no
+ * public property surface yet; the fixture reaches it through GetProcAddress like the other engine seams. */
+__declspec(dllexport) HRESULT raven_xaml_element_get_content_template(IInspectable *object, IInspectable **out)
+{
+	struct content_presenter *presenter = presenter_from_object(object);
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!presenter)
+		return S_FALSE;
+	if (presenter->content_template) {
+		*out = presenter->content_template;
+		(*out)->lpVtbl->AddRef(*out);
+	}
+	return S_OK;
 }
 
 /* The template-root walk that binds and unbinds the presenters inside an applied template. Grids contribute their
@@ -2537,6 +2599,11 @@ HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, 
 		/* The value must be an engine ControlTemplate and the target must carry control storage; put_Template answers
 		 * E_INVALIDARG for the wrong kind and S_FALSE for an element without it, which the caller reads as the skip. */
 		return raven_xaml_element_put_template(object, value);
+	}
+	if (same_text(name, length, L"ContentTemplate")) {
+		/* The presenter's own content template (stable 525): an engine ControlTemplate stored on the presenter, S_FALSE
+		 * for any other element — the skip convention. */
+		return presenter_store_content_template(object, value);
 	}
 	return S_FALSE;
 }

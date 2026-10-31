@@ -33,6 +33,11 @@ struct stable_property_entry {
  * Foreground the text properties a TextBlock draws with. */
 static const struct stable_property_entry properties[] = {
 	{560, L"Template"},
+	/* ContentPresenter.ContentTemplate: the template-adjacent member beside Control.Template — the loader stores it on
+	 * the presenter element through the engine-internal store (not applied to the render yet, see the presenter
+	 * comment in xaml_elements.c). Index verified against scripts/xbf-stable-indices.json's numbering convention
+	 * (property index == array position). */
+	{525, L"ContentTemplate"},
 	{1047, L"CacheSize"},
 	{832, L"Content"},
 	{2408, L"Content"},

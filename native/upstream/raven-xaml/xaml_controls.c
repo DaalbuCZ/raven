@@ -1338,8 +1338,10 @@ HRESULT raven_xaml_element_set_object(IInspectable *object, const WCHAR *name, U
 	if (same_text(name, length, L"Children"))
 		return raven_xaml_elements_set_object(object, name, length, value);
 	/* The "Template" object property (the loader's deferred template application) routes to the elements dispatch like
-	 * the children do; the elements side answers the button's control storage or the skip convention. */
-	if (same_text(name, length, L"Template"))
+	 * the children do; the elements side answers the button's control storage or the skip convention. The presenter's
+	 * "ContentTemplate" (stable 525) rides the same dispatch — it must be named before the exact "Content" check below,
+	 * whose S_FALSE would otherwise swallow the longer name. */
+	if (same_text(name, length, L"Template") || same_text(name, length, L"ContentTemplate"))
 		return raven_xaml_elements_set_object(object, name, length, value);
 	if (!same_text(name, length, L"Content"))
 		return S_FALSE;
