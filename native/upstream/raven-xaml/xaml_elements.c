@@ -2115,9 +2115,11 @@ struct content_presenter {
 	LONG refs;
 	/* Non-owning; see the constraint comment above. */
 	IInspectable *templated_parent;
-	/* The ContentPresenter.ContentTemplate the loader stores (an owned reference; stable property 525). Stored only —
-	 * the render path does not apply a nested template yet, so this waits for that stage like the other template
-	 * rendering the engine has not grown. NULL clears, a non-template value answers E_INVALIDARG. */
+	/* The ContentPresenter.ContentTemplate the loader stores (an owned reference; stable property 525). Applied at the
+	 * template-child hook: when the presenter answers its render child and both the templated parent and its Content
+	 * resolve, the content template's root is the child and its own presenters bind to the Content object (not the
+	 * templated control) through the same walk element_store_template runs. NULL clears, a non-template value answers
+	 * E_INVALIDARG. */
 	IInspectable *content_template;
 };
 
@@ -2208,15 +2210,23 @@ static struct content_presenter *presenter_from_object(IInspectable *object)
 
 /* The ContentPresenter.ContentTemplate store (the loader's "ContentTemplate" object property, stable 525): an engine
  * ControlTemplate only, the same wrong-kind answer put_Template gives; re-put replaces, NULL clears. The stored
- * template is NOT applied — the presenter keeps resolving its templated parent's Content at render time until the
- * nested-template stage, so the store does not raise a re-render and the presenters inside a content template stay
- * unbound (binding them to the templated parent would promise a render the engine cannot deliver). S_FALSE for an
- * object that is not an engine presenter, the skip convention. */
+ * template applies at the template-child hook — the presenter's render child becomes the content template's root once
+ * the templated parent's Content resolves, and the content template's own presenters bind to that Content object
+ * lazily there (the content is unknown at store time, and it can change). Replacing or clearing the store unbinds the
+ * replaced root's presenters first, the same direction element_store_template runs. S_FALSE for an object that is not
+ * an engine presenter, the skip convention. */
 static HRESULT presenter_store_content_template(IInspectable *object, IInspectable *value)
 {
 	struct content_presenter *presenter = presenter_from_object(object);
 	if (!presenter)
 		return S_FALSE;
+	if (presenter->content_template) {
+		IInspectable *old_root = NULL;
+		if (raven_xaml_control_template_root(presenter->content_template, &old_root) == S_OK && old_root) {
+			presenter_bind_walk(old_root, NULL, 1, 0);
+			old_root->lpVtbl->Release(old_root);
+		}
+	}
 	if (value) {
 		IInspectable *root = NULL;
 		const HRESULT kind = raven_xaml_control_template_root(value, &root);
@@ -2230,6 +2240,9 @@ static HRESULT presenter_store_content_template(IInspectable *object, IInspectab
 	if (presenter->content_template)
 		presenter->content_template->lpVtbl->Release(presenter->content_template);
 	presenter->content_template = value;
+	/* The store changes what the presenter's template-child hook answers once the content resolves, so the projection
+	 * follows it the way it follows every other stored value — the same raise element_store_template runs. */
+	raven_render_changed();
 	return S_OK;
 }
 
@@ -2251,6 +2264,18 @@ __declspec(dllexport) HRESULT raven_xaml_element_get_content_template(IInspectab
 	return S_OK;
 }
 
+/* The fixture-facing store behind the get above, the same store the loader's "ContentTemplate" property and the
+ * elements dispatch serve: an engine ControlTemplate only (E_INVALIDARG otherwise), re-put replaces, NULL clears, and
+ * the replaced root's presenters unbind first. S_FALSE for an object that is not an engine presenter, the skip
+ * convention. Lives beside the get because the presenter has no public property surface — the fixtures reach both
+ * through GetProcAddress like the other engine seams. */
+__declspec(dllexport) HRESULT raven_xaml_element_put_content_template(IInspectable *object, IInspectable *value)
+{
+	if (!object)
+		return E_POINTER;
+	return presenter_store_content_template(object, value);
+}
+
 /* The template-root walk that binds and unbinds the presenters inside an applied template. Grids contribute their
  * children (the vector the panel serves, read directly — the walk runs on the element side where the struct is visible);
  * a presenter marks itself and contributes nothing (the engine presenter carries no tree of its own). Anything the walk
@@ -2266,6 +2291,18 @@ static void presenter_bind_walk(IInspectable *element, IInspectable *owner, int 
 	struct content_presenter *presenter = presenter_from_object(element);
 	if (presenter) {
 		presenter->templated_parent = clear ? NULL : owner;
+		/* The clear cascades into a stored content template: when the outer tree unbinds this presenter (a replaced
+		 * or cleared control template, a replaced or cleared content template), the presenters inside the content
+		 * template's root must lose their back-pointer too — they answer the content only while the presenter that
+		 * owns the content template is itself bound. Binding does not cascade: the content resolves at the
+		 * template-child hook, so the inner presenters bind lazily there against the current Content object. */
+		if (clear && presenter->content_template) {
+			IInspectable *inner_root = NULL;
+			if (raven_xaml_control_template_root(presenter->content_template, &inner_root) == S_OK && inner_root) {
+				presenter_bind_walk(inner_root, NULL, 1, depth + 1);
+				inner_root->lpVtbl->Release(inner_root);
+			}
+		}
 		return;
 	}
 	if (FAILED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid,
@@ -3014,8 +3051,12 @@ __declspec(dllexport) HRESULT raven_xaml_element_get_template(IInspectable *obje
  * the root of the applied ControlTemplate, so a templated control renders its template tree in place of its content slot
  * and the walk needs no template-aware step of its own. An engine ContentPresenter answers the templated parent's
  * Content here — the same hook the walk reads, so a presenter inside a template shows the control's logical content in
- * both the measure and the paint without a render-path change. S_FALSE for an object that is neither an engine button
- * nor an engine presenter; S_OK with a NULL out for a button without a template or a presenter with no binding. */
+ * both the measure and the paint without a render-path change. A presenter with a stored ContentTemplate applies it on
+ * this same hook: the answer becomes the content template's root and the content template's own presenters bind to the
+ * resolved Content object (not the templated control) through the walk element_store_template runs — the content is
+ * unknown at store time and can change, so the bind is lazy and re-runs per resolution, idempotent for unchanged
+ * content. S_FALSE for an object that is neither an engine button nor an engine presenter; S_OK with a NULL out for a
+ * button without a template, a presenter with no binding, or a content template whose content did not resolve. */
 HRESULT __declspec(dllexport) raven_xaml_element_template_child(IInspectable *object, IInspectable **out)
 {
 	button1 *button = NULL;
@@ -3029,13 +3070,33 @@ HRESULT __declspec(dllexport) raven_xaml_element_template_child(IInspectable *ob
 		struct content_presenter *presenter = presenter_from_object(object);
 		if (presenter) {
 			/* The non-owning back-pointer: NULL after a clear, so a retained presenter answers no content rather than
-			 * a dangling one. The get_Content AddRef is the answer's own reference. */
+			 * a dangling one. */
 			if (!presenter->templated_parent)
 				return S_OK;
 			__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl *content = NULL;
 			if (FAILED(presenter->templated_parent->lpVtbl->QueryInterface(presenter->templated_parent,
 				&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl, (void **)&content)) || !content)
 				return S_OK;
+			if (presenter->content_template) {
+				/* The content template: the Content must resolve to flow through the template — no content renders
+				 * nothing, the real ContentTemplate answer. The content object the walk binds to must itself carry
+				 * the content the inner presenters resolve: an element that is no ContentControl (a TextBlock, a
+				 * Grid) or a non-element value (a string) leaves the inner presenters unbound — the walk stops at
+				 * it — and they answer nothing rather than something invented. */
+				IInspectable *content_value = NULL, *template_root = NULL;
+				content->lpVtbl->get_Content(content, (uint64_t)(uintptr_t)&content_value);
+				content->lpVtbl->Release(content);
+				if (!content_value)
+					return S_OK;
+				if (raven_xaml_control_template_root(presenter->content_template, &template_root) == S_OK &&
+					template_root) {
+					presenter_bind_walk(template_root, content_value, 0, 0);
+					*out = template_root;
+				}
+				content_value->lpVtbl->Release(content_value);
+				return S_OK;
+			}
+			/* The plain presenter: the get_Content AddRef is the answer's own reference. */
 			content->lpVtbl->get_Content(content, (uint64_t)(uintptr_t)out);
 			content->lpVtbl->Release(content);
 			return S_OK;

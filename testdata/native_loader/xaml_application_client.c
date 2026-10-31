@@ -173,17 +173,18 @@ static size_t build_stable_template_document(unsigned char *doc)
 
 /* The ContentTemplate round: the same stable-index shapes with ContentPresenter.ContentTemplate (stable 525) applied to
  * the presenter inside the button's template — under the presenter scope the node stream carries the property 525
- * reference and a second ControlTemplate whose root is one grid; the loader's template scope defers THAT application to
- * the presenter until its root attaches, and the presenter's engine-internal store keeps the reference (stored only —
- * the render does not apply a nested template yet). */
+ * reference and a second ControlTemplate whose root is one grid holding one presenter; the loader's template scope
+ * defers THAT application to the presenter until its root attaches, and the presenter's engine-internal store keeps the
+ * reference. The button's Content stays a TextBlock, which is no ContentControl, so the applied content template's inner
+ * presenter stays unbound and answers nothing — the documented non-ContentControl answer. */
 static size_t build_stable_content_template_document(unsigned char *doc)
 {
 	size_t at = 168;
-	for (size_t index = 0; index < 207; ++index)
+	for (size_t index = 0; index < 214; ++index)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 144);
-	put32(doc, 8, 39);
+	put32(doc, 8, 46);
 	put32(doc, 12, 2);
 	put32(doc, 16, 1);
 	put64(doc, 20, 0x78);
@@ -194,7 +195,7 @@ static size_t build_stable_content_template_document(unsigned char *doc)
 	put64(doc, 60, 0x8c);
 	put32(doc, 156, 1);
 	put32(doc, 160, 0);
-	put32(doc, 164, 39);
+	put32(doc, 164, 46);
 	doc[at++] = 0x14; doc[at++] = 0x1c; doc[at++] = 0x82; /* create scoped: Button (stable 540) */
 	doc[at++] = 0x07; doc[at++] = 0xe7; doc[at++] = 0x83; /* property: ContentControl.Content (stable 999) */
 	doc[at++] = 0x14; doc[at++] = 0x8c; doc[at++] = 0x81; /* create scoped: TextBlock (stable 396) */
@@ -207,7 +208,65 @@ static size_t build_stable_content_template_document(unsigned char *doc)
 	doc[at++] = 0x07; doc[at++] = 0x0d; doc[at++] = 0x82; /* property: ContentPresenter.ContentTemplate (stable 525) */
 	doc[at++] = 0x14; doc[at++] = 0xbf; doc[at++] = 0x80; /* create scoped: ControlTemplate (stable 191) — the content template */
 	doc[at++] = 0x14; doc[at++] = 0xba; doc[at++] = 0x81; /* create scoped: Grid (stable 442) — its root */
+	doc[at++] = 0x07; doc[at++] = 0x88; doc[at++] = 0x82; /* property: Panel.Children (stable 648) */
+	doc[at++] = 0x14; doc[at++] = 0x28; doc[at++] = 0x81; /* create scoped: ContentPresenter (stable 296) — the inner one */
+	doc[at++] = 0x02; /* pop the inner presenter */
 	doc[at++] = 0x02; /* pop the content-template root grid: the root is attached */
+	doc[at++] = 0x02; /* pop the content template: the loader stores it on the presenter */
+	doc[at++] = 0x02; /* pop the presenter */
+	doc[at++] = 0x02; /* pop the outer template root grid */
+	doc[at++] = 0x02; /* pop the outer template: the loader applies it to the button */
+	return at;
+}
+
+/* The flow-through round: the content template's inner presenter bound to the CONTENT object. The button's Content is
+ * itself a Button (stable 540) whose Content is the "Hi" text block, so the inner presenter — bound to the content
+ * button, not the templated control — resolves the content button's Content through the same hook. A bound-to-the-
+ * templated-control presenter would answer the inner button here; the text proves the binding answered the content. */
+static size_t build_stable_flow_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 233; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 8, 65);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	put32(doc, 164, 65);
+	doc[at++] = 0x14; doc[at++] = 0x1c; doc[at++] = 0x82; /* create scoped: Button (stable 540) */
+	doc[at++] = 0x07; doc[at++] = 0xe7; doc[at++] = 0x83; /* property: ContentControl.Content (stable 999) */
+	doc[at++] = 0x14; doc[at++] = 0x1c; doc[at++] = 0x82; /* create scoped: Button (stable 540) — the content object */
+	doc[at++] = 0x07; doc[at++] = 0xe7; doc[at++] = 0x83; /* property: ContentControl.Content (stable 999) */
+	doc[at++] = 0x14; doc[at++] = 0x8c; doc[at++] = 0x81; /* create scoped: TextBlock (stable 396) */
+	doc[at++] = 0x1a; doc[at++] = 0x20; doc[at++] = 0x83; /* property value: TextBlock.Text (stable 800) */
+	doc[at++] = 0x09; /* string "Hi" */
+	put32(doc, at, 2);
+	at += 4;
+	doc[at++] = 'H'; doc[at++] = 0;
+	doc[at++] = 'i'; doc[at++] = 0;
+	doc[at++] = 0x02; /* pop the text block: the content button stores its Content */
+	doc[at++] = 0x02; /* pop the content button: the outer button stores its Content */
+	doc[at++] = 0x07; doc[at++] = 0x30; doc[at++] = 0x82; /* property: Control.Template (stable 560) */
+	doc[at++] = 0x14; doc[at++] = 0xbf; doc[at++] = 0x80; /* create scoped: ControlTemplate (stable 191) */
+	doc[at++] = 0x14; doc[at++] = 0xba; doc[at++] = 0x81; /* create scoped: Grid (stable 442) — the template root */
+	doc[at++] = 0x07; doc[at++] = 0x88; doc[at++] = 0x82; /* property: Panel.Children (stable 648) */
+	doc[at++] = 0x14; doc[at++] = 0x28; doc[at++] = 0x81; /* create scoped: ContentPresenter (stable 296) */
+	doc[at++] = 0x07; doc[at++] = 0x0d; doc[at++] = 0x82; /* property: ContentPresenter.ContentTemplate (stable 525) */
+	doc[at++] = 0x14; doc[at++] = 0xbf; doc[at++] = 0x80; /* create scoped: ControlTemplate (stable 191) — the content template */
+	doc[at++] = 0x14; doc[at++] = 0xba; doc[at++] = 0x81; /* create scoped: Grid (stable 442) — its root */
+	doc[at++] = 0x07; doc[at++] = 0x88; doc[at++] = 0x82; /* property: Panel.Children (stable 648) */
+	doc[at++] = 0x14; doc[at++] = 0x28; doc[at++] = 0x81; /* create scoped: ContentPresenter (stable 296) — the inner one */
+	doc[at++] = 0x02; /* pop the inner presenter */
+	doc[at++] = 0x02; /* pop the content-template root grid */
 	doc[at++] = 0x02; /* pop the content template: the loader stores it on the presenter */
 	doc[at++] = 0x02; /* pop the presenter */
 	doc[at++] = 0x02; /* pop the outer template root grid */
@@ -369,28 +428,34 @@ int raven_entry(void)
 	}
 
 	/* The ContentTemplate round: the document above, extended with ContentPresenter.ContentTemplate (525) under the
-	 * presenter scope. The loader resolves the stable property, opens the nested template scope, and the presenter's
-	 * store keeps the second ControlTemplate; the presenter still resolves the button's Content (the stored content
-	 * template is not applied to the render yet). */
+	 * presenter scope, whose template root grid carries one inner presenter. The loader resolves the stable property,
+	 * opens the nested template scope, and the presenter's store keeps the second ControlTemplate. The applied
+	 * template answers at the template-child hook: the presenter's render child is the content template's root — the
+	 * button's Content (a TextBlock, no ContentControl) leaves the inner presenter unbound, and it answers nothing
+	 * rather than something invented. */
 	{
 		typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIPanel panel1;
 		typedef HRESULT (*get_template_function)(IInspectable *, IInspectable **);
 		typedef HRESULT (*template_root_function)(IInspectable *, IInspectable **);
 		typedef HRESULT (*template_child_function)(IInspectable *, IInspectable **);
 		typedef HRESULT (*get_content_template_function)(IInspectable *, IInspectable **);
+		static const WCHAR presenter_class[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
 		load_function load = NULL;
 		get_template_function element_get_template = NULL;
 		template_root_function read_template_root = NULL;
+		/* the export takes an IInspectable ** — the round-2 local typedef mirrors the ABI, not the block above */
 		template_child_function template_child = NULL;
 		get_content_template_function read_content_template = NULL;
 		HMODULE engine = LoadLibraryW(L"raven-xaml.dll");
-		unsigned char stable_fixture[207];
+		unsigned char stable_fixture[214];
 		IInspectable *loaded_button = NULL, *read_template = NULL, *root_grid = NULL;
 		IInspectable *presenter = NULL, *stored_template = NULL, *stored_root = NULL, *content_child = NULL;
-		panel1 *root_panel = NULL;
-		void *children_object = NULL, *stored_template_iface = NULL;
-		struct fixture_vector *children = NULL;
-		UINT32 child_count = 0;
+		IInspectable *inner_root = NULL, *inner_presenter = NULL;
+		panel1 *root_panel = NULL, *inner_panel = NULL;
+		void *children_object = NULL, *stored_template_iface = NULL, *inner_children_object = NULL;
+		struct fixture_vector *children = NULL, *inner_children = NULL;
+		HSTRING presenter_name = NULL;
+		UINT32 child_count = 0, inner_child_count = 0;
 		if (!engine) return 50;
 		load = (load_function)GetProcAddress(engine, "RavenXamlLoad");
 		element_get_template = (get_template_function)GetProcAddress(engine, "raven_xaml_element_get_template");
@@ -418,10 +483,31 @@ int raven_entry(void)
 		((IUnknown *)stored_template_iface)->lpVtbl->Release((IUnknown *)stored_template_iface);
 		if (read_template_root(stored_template, &stored_root) != S_OK || !stored_root) return 61;
 		stored_root->lpVtbl->Release(stored_root);
-		/* the presenter still resolves the button's Content — storing the content template changed nothing at render */
+		/* the applied content template: the presenter's render child is the content template's root grid */
 		if (template_child(presenter, &content_child) != S_OK || !content_child) return 62;
-		content_child->lpVtbl->Release(content_child);
+		if (content_child->lpVtbl->QueryInterface(content_child, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+			(void **)&inner_panel) != S_OK || !inner_panel) return 63;
+		if (inner_panel->lpVtbl->get_Children(inner_panel, (uint64_t)(uintptr_t)&inner_children_object) != S_OK ||
+			!inner_children_object) return 64;
+		inner_children = (void *)inner_children_object;
+		if (inner_children->lpVtbl->get_Size(inner_children, &inner_child_count) != S_OK || inner_child_count != 1)
+			return 65;
+		if (inner_children->lpVtbl->GetAt(inner_children, 0, &inner_presenter) != S_OK || !inner_presenter) return 66;
+		if (inner_presenter->lpVtbl->GetRuntimeClassName(inner_presenter, &presenter_name) != S_OK || !presenter_name)
+			return 67;
+		if (!same(presenter_name, presenter_class, ARRAYSIZE(presenter_class) - 1)) {
+			WindowsDeleteString(presenter_name);
+			return 68;
+		}
+		WindowsDeleteString(presenter_name);
+		/* the TextBlock content is no ContentControl: the inner presenter stays unbound and answers nothing */
+		if (template_child(inner_presenter, &content_child) != S_OK || content_child) return 69;
+		inner_presenter->lpVtbl->Release(inner_presenter);
+		inner_presenter = NULL;
+		inner_children->lpVtbl->Release(inner_children);
+		inner_panel->lpVtbl->Release(inner_panel);
 		content_child = NULL;
+		inner_root = NULL;
 		presenter->lpVtbl->Release(presenter);
 		presenter = NULL;
 		children->lpVtbl->Release(children);
@@ -429,6 +515,100 @@ int raven_entry(void)
 		root_grid->lpVtbl->Release(root_grid);
 		stored_template->lpVtbl->Release(stored_template);
 		read_template->lpVtbl->Release(read_template);
+		loaded_button->lpVtbl->Release(loaded_button);
+	}
+
+	/* The flow-through round: the button's Content is itself a Button holding the "Hi" text block, so the content
+	 * template's inner presenter binds to the content button and resolves ITS content — the text — through the same
+	 * hook. A presenter bound to the templated control would answer the inner button here; the text answer proves the
+	 * binding followed the content object. */
+	{
+		typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIPanel panel1;
+		typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl content_control1;
+		typedef __x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock textblock1;
+		typedef HRESULT (*template_child_function)(IInspectable *, IInspectable **);
+		load_function load = NULL;
+		template_child_function template_child = NULL;
+		HMODULE engine = LoadLibraryW(L"raven-xaml.dll");
+		unsigned char stable_fixture[233];
+		IInspectable *loaded_button = NULL, *root_grid = NULL, *presenter = NULL, *inner_root = NULL;
+		IInspectable *inner_presenter = NULL, *content_object = NULL, *content_child = NULL;
+		panel1 *root_panel = NULL, *inner_panel = NULL;
+		content_control1 *outer_content = NULL;
+		textblock1 *content_text = NULL;
+		void *children_object = NULL, *inner_children_object = NULL;
+		struct fixture_vector *children = NULL, *inner_children = NULL;
+		HSTRING content_text_value = NULL;
+		UINT32 child_count = 0, inner_child_count = 0;
+		if (!engine) return 70;
+		load = (load_function)GetProcAddress(engine, "RavenXamlLoad");
+		template_child = (template_child_function)GetProcAddress(engine, "raven_xaml_element_template_child");
+		if (!load || !template_child) return 71;
+		if (load(stable_fixture, (uint32_t)build_stable_flow_document(stable_fixture), &loaded_button) != S_OK ||
+			!loaded_button) return 72;
+		/* the logical content is the inner button */
+		if (loaded_button->lpVtbl->QueryInterface(loaded_button, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl,
+			(void **)&outer_content) != S_OK || !outer_content) return 73;
+		if (outer_content->lpVtbl->get_Content(outer_content, (uint64_t)(uintptr_t)&content_object) != S_OK ||
+			!content_object) return 74;
+		outer_content->lpVtbl->Release(outer_content);
+		outer_content = NULL;
+		{
+			void *content_button = NULL;
+			if (content_object->lpVtbl->QueryInterface(content_object,
+				&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, &content_button) != S_OK || !content_button)
+				return 75;
+			((IUnknown *)content_button)->lpVtbl->Release((IUnknown *)content_button);
+		}
+		/* the outer presenter: template root grid, one child, the presenter */
+		{
+			typedef HRESULT (*get_template_function)(IInspectable *, IInspectable **);
+			typedef HRESULT (*template_root_function)(IInspectable *, IInspectable **);
+			get_template_function element_get_template = (get_template_function)GetProcAddress(engine,
+				"raven_xaml_element_get_template");
+			template_root_function read_template_root = (template_root_function)GetProcAddress(engine,
+				"raven_xaml_control_template_root");
+			IInspectable *read_template = NULL;
+			if (!element_get_template || !read_template_root) return 77;
+			if (element_get_template(loaded_button, &read_template) != S_OK || !read_template) return 78;
+			if (read_template_root(read_template, &root_grid) != S_OK || !root_grid) return 79;
+			read_template->lpVtbl->Release(read_template);
+		}
+		if (root_grid->lpVtbl->QueryInterface(root_grid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+			(void **)&root_panel) != S_OK || !root_panel) return 80;
+		if (root_panel->lpVtbl->get_Children(root_panel, (uint64_t)(uintptr_t)&children_object) != S_OK ||
+			!children_object) return 81;
+		children = (void *)children_object;
+		if (children->lpVtbl->get_Size(children, &child_count) != S_OK || child_count != 1) return 82;
+		if (children->lpVtbl->GetAt(children, 0, &presenter) != S_OK || !presenter) return 83;
+		/* the applied content template root with the inner presenter */
+		if (template_child(presenter, &inner_root) != S_OK || !inner_root) return 84;
+		if (inner_root->lpVtbl->QueryInterface(inner_root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+			(void **)&inner_panel) != S_OK || !inner_panel) return 85;
+		if (inner_panel->lpVtbl->get_Children(inner_panel, (uint64_t)(uintptr_t)&inner_children_object) != S_OK ||
+			!inner_children_object) return 86;
+		inner_children = (void *)inner_children_object;
+		if (inner_children->lpVtbl->get_Size(inner_children, &inner_child_count) != S_OK || inner_child_count != 1)
+			return 87;
+		if (inner_children->lpVtbl->GetAt(inner_children, 0, &inner_presenter) != S_OK || !inner_presenter) return 88;
+		/* the flow-through: the inner presenter resolves the content button's Content, not the content itself */
+		if (template_child(inner_presenter, &content_child) != S_OK || !content_child) return 89;
+		if (content_child->lpVtbl->QueryInterface(content_child, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+			(void **)&content_text) != S_OK || !content_text) return 90;
+		if (content_text->lpVtbl->get_Text(content_text, (uint64_t)(uintptr_t)&content_text_value) != S_OK ||
+			!content_text_value || !same(content_text_value, L"Hi", 2)) return 91;
+		WindowsDeleteString(content_text_value);
+		content_text->lpVtbl->Release(content_text);
+		content_child->lpVtbl->Release(content_child);
+		inner_presenter->lpVtbl->Release(inner_presenter);
+		inner_children->lpVtbl->Release(inner_children);
+		inner_panel->lpVtbl->Release(inner_panel);
+		inner_root->lpVtbl->Release(inner_root);
+		presenter->lpVtbl->Release(presenter);
+		children->lpVtbl->Release(children);
+		root_panel->lpVtbl->Release(root_panel);
+		root_grid->lpVtbl->Release(root_grid);
+		content_object->lpVtbl->Release(content_object);
 		loaded_button->lpVtbl->Release(loaded_button);
 	}
 	return 0;
