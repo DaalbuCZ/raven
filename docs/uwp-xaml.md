@@ -1304,8 +1304,8 @@ the same day — see the two entries below. Evidence:
   handles stop addressing a deleted and recreated container. The storage
   fixture checks hierarchy, `Containers` views, persistence, weak references,
   notifications, corruption refusal, deletion safety and ABA behavior across
-  separate processes on x64 and x86. Unsupported boxed types and bulk clear
-  still return errors; concurrent updates across processes are not coordinated.
+  separate processes on x64 and x86. Unsupported boxed types still return
+  errors; concurrent updates across processes are not coordinated.
   Shapr3D now gets through `CreateContainer` and reaches a managed
   `COR_E_KEYNOTFOUND` (`0x80131577`) for the absent
   `userPreferences.Values["inputDevice.usedPointerDevices"]` entry. The
@@ -1314,6 +1314,20 @@ the same day — see the two entries below. Evidence:
   in the artifact, so the WinRT `E_BOUNDS` miss behavior remains intact.
   `RoOriginateLanguageException` diagnostics can now include the HRESULT and
   message when `RAVEN_TRACE_EXCEPTIONS` is set.
+- LocalSettings values clear (2026-10-31): `IMap.Clear` validates every
+  matching record before deleting values in that container, rejects corrupt or
+  linked records, and sends a map reset event. It leaves child containers alone.
+  The x64 and x86 fixtures verify persistence, reset notification and refusal
+  without modifying records when one is corrupt. Concurrent cross-process
+  mutations remain uncoordinated, including during the two-pass clear.
+- Disposable preference probe (2026-10-31): placing empty boxed strings in an
+  isolated prefix for `inputDevice.usedPointerDevices` and then `device.id`
+  advanced execution to `settings.requestedTheme`. Supplying a third empty
+  string advanced it to a separate `E_NOTIMPL` during startup; the originating
+  method is not yet identified. These experiments establish neither the correct
+  types nor defaults and do not justify seeding real settings. The temporary
+  records were removed. The language view's `GetMany` now propagates failure
+  from string creation instead of reporting a successful empty result.
 - XBF input bounds (2026-10-31, stage 3): the loader validates metadata
   and declared node-stream extents, variable-length values, truncated
   operands and scope depth before returning a tree. Fixtures cover malformed

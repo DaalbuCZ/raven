@@ -545,7 +545,9 @@ static HRESULT settings_walk(struct settings_object *self, UINT32 *count)
 
 static HRESULT WINAPI settings_map_lookup(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value)
 {
-	return settings_lookup(SETTINGS_OWNER(iface, map), key, value);
+	HRESULT result = settings_lookup(SETTINGS_OWNER(iface, map), key, value);
+	/* ApplicationDataContainerSettings projects absent values as null, unlike a general PropertySet. */
+	return result == E_BOUNDS ? S_OK : result;
 }
 
 static HRESULT WINAPI settings_map_size(__FIMap_2_HSTRING_IInspectable *iface, UINT32 *size)
@@ -611,11 +613,59 @@ static HRESULT WINAPI settings_map_remove(__FIMap_2_HSTRING_IInspectable *iface,
 	return result;
 }
 
+static HRESULT settings_clear_pass(struct settings_object *self, BOOL remove)
+{
+	WCHAR directory[MAX_PATH], pattern[MAX_PATH], path[MAX_PATH], expected[MAX_PATH];
+	WIN32_FIND_DATAW found;
+	HRESULT result = settings_directory(self, directory);
+	if (FAILED(result)) return result;
+	if (lstrlenW(directory) + 22 >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+	lstrcpyW(pattern, directory); lstrcatW(pattern, L"\\*.rvs");
+	HANDLE search = FindFirstFileW(pattern, &found);
+	if (search == INVALID_HANDLE_VALUE)
+		return GetLastError() == ERROR_FILE_NOT_FOUND ? S_OK : last_error();
+	do {
+		struct settings_record record, verified;
+		DWORD got = 0;
+		LARGE_INTEGER size;
+		HSTRING key = NULL;
+		IInspectable *value = NULL;
+		if ((found.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+			lstrlenW(found.cFileName) != 20 || lstrcmpW(found.cFileName + 16, L".rvs")) {
+			result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); break;
+		}
+		lstrcpyW(path, directory); lstrcatW(path, L"\\"); lstrcatW(path, found.cFileName);
+		HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (file == INVALID_HANDLE_VALUE) { result = last_error(); break; }
+		if (!GetFileSizeEx(file, &size) || size.QuadPart < 16 + sizeof record.key || size.QuadPart > sizeof record ||
+			!ReadFile(file, &record, (DWORD)size.QuadPart, &got, NULL) || got != (DWORD)size.QuadPart ||
+			record.magic != SETTINGS_MAGIC || record.key_length > 255 || record.length > SETTINGS_LIMIT ||
+			size.QuadPart != (LONGLONG)(16 + sizeof record.key + record.length))
+			result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+		CloseHandle(file);
+		if (FAILED(result)) break;
+		result = WindowsCreateString(record.key, record.key_length, &key);
+		if (SUCCEEDED(result)) result = settings_read(self, key, &verified, expected);
+		if (SUCCEEDED(result) && lstrcmpW(expected, path)) result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+		if (SUCCEEDED(result)) result = settings_decode(&verified, &value);
+		if (value) IInspectable_Release(value);
+		WindowsDeleteString(key);
+		if (FAILED(result)) break;
+		if (remove && !DeleteFileW(path)) { result = last_error(); break; }
+	} while (FindNextFileW(search, &found));
+	if (SUCCEEDED(result) && GetLastError() != ERROR_NO_MORE_FILES) result = last_error();
+	FindClose(search);
+	return result;
+}
+
 static HRESULT WINAPI settings_map_clear(__FIMap_2_HSTRING_IInspectable *iface)
 {
-	(void)iface;
-	/* A directory scan cannot safely identify every record yet. */
-	return E_NOTIMPL;
+	struct settings_object *self = SETTINGS_OWNER(iface, map);
+	HRESULT result = settings_clear_pass(self, FALSE);
+	if (SUCCEEDED(result)) result = settings_clear_pass(self, TRUE);
+	if (SUCCEEDED(result)) settings_dispatch(self, CollectionChange_Reset, NULL);
+	return result;
 }
 
 static HRESULT WINAPI settings_view_lookup(__FIMapView_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value)

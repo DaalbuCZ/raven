@@ -33,10 +33,16 @@ def main():
         original = record.read_bytes()
         corrupted = b"BAD!" + original[4:]
         record.write_bytes(corrupted)
+        before = {path.name: path.read_bytes() for path in records}
         run("bad")
+        if {path.name: path.read_bytes() for path in records if path.exists()} != before:
+            raise RuntimeError("a failed clear changed settings records")
         if record.read_bytes() != corrupted:
             raise RuntimeError("a failed insert modified a corrupt settings record")
         record.write_bytes(original)
+        run("clear")
+        run("empty")
+        run("write")
         run("read")
         run("verify")
         run("nested-write")

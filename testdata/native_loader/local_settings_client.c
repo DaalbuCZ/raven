@@ -45,6 +45,7 @@ struct changed_handler {
 	__FIMapChangedEventHandler_2_HSTRING_IInspectable iface;
 	LONG refs;
 	unsigned calls, errors;
+	__x_ABI_CWindows_CFoundation_CCollections_CCollectionChange expected;
 };
 static HRESULT WINAPI changed_query(__FIMapChangedEventHandler_2_HSTRING_IInspectable *iface, REFIID iid, void **out)
 {
@@ -66,7 +67,7 @@ static HRESULT WINAPI changed_invoke(__FIMapChangedEventHandler_2_HSTRING_IInspe
 	__x_ABI_CWindows_CFoundation_CCollections_CCollectionChange kind;
 	IUnknown *identity = NULL;
 	if (!sender || args->lpVtbl->QueryInterface(args, &IID_IUnknown, (void **)&identity) != S_OK || !identity ||
-		args->lpVtbl->get_CollectionChanged(args, &kind) != S_OK || kind != CollectionChange_ItemInserted)
+		args->lpVtbl->get_CollectionChanged(args, &kind) != S_OK || kind != self->expected)
 		++self->errors;
 	if (identity) identity->lpVtbl->Release(identity);
 	++self->calls;
@@ -325,8 +326,8 @@ static int nested_case(const WCHAR *mode, container *root, property_map *root_ma
 	}
 	if (write) {
 		__FIObservableMap_2_HSTRING_IInspectable *root_events = NULL, *child_events = NULL;
-		struct changed_handler root_handler = {{(void *)&changed_table}, 1, 0, 0};
-		struct changed_handler child_handler = {{(void *)&changed_table}, 1, 0, 0};
+		struct changed_handler root_handler = {{(void *)&changed_table}, 1, 0, 0, CollectionChange_ItemInserted};
+		struct changed_handler child_handler = {{(void *)&changed_table}, 1, 0, 0, CollectionChange_ItemInserted};
 		EventRegistrationToken root_token = {0}, child_token = {0};
 		int ok = root_map->lpVtbl->QueryInterface(root_map, &IID___FIObservableMap_2_HSTRING_IInspectable, (void **)&root_events) == S_OK && root_events &&
 			child_map->lpVtbl->QueryInterface(child_map, &IID___FIObservableMap_2_HSTRING_IInspectable, (void **)&child_events) == S_OK && child_events &&
@@ -432,7 +433,7 @@ int raven_entry(void)
 		if (result) return result;
 	} else if (!lstrcmpW(mode, L"write")) {
 		__FIObservableMap_2_HSTRING_IInspectable *observable = NULL;
-		struct changed_handler handler = {{(void *)&changed_table}, 1, 0, 0};
+		struct changed_handler handler = {{(void *)&changed_table}, 1, 0, 0, CollectionChange_ItemInserted};
 		EventRegistrationToken token;
 		if (values->lpVtbl->QueryInterface(values, &IID___FIObservableMap_2_HSTRING_IInspectable, (void **)&observable) != S_OK ||
 			!observable || observable->lpVtbl->add_MapChanged(observable, &handler.iface, &token) != S_OK) return 18;
@@ -456,17 +457,31 @@ int raven_entry(void)
 		boolean found = TRUE;
 		if (SUCCEEDED(map->lpVtbl->Lookup(map, int_key, &item)) || item ||
 			SUCCEEDED(map->lpVtbl->HasKey(map, int_key, &found)) || found) return 20;
-		if (map->lpVtbl->Clear(map) != E_NOTIMPL) return 22;
+		if (SUCCEEDED(map->lpVtbl->Clear(map))) return 22;
 		if (factory(value_key, &IID___x_ABI_CWindows_CFoundation_CIPropertyValueStatics, (void **)&maker) != S_OK || !maker ||
 			maker->lpVtbl->CreateInt32(maker, 17, &boxed) != S_OK || !boxed ||
 			SUCCEEDED(map->lpVtbl->Insert(map, int_key, boxed, &replaced))) return 21;
 		boxed->lpVtbl->Release(boxed); boxed = NULL;
+	} else if (!lstrcmpW(mode, L"clear")) {
+		UINT32 size = 99;
+		__FIObservableMap_2_HSTRING_IInspectable *observable = NULL;
+		struct changed_handler handler = {{(void *)&changed_table}, 1, 0, 0, CollectionChange_Reset};
+		EventRegistrationToken token;
+		if (values->lpVtbl->QueryInterface(values, &IID___FIObservableMap_2_HSTRING_IInspectable, (void **)&observable) != S_OK ||
+			observable->lpVtbl->add_MapChanged(observable, &handler.iface, &token) != S_OK ||
+			map->lpVtbl->Clear(map) != S_OK || map->lpVtbl->get_Size(map, &size) != S_OK || size ||
+			handler.calls != 1 || handler.errors || observable->lpVtbl->remove_MapChanged(observable, token) != S_OK ||
+			handler.refs != 1) return 23;
+		observable->lpVtbl->Release(observable);
+	} else if (!lstrcmpW(mode, L"empty")) {
+		UINT32 size = 99;
+		if (map->lpVtbl->get_Size(map, &size) != S_OK || size || map->lpVtbl->Clear(map) != S_OK) return 24;
 	} else if (!lstrcmpW(mode, L"read")) {
 		if (!check_int(map, int_key, -12345) || !check_string(map, text_key)) return 10;
 		if (map->lpVtbl->Remove(map, int_key) != S_OK) return 11;
 	} else if (!lstrcmpW(mode, L"verify")) {
 		IInspectable *missing = (void *)1;
-		if (map->lpVtbl->Lookup(map, int_key, &missing) != E_BOUNDS || missing || !check_string(map, text_key)) return 12;
+		if (map->lpVtbl->Lookup(map, int_key, &missing) != S_OK || missing || !check_string(map, text_key)) return 12;
 		if (map->lpVtbl->Remove(map, text_key) != S_OK) return 13;
 	} else return 14;
 	if (text) WindowsDeleteString(text);

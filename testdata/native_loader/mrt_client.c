@@ -578,6 +578,15 @@ int raven_entry(void)
 		WindowsDeleteString(language);
 		language = NULL;
 		if (languages->lpVtbl->GetAt(languages, 1, &language) != E_BOUNDS || language) return 78;
+		{
+			UINT32 count = 99;
+			if (languages->lpVtbl->GetMany(languages, 0, 1, &language, &count) != S_OK || count != 1 ||
+				!language || !WindowsGetStringLen(language)) return 86;
+			WindowsDeleteString(language);
+			language = NULL;
+			if (languages->lpVtbl->GetMany(languages, 0, 0, &language, &count) != S_OK || count) return 87;
+			if (languages->lpVtbl->GetMany(languages, 1, 1, &language, &count) != E_BOUNDS || count) return 88;
+		}
 		WindowsDeleteString(language);
 		language = NULL;
 		/* the view is its own IUnknown: the release through it is the last reference */

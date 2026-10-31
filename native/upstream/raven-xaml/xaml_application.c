@@ -139,7 +139,14 @@ static HRESULT WINAPI application1_put_Resources(xaml_application1 *iface, uint6
 	return S_OK;
 }
 STUB1(xaml_application1, application1_get_DebugSettings)
-STUB1(xaml_application1, application1_get_RequestedTheme)
+static HRESULT WINAPI application1_get_RequestedTheme(xaml_application1 *iface, uint64_t out)
+{
+	(void)iface;
+	if (!out) return E_POINTER;
+	/* The current renderer uses the light theme; system theme integration is not implemented. */
+	*(INT32 *)(uintptr_t)out = 0;
+	return S_OK;
+}
 STUB1(xaml_application1, application1_put_RequestedTheme)
 STUB2(xaml_application1, application1_add_UnhandledException)
 STUB1(xaml_application1, application1_remove_UnhandledException)

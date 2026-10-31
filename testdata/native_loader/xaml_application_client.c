@@ -304,6 +304,11 @@ int raven_entry(void)
 		(void **)&application) != S_OK || !application) return 6;
 	HSTRING runtime_name = NULL;
 	UINT32 length = 0;
+	{
+		INT32 theme = -1;
+		if (application->lpVtbl->get_RequestedTheme(application, 0) != E_POINTER ||
+			application->lpVtbl->get_RequestedTheme(application, (uint64_t)(uintptr_t)&theme) != S_OK || theme != 0) return 105;
+	}
 	if (application->lpVtbl->GetRuntimeClassName(application, &runtime_name) != S_OK) return 7;
 	const WCHAR *text = WindowsGetStringRawBuffer(runtime_name, &length);
 	if (length != ARRAYSIZE(name) - 1 || CompareStringOrdinal(text, (int)length, name, -1, FALSE) != CSTR_EQUAL) return 8;

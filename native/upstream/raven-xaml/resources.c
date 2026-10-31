@@ -573,8 +573,8 @@ static HRESULT WINAPI lang_get_many(__FIVectorView_1_HSTRING *iface, UINT32 star
 		return 0x8000000bU; /* E_BOUNDS */
 	if (!items_size)
 		return S_OK;
-	if (language_read(items))
-		return S_OK;
+	HRESULT result = language_read(items);
+	if (FAILED(result)) return result;
 	*count = 1;
 	return S_OK;
 }
