@@ -122,10 +122,7 @@ interface __x_ABI_CWindows_CUI_CXaml_CControls_CIControl { CONST_VTBL control1_v
 DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl, 0xa8912263, 0x2951, 0x4f58, 0xa9, 0xc5, 0x5a, 0x13,
 	0x4e, 0xaa, 0x7f, 0x07);
 
-/* The ControlTemplate surface lives in xaml_controls.c; the declarations ride here because the shared internal header is
- * the engine hotspot's interface and this increment keeps it untouched. raven_xaml_control_template_root answers S_OK for
- * an engine ControlTemplate (root possibly NULL, the caller's AddRef) and S_FALSE for any other object. */
-HRESULT raven_xaml_control_template_root(IInspectable *template_object, IInspectable **out);
+/* The ControlTemplate surface declarations (root read, kind probe, factory) ride xaml_internal.h. */
 
 static const WCHAR grid_class[] = L"Windows.UI.Xaml.Controls.Grid";
 static const WCHAR textblock_class[] = L"Windows.UI.Xaml.Controls.TextBlock";
@@ -1638,13 +1635,32 @@ STUB1(content_control, content_put_transitions)
  * ControlTemplate answers E_INVALIDARG and the previous template stays, the wrong-kind convention the style application
  * rides. Re-put replaces, a NULL put clears; the render follows through the visual-child hook without a re-apply of
  * anything else. */
+/* The template-root presenter walk is defined with the ContentPresenter element below; the store runs it in both
+ * directions — unbind the replaced root, bind the new one. */
+static void presenter_bind_walk(IInspectable *element, IInspectable *owner, int clear, int depth);
+
 static void button_store_template(struct button *self, IInspectable *template_object)
 {
+	/* The presenters inside the replaced root lose their back-pointer first: the old template releases with the swap,
+	 * and a binding that outlived the owning button would dangle. The bindings of the new root follow the store — the
+	 * loader defers the apply until the template's root is attached, so every store sees the final tree. */
+	IInspectable *old_root = NULL;
+	if (self->template_value && raven_xaml_control_template_root(self->template_value, &old_root) == S_OK && old_root) {
+		presenter_bind_walk(old_root, NULL, 1, 0);
+		old_root->lpVtbl->Release(old_root);
+	}
 	if (template_object)
 		template_object->lpVtbl->AddRef(template_object);
 	if (self->template_value)
 		self->template_value->lpVtbl->Release(self->template_value);
 	self->template_value = template_object;
+	if (template_object) {
+		IInspectable *new_root = NULL;
+		if (raven_xaml_control_template_root(template_object, &new_root) == S_OK && new_root) {
+			presenter_bind_walk(new_root, (IInspectable *)&self->first, 0, 0);
+			new_root->lpVtbl->Release(new_root);
+		}
+	}
 	raven_render_changed();
 }
 
@@ -2068,6 +2084,143 @@ static struct column_definition *create_column_definition(void)
 	return definition;
 }
 
+/* ContentPresenter: the element a control template places to show the templated control's logical Content. The engine
+ * scope is deliberately narrow — the presenter carries no chrome, no IContentPresenter surface and no framework-element
+ * properties; it answers IInspectable with the class name and resolves its templated parent's Content through the same
+ * raven_xaml_element_template_child hook the render walk already consults first for a templated control, so both the
+ * measure and the paint pick the content up through the existing single-child path with no render-pass change.
+ *
+ * The templated parent is a NON-OWNING back-pointer bound when a button stores a template (bind_template_presenters
+ * walks the template root and marks every presenter inside it). The bound button owns the template, the template owns
+ * the root, and the root is the only thing that can hold this presenter, so the pointer cannot outlive the button that
+ * owns it; button_store_template clears the bindings of the replaced root first, which covers the replace and the clear,
+ * and a presenter the application retained across a clear answers no content (the pointer reads NULL) rather than a
+ * dangling one. Presenters are created through the engine-internal elements factory (the loader's known-class path and
+ * the raven_xaml_content_presenter_factory seam); the runtime catalog in xaml.c does not list the class yet. */
+static const WCHAR presenter_class[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
+
+struct content_presenter {
+	const IInspectableVtbl *lpVtbl;
+	LONG refs;
+	/* Non-owning; see the constraint comment above. */
+	IInspectable *templated_parent;
+};
+
+static HRESULT WINAPI presenter_query(IInspectable *iface, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&((struct content_presenter *)iface)->refs);
+	*out = iface;
+	return S_OK;
+}
+
+static ULONG WINAPI presenter_addref(IInspectable *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct content_presenter *)iface)->refs);
+}
+
+static ULONG WINAPI presenter_release(IInspectable *iface)
+{
+	struct content_presenter *self = (struct content_presenter *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI presenter_iids(IInspectable *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI presenter_name(IInspectable *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(presenter_class, (UINT32)lstrlenW(presenter_class), name);
+}
+
+static HRESULT WINAPI presenter_trust(IInspectable *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static const IInspectableVtbl presenter_table = {
+	.QueryInterface = presenter_query,
+	.AddRef = presenter_addref,
+	.Release = presenter_release,
+	.GetIids = presenter_iids,
+	.GetRuntimeClassName = presenter_name,
+	.GetTrustLevel = presenter_trust,
+};
+
+static struct content_presenter *create_content_presenter(void)
+{
+	struct content_presenter *presenter = ALLOC(sizeof *presenter);
+	if (!presenter)
+		return NULL;
+	presenter->lpVtbl = &presenter_table;
+	presenter->refs = 1;
+	InterlockedIncrement(&raven_xaml_objects);
+	return presenter;
+}
+
+/* The engine presenter behind an IInspectable, or NULL: the vtable is the engine's own, the way the template and the
+ * button kind checks work — a foreign IInspectable answers nothing here. The caller owns its reference to object. */
+static struct content_presenter *presenter_from_object(IInspectable *object)
+{
+	IInspectable *inspectable = NULL;
+	if (!object)
+		return NULL;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID_IInspectable, (void **)&inspectable)) || !inspectable)
+		return NULL;
+	struct content_presenter *presenter = inspectable->lpVtbl == &presenter_table ?
+		(struct content_presenter *)inspectable : NULL;
+	inspectable->lpVtbl->Release(inspectable);
+	return presenter;
+}
+
+/* The template-root walk that binds and unbinds the presenters inside an applied template. Grids contribute their
+ * children (the vector the panel serves, read directly — the walk runs on the element side where the struct is visible);
+ * a presenter marks itself and contributes nothing (the engine presenter carries no tree of its own). Anything the walk
+ * does not recognise stops it: other container kinds inside a template have no child readback this engine stores. The
+ * depth cap mirrors the style chain's guard against a cycle. */
+#define TEMPLATE_WALK_DEPTH 32
+
+static void presenter_bind_walk(IInspectable *element, IInspectable *owner, int clear, int depth)
+{
+	grid1 *grid = NULL;
+	if (!element || depth >= TEMPLATE_WALK_DEPTH)
+		return;
+	struct content_presenter *presenter = presenter_from_object(element);
+	if (presenter) {
+		presenter->templated_parent = clear ? NULL : owner;
+		return;
+	}
+	if (FAILED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid,
+		(void **)&grid)) || !grid)
+		return;
+	if (grid->lpVtbl != &grid1_table) {
+		grid->lpVtbl->Release(grid);
+		return;
+	}
+	struct grid *self = ((struct grid1_part *)grid)->owner;
+	grid->lpVtbl->Release(grid);
+	if (!self->children)
+		return;
+	for (UINT32 index = 0; index < self->children->count; ++index)
+		presenter_bind_walk((IInspectable *)self->children->items[index], owner, clear, depth + 1);
+}
+
 /* Loader application: names, text and object properties on the three classes. */
 
 static int elements_name(IInspectable *object, const WCHAR *text, UINT32 length)
@@ -2328,6 +2481,12 @@ HRESULT raven_xaml_elements_set_text(IInspectable *object, const WCHAR *name, UI
 	return result;
 }
 
+/* The "Template" object property (the loader path) routes to the fixture-facing export defined later in this file: the
+ * same store put_Template serves, so a compiled document that declares a ControlTemplate under a button reaches the
+ * engine state the style route and the direct put share. An element without control storage answers S_FALSE through
+ * the export's own dispatch — the skip convention every property the engine does not store follows. */
+HRESULT raven_xaml_element_put_template(IInspectable *object, IInspectable *template_object);
+
 HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value)
 {
 	panel1 *panel = NULL;
@@ -2373,6 +2532,11 @@ HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, 
 		result = content->lpVtbl->put_Content(content, (uint64_t)(uintptr_t)value);
 		content->lpVtbl->Release(content);
 		return result;
+	}
+	if (same_text(name, length, L"Template")) {
+		/* The value must be an engine ControlTemplate and the target must carry control storage; put_Template answers
+		 * E_INVALIDARG for the wrong kind and S_FALSE for an element without it, which the caller reads as the skip. */
+		return raven_xaml_element_put_template(object, value);
 	}
 	return S_FALSE;
 }
@@ -2781,9 +2945,11 @@ __declspec(dllexport) HRESULT raven_xaml_element_get_template(IInspectable *obje
 
 /* The templated control's single visual child, what the render walk's raven_xaml_frame_render_child hook consults first:
  * the root of the applied ControlTemplate, so a templated control renders its template tree in place of its content slot
- * and the walk needs no template-aware step of its own. S_FALSE for an object that is no engine button; S_OK with a NULL
- * out for a button without a template. */
-HRESULT raven_xaml_element_template_child(IInspectable *object, IInspectable **out)
+ * and the walk needs no template-aware step of its own. An engine ContentPresenter answers the templated parent's
+ * Content here — the same hook the walk reads, so a presenter inside a template shows the control's logical content in
+ * both the measure and the paint without a render-path change. S_FALSE for an object that is neither an engine button
+ * nor an engine presenter; S_OK with a NULL out for a button without a template or a presenter with no binding. */
+HRESULT __declspec(dllexport) raven_xaml_element_template_child(IInspectable *object, IInspectable **out)
 {
 	button1 *button = NULL;
 	IInspectable *root = NULL;
@@ -2792,6 +2958,22 @@ HRESULT raven_xaml_element_template_child(IInspectable *object, IInspectable **o
 	*out = NULL;
 	if (!object)
 		return S_FALSE;
+	{
+		struct content_presenter *presenter = presenter_from_object(object);
+		if (presenter) {
+			/* The non-owning back-pointer: NULL after a clear, so a retained presenter answers no content rather than
+			 * a dangling one. The get_Content AddRef is the answer's own reference. */
+			if (!presenter->templated_parent)
+				return S_OK;
+			__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl *content = NULL;
+			if (FAILED(presenter->templated_parent->lpVtbl->QueryInterface(presenter->templated_parent,
+				&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl, (void **)&content)) || !content)
+				return S_OK;
+			content->lpVtbl->get_Content(content, (uint64_t)(uintptr_t)out);
+			content->lpVtbl->Release(content);
+			return S_OK;
+		}
+	}
 	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
 		(void **)&button)) || !button)
 		return S_FALSE;
@@ -3114,7 +3296,8 @@ HRESULT raven_xaml_element_render_slot(IInspectable *object, UINT32 *row, UINT32
 
 /* Factories */
 
-enum element_kind { element_grid, element_textblock, element_button, element_row_definition, element_column_definition };
+enum element_kind { element_grid, element_textblock, element_button, element_row_definition, element_column_definition,
+	element_presenter };
 
 struct element_factory {
 	const IActivationFactoryVtbl *lpVtbl;
@@ -3157,7 +3340,8 @@ static HRESULT WINAPI element_factory_name(IActivationFactory *iface, HSTRING *n
 	const WCHAR *text = self->kind == element_grid ? grid_class :
 		self->kind == element_textblock ? textblock_class :
 		self->kind == element_button ? button_class :
-		self->kind == element_row_definition ? row_definition_class : column_definition_class;
+		self->kind == element_row_definition ? row_definition_class :
+		self->kind == element_presenter ? presenter_class : column_definition_class;
 	if (!name)
 		return E_POINTER;
 	return WindowsCreateString(text, (UINT32)lstrlenW(text), name);
@@ -3200,6 +3384,11 @@ static HRESULT WINAPI element_factory_activate(IActivationFactory *iface, IInspe
 		if (!definition)
 			return E_OUTOFMEMORY;
 		*out = (IInspectable *)definition;
+	} else if (self->kind == element_presenter) {
+		struct content_presenter *presenter = create_content_presenter();
+		if (!presenter)
+			return E_OUTOFMEMORY;
+		*out = (IInspectable *)presenter;
 	} else {
 		struct column_definition *definition = create_column_definition();
 		if (!definition)
@@ -3224,6 +3413,7 @@ static struct element_factory textblock_factory = {&element_factory_table, 1, el
 static struct element_factory button_factory = {&element_factory_table, 1, element_button};
 static struct element_factory row_definition_factory = {&element_factory_table, 1, element_row_definition};
 static struct element_factory column_definition_factory = {&element_factory_table, 1, element_column_definition};
+static struct element_factory presenter_factory = {&element_factory_table, 1, element_presenter};
 
 HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out)
 {
@@ -3244,9 +3434,23 @@ HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out)
 		factory = &row_definition_factory;
 	else if (same_text(text, length, column_definition_class))
 		factory = &column_definition_factory;
+	else if (same_text(text, length, presenter_class))
+		factory = &presenter_factory;
 	else
 		return CLASS_E_CLASSNOTAVAILABLE;
 	InterlockedIncrement(&factory->refs);
 	*out = (IActivationFactory *)factory;
+	return S_OK;
+}
+
+/* The engine-internal seam the fixtures reach the presenter through (dllexport+GetProcAddress, the pattern every
+ * engine-internal entry follows): the runtime catalog does not list the class, so activation goes through here or
+ * through the loader's known-class path. */
+HRESULT __declspec(dllexport) raven_xaml_content_presenter_factory(IActivationFactory **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = (IActivationFactory *)&presenter_factory;
+	InterlockedIncrement(&presenter_factory.refs);
 	return S_OK;
 }

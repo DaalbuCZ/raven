@@ -71,6 +71,19 @@ HRESULT raven_xaml_grid_render_child(IInspectable *object, UINT32 index, IInspec
 HRESULT raven_xaml_frame_render_child(IInspectable *object, IInspectable **out);
 BOOL raven_application_notify(DWORD reason, void *reserved);
 
+/* The ControlTemplate surface (xaml_controls.c): raven_xaml_control_template_root answers S_OK for an engine
+ * ControlTemplate (root possibly NULL, the caller's AddRef) and S_FALSE for any other object — the kind check the
+ * Template puts, the "Template" setter route and the loader's template-node handling share. The is-template probe
+ * drives the same vtable check without a root read, and the factory builds templates for the loader path. */
+HRESULT raven_xaml_control_template_root(IInspectable *template_object, IInspectable **out);
+HRESULT raven_xaml_control_template_put_root(IInspectable *template_object, IInspectable *root);
+int raven_xaml_object_is_control_template(IInspectable *object);
+HRESULT raven_xaml_control_template_factory(IActivationFactory **out);
+/* The templated control's single visual child, what the render walk consults first: the root of the applied
+ * ControlTemplate, and — for an engine ContentPresenter — the templated parent's Content, which is how a template
+ * shows the control's logical content. */
+HRESULT raven_xaml_element_template_child(IInspectable *object, IInspectable **out);
+
 /* What the layout pass reads back from a grid beyond its children: the fixed lengths of its row and column definitions and the
  * attached Grid.Row and Grid.Column each element was given, plus the attached Grid.RowSpan and Grid.ColumnSpan (the span out
  * parameters are optional; a stored span below one reads back as one). Only the fixed pixel lengths lay out; an Auto or Star

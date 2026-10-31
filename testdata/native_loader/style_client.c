@@ -1548,13 +1548,161 @@ int raven_entry(void)
 		}
 		read->lpVtbl->Release(read);
 	}
+	/* the ContentPresenter round: a third template whose root grid is red and whose ContentPresenter shows the button's
+	 * Content — a green 200x150 grid — so the content appears inside the template tree (green over the red root at the
+	 * top-left, the root's red where the content does not reach). The presenter was bound to the button when the
+	 * template was applied; the engine's presenter resolves the content through the same hook the render walk reads
+	 * first, so both the measure and the paint pick it up without a render-path change. */
+	{
+		typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl content_control_i;
+		typedef HRESULT (*presenter_factory_function)(IActivationFactory **);
+		presenter_factory_function presenter_factory_fn = NULL;
+		IActivationFactory *presenter_factory = NULL;
+		IInspectable *template_presenter = NULL, *template_root_grid3 = NULL, *template_style3 = NULL;
+		IInspectable *presenter_object = NULL, *content_grid = NULL, *content_style = NULL;
+		brush_i *green_brush = NULL;
+		color_s green;
+		struct fixture_number *content_width = make_number(200.0);
+		struct fixture_number *content_height = make_number(150.0);
+		presenter_factory_fn = component ? (presenter_factory_function)GetProcAddress(component,
+			"raven_xaml_content_presenter_factory") : NULL;
+		if (!presenter_factory_fn)
+			return 343;
+		green.A = 255;
+		green.R = 0;
+		green.G = 255;
+		green.B = 0;
+		if (compositor->lpVtbl->CreateColorBrushWithColor(compositor, green, &green_brush) != S_OK || !green_brush)
+			return 344;
+		/* the content: a green 200x150 grid with its extent from the Width/Height setters, the button's Content */
+		if (activate(grid_name, &content_grid) != S_OK || !content_grid)
+			return 345;
+		{
+			panel_i *content_panel = NULL;
+			if (content_grid->lpVtbl->QueryInterface(content_grid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+				(void **)&content_panel) != S_OK || !content_panel)
+				return 346;
+			if (content_panel->lpVtbl->put_Background(content_panel, (uint64_t)(uintptr_t)green_brush) != S_OK) {
+				content_panel->lpVtbl->Release(content_panel);
+				return 347;
+			}
+			content_panel->lpVtbl->Release(content_panel);
+		}
+		if (!content_width || !content_height)
+			return 348;
+		if (activate(style_name, &content_style) != S_OK || !content_style)
+			return 349;
+		if (add_setter(content_style, L"Width", (UINT32)lstrlenW(L"Width"), (IInspectable *)content_width) != S_OK ||
+			add_setter(content_style, L"Height", (UINT32)lstrlenW(L"Height"), (IInspectable *)content_height) != S_OK) {
+			fixture_number_release(content_width);
+			fixture_number_release(content_height);
+			return 350;
+		}
+		fixture_number_release(content_width);
+		fixture_number_release(content_height);
+		if (put_style(content_grid, content_style) != S_OK)
+			return 351;
+		{
+			content_control_i *button_content = NULL;
+			if (template_button->lpVtbl->QueryInterface(template_button,
+				&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl, (void **)&button_content) != S_OK ||
+				!button_content)
+				return 352;
+			const HRESULT stored = button_content->lpVtbl->put_Content(button_content, (uint64_t)(uintptr_t)content_grid);
+			button_content->lpVtbl->Release(button_content);
+			if (stored != S_OK)
+				return 353;
+		}
+		/* the presenter first: the template root grid takes it as its child below */
+		if (presenter_factory_fn(&presenter_factory) != S_OK || !presenter_factory)
+			return 361;
+		if (presenter_factory->lpVtbl->ActivateInstance(presenter_factory, &presenter_object) != S_OK || !presenter_object)
+			return 362;
+		presenter_factory->lpVtbl->Release(presenter_factory);
+		/* the template: a red root grid with the presenter as its child */
+		if (control_template_factory->lpVtbl->ActivateInstance(control_template_factory, &template_presenter) != S_OK ||
+			!template_presenter)
+			return 354;
+		if (activate(grid_name, &template_root_grid3) != S_OK || !template_root_grid3)
+			return 355;
+		{
+			panel_i *root_panel = NULL;
+			if (template_root_grid3->lpVtbl->QueryInterface(template_root_grid3,
+				&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel, (void **)&root_panel) != S_OK || !root_panel)
+				return 356;
+			if (root_panel->lpVtbl->put_Background(root_panel, (uint64_t)(uintptr_t)red_brush) != S_OK) {
+				root_panel->lpVtbl->Release(root_panel);
+				return 357;
+			}
+			{
+				void *children = NULL;
+				struct fixture_children *vector = NULL;
+				if (root_panel->lpVtbl->get_Children(root_panel, (uint64_t)(uintptr_t)&children) != S_OK || !children) {
+					root_panel->lpVtbl->Release(root_panel);
+					return 358;
+				}
+				if (((IInspectable *)children)->lpVtbl->QueryInterface((IInspectable *)children,
+					&IID___FIVector_1_UIElement, (void **)&vector) != S_OK) {
+					((IInspectable *)children)->lpVtbl->Release((IInspectable *)children);
+					root_panel->lpVtbl->Release(root_panel);
+					return 359;
+				}
+				((IInspectable *)children)->lpVtbl->Release((IInspectable *)children);
+				const HRESULT appended = vector->lpVtbl->Append(vector, presenter_object);
+				vector->lpVtbl->Release(vector);
+				if (appended != S_OK) {
+					root_panel->lpVtbl->Release(root_panel);
+					return 360;
+				}
+			}
+			root_panel->lpVtbl->Release(root_panel);
+		}
+		if (template_put_root(template_presenter, template_root_grid3) != S_OK)
+			return 370;
+		if (activate(style_name, &template_style3) != S_OK || !template_style3)
+			return 363;
+		if (add_setter(template_style3, L"Template", (UINT32)lstrlenW(L"Template"), template_presenter) != S_OK)
+			return 364;
+		if (put_style(template_button, template_style3) != S_OK)
+			return 365;
+		/* the content grid shows inside the template (200x150 green at the top-left), the root red beyond it */
+		if (color_at(hwnd, 100, 100, RGB(0, 255, 0)))
+			return 366;
+		if (color_at(hwnd, 350, 250, RGB(255, 0, 0)))
+			return 367;
+		{
+			IInspectable *read = NULL;
+			if (get_template(template_button, &read) != S_OK || !read)
+				return 368;
+			if (!same_unknown(read, template_presenter)) {
+				read->lpVtbl->Release(read);
+				return 369;
+			}
+			read->lpVtbl->Release(read);
+		}
+		if (template_root_grid3)
+			template_root_grid3->lpVtbl->Release(template_root_grid3);
+		if (template_style3)
+			template_style3->lpVtbl->Release(template_style3);
+		if (template_presenter)
+			template_presenter->lpVtbl->Release(template_presenter);
+		if (presenter_object)
+			presenter_object->lpVtbl->Release(presenter_object);
+		if (content_style)
+			content_style->lpVtbl->Release(content_style);
+		if (content_grid)
+			content_grid->lpVtbl->Release(content_grid);
+		if (green_brush)
+			green_brush->lpVtbl->Release(green_brush);
+	}
 	/* the clear: a direct put_Template(NULL) removes the template and the control's visuals fall back to its content
-	 * slot — empty here, so the plain grid's blue shows again */
+	 * slot — the green content grid this round gave the button, so the content the template was showing renders
+	 * directly */
 	if (put_template(template_button, NULL) != S_OK)
 		return 340;
 	if (get_template(template_button, &roundtrip) != S_OK || roundtrip)
 		return 341;
-	if (color_at(hwnd, 100, 100, RGB(0, 0, 255)))
+	if (color_at(hwnd, 100, 100, RGB(0, 255, 0)))
 		return 342;
 	if (control_template_factory)
 		control_template_factory->lpVtbl->Release(control_template_factory);

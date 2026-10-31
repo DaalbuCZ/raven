@@ -14,12 +14,19 @@
  * Property values outside the implemented subset are skipped rather than guessed; a node whose payload cannot be measured is
  * refused so the caller is not handed a half-built tree.
  *
+ * Templates ride the object-property path: a ControlTemplate node opens a template scope that defers its application to
+ * the target until the scope pops (so the root element the document declares inside it attaches first, through the
+ * engine-internal put_root), and a ContentPresenter inside the template resolves its templated parent's Content at render
+ * time through the element side's hook. Both classes build through the engine-internal factories — the stable type table
+ * does not carry them.
+ *
  * The entry point is exported as RavenXamlLoad so the engine and its tests can hand it a compiled page. */
 #define CINTERFACE
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include <stdint.h>
+#include <winstring.h>
 
 #define MAX_NAME 256
 
@@ -248,6 +255,8 @@ static HRESULT property_reference(const struct metadata *m, uint16_t reference, 
 	return metadata_property_name(m, reference, name, length);
 }
 
+static HRESULT create_known(const WCHAR *name, UINT32 length, IInspectable **out);
+
 static HRESULT create_reference(const struct metadata *m, uint16_t reference, IInspectable **out)
 {
 	WCHAR buffer[MAX_NAME];
@@ -256,7 +265,44 @@ static HRESULT create_reference(const struct metadata *m, uint16_t reference, II
 		return raven_xaml_create_stable(reference & 0x7FFF, out);
 	if (FAILED(metadata_type_name(m, reference, buffer, MAX_NAME, &length)))
 		return E_INVALIDARG;
+	{
+		const HRESULT known = create_known(buffer, length, out);
+		if (known != CLASS_E_CLASSNOTAVAILABLE)
+			return known;
+	}
 	return raven_xaml_create_named(buffer, length, out);
+}
+
+/* The template-path classes a compiled document names that the stable type table does not carry: ControlTemplate (the
+ * value a "Template" property declares) and ContentPresenter (the element inside a template that shows the control's
+ * content). Both build through the engine-internal factories, so a document's own type table resolves them without a
+ * running application's metadata provider; every other document-named type keeps the provider path. */
+static HRESULT create_known(const WCHAR *name, UINT32 length, IInspectable **out)
+{
+	static const WCHAR template_name[] = L"Windows.UI.Xaml.Controls.ControlTemplate";
+	static const WCHAR presenter_name[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
+	IActivationFactory *factory = NULL;
+	HRESULT result;
+	*out = NULL;
+	if (CompareStringOrdinal(name, (int)length, template_name, -1, FALSE) == CSTR_EQUAL) {
+		result = raven_xaml_control_template_factory(&factory);
+	} else if (CompareStringOrdinal(name, (int)length, presenter_name, -1, FALSE) == CSTR_EQUAL) {
+		HSTRING key = NULL;
+		result = WindowsCreateString(presenter_name, (UINT32)(ARRAYSIZE(presenter_name) - 1), &key);
+		if (SUCCEEDED(result)) {
+			result = raven_xaml_elements_factory(key, &factory);
+			WindowsDeleteString(key);
+		}
+	} else {
+		return CLASS_E_CLASSNOTAVAILABLE;
+	}
+	if (FAILED(result))
+		return result;
+	if (!factory)
+		return CLASS_E_CLASSNOTAVAILABLE;
+	result = factory->lpVtbl->ActivateInstance(factory, out);
+	factory->lpVtbl->Release(factory);
+	return result;
 }
 
 static HRESULT read_constant(struct reader *r, const struct metadata *m, struct value *v)
@@ -340,10 +386,23 @@ static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 lengt
 
 #define LOADER_DEPTH 64
 
+/* One open scope. kind 0 is an element scope; 1 a ControlTemplate whose root element has not arrived; 2 a
+ * ControlTemplate whose root is attached. A template scope defers its application to the target the pending property
+ * named until the scope pops — the compiled document creates the template object before the elements inside it, and the
+ * control must store the template only once its root is attached, so the presenter binding (and every later read of the
+ * template) sees the final tree. The deferred target is a borrowed pointer into the scope below. */
+struct scope {
+	IInspectable *object;
+	unsigned char kind;
+	IInspectable *deferred_target;
+	const WCHAR *deferred_name;
+	UINT32 deferred_length;
+};
+
 static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root)
 {
 	struct reader r = {m->data, begin, end};
-	IInspectable *stack[LOADER_DEPTH];
+	struct scope stack[LOADER_DEPTH];
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
 	UINT32 pending_length = 0;
@@ -352,14 +411,33 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 		const uint8_t kind = next_byte(&r);
 		switch (kind) {
 		case 1:
-			if (depth < LOADER_DEPTH)
-				stack[depth++] = NULL;
+			if (depth < LOADER_DEPTH) {
+				stack[depth].object = NULL;
+				stack[depth].kind = 0;
+				stack[depth].deferred_target = NULL;
+				stack[depth].deferred_name = NULL;
+				stack[depth].deferred_length = 0;
+				++depth;
+			}
 			break;
 		case 2: case 33: case 39: case 40:
 			if (depth) {
-				IInspectable *object = stack[--depth];
-				if (object)
-					IInspectable_Release(object);
+				struct scope *scope = &stack[--depth];
+				/* The deferred template application: the template scope closes with its root attached, so the control
+				 * stores the finished tree. A failed application fails the document the way a failed scoped property
+				 * does — the caller is not handed a tree that silently lost its template. */
+				if (scope->kind && scope->deferred_target && scope->object) {
+					const HRESULT applied = raven_xaml_element_set_object(scope->deferred_target,
+						scope->deferred_name, scope->deferred_length, scope->object);
+					if (FAILED(applied)) {
+						if (scope->object)
+							IInspectable_Release(scope->object);
+						status = applied;
+						goto done;
+					}
+				}
+				if (scope->object)
+					IInspectable_Release(scope->object);
 			}
 			break;
 		case 20: case 21: case 22: {
@@ -373,25 +451,81 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			}
 			status = create_reference(m, reference, &object);
 			if (object) {
-				if (pending_name && depth) {
-					const HRESULT applied = raven_xaml_element_set_object(stack[depth - 1], pending_name, pending_length, object);
-					if (FAILED(applied)) {
+				if (raven_xaml_object_is_control_template(object)) {
+					/* The template scope opens; the pending property name rides the scope as the deferred
+					 * application. A template is never the visual root of the scope above, so no property applies
+					 * it now. */
+					if (depth < LOADER_DEPTH) {
+						stack[depth].object = object;
+						stack[depth].kind = 1;
+						stack[depth].deferred_target = (pending_name && depth) ? stack[depth - 1].object : NULL;
+						stack[depth].deferred_name = pending_name;
+						stack[depth].deferred_length = pending_length;
+						++depth;
+					} else {
 						IInspectable_Release(object);
-						status = applied;
+					}
+					pending_name = NULL;
+					if (!*root) {
+						*root = object;
+						IInspectable_AddRef(object);
+					}
+				} else if (depth && stack[depth - 1].kind == 1) {
+					/* The template scope above is waiting for its root: this object is it, whatever property name
+					 * the node stream carried — the engine-internal attach owns the tree from here. */
+					status = raven_xaml_control_template_put_root(stack[depth - 1].object, object);
+					if (FAILED(status)) {
+						IInspectable_Release(object);
 						goto done;
 					}
+					stack[depth - 1].kind = 2;
+					pending_name = NULL;
+					if (!*root) {
+						*root = object;
+						IInspectable_AddRef(object);
+					}
+					if (depth < LOADER_DEPTH) {
+						stack[depth].object = object;
+						stack[depth].kind = 0;
+						stack[depth].deferred_target = NULL;
+						stack[depth].deferred_name = NULL;
+						stack[depth].deferred_length = 0;
+						++depth;
+					} else {
+						IInspectable_Release(object);
+					}
+				} else {
+					if (pending_name && depth) {
+						const HRESULT applied = raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
+						if (FAILED(applied)) {
+							IInspectable_Release(object);
+							status = applied;
+							goto done;
+						}
+					}
+					pending_name = NULL;
+					if (!*root) {
+						*root = object;
+						IInspectable_AddRef(object);
+					}
+					if (depth < LOADER_DEPTH) {
+						stack[depth].object = object;
+						stack[depth].kind = 0;
+						stack[depth].deferred_target = NULL;
+						stack[depth].deferred_name = NULL;
+						stack[depth].deferred_length = 0;
+						++depth;
+					} else {
+						IInspectable_Release(object);
+					}
 				}
-				pending_name = NULL;
-				if (!*root) {
-					*root = object;
-					IInspectable_AddRef(object);
-				}
-				if (depth < LOADER_DEPTH)
-					stack[depth++] = object;
-				else
-					IInspectable_Release(object);
 			} else if (depth < LOADER_DEPTH) {
-				stack[depth++] = NULL;
+				stack[depth].object = NULL;
+				stack[depth].kind = 0;
+				stack[depth].deferred_target = NULL;
+				stack[depth].deferred_name = NULL;
+				stack[depth].deferred_length = 0;
+				++depth;
 			}
 			break;
 		}
@@ -405,9 +539,16 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					goto done;
 			}
 			if (SUCCEEDED(create_reference(m, reference, &object)) && object) {
-				if (pending_name && depth)
-					(void)raven_xaml_element_set_object(stack[depth - 1], pending_name, pending_length, object);
-				pending_name = NULL;
+				if (depth && stack[depth - 1].kind == 1) {
+					/* A non-scoped object under a template scope is the root the same way a scoped one is. */
+					if (raven_xaml_control_template_put_root(stack[depth - 1].object, object) == S_OK)
+						stack[depth - 1].kind = 2;
+					pending_name = NULL;
+				} else {
+					if (pending_name && depth)
+						(void)raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
+					pending_name = NULL;
+				}
 				if (!*root) {
 					*root = object;
 					IInspectable_AddRef(object);
@@ -428,7 +569,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (FAILED(status))
 				goto done;
 			if (depth && value.kind == value_string)
-				(void)raven_xaml_element_set_name(stack[depth - 1], value.text, value.length);
+				(void)raven_xaml_element_set_name(stack[depth - 1].object, value.text, value.length);
 			break;
 		}
 		case 7: case 19: case 32: {
@@ -472,7 +613,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (FAILED(status))
 				goto done;
 			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length)))
-				(void)apply_value(stack[depth - 1], name, length, &value);
+				(void)apply_value(stack[depth - 1].object, name, length, &value);
 			break;
 		}
 		case 28: case 29: case 31: case 38:
@@ -485,8 +626,10 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 		}
 	}
 done:
+	/* The scopes unwind without their deferred applications: a failed document never half-applies the templates it
+	 * declared, and the objects the unwind releases own the only references the deferred targets held through them. */
 	while (depth) {
-		IInspectable *object = stack[--depth];
+		IInspectable *object = stack[--depth].object;
 		if (object)
 			IInspectable_Release(object);
 	}

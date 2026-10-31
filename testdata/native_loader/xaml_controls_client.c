@@ -381,6 +381,88 @@ static void put_text_at(unsigned char *doc, size_t at, const char *text)
 	}
 }
 
+/* A document that declares a ControlTemplate through a property node: a Button (stable 540) carries Content (stable 999,
+ * a TextBlock "Hi", stable 396 with Text 800) and a "Template" property (the document's own property table) whose value
+ * is a ControlTemplate (the document's own type table — the stable type table does not carry the class) whose root is a
+ * Grid (stable 442) holding one ContentPresenter (the document's type table again). The loader defers the template's
+ * application to the template scope's pop, so the button stores the template with its root and presenter attached. */
+static size_t build_template_document(unsigned char *doc)
+{
+	size_t at;
+	for (size_t index = 0; index < 400; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 332);
+	put32(doc, 8, 40);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 120);
+	put64(doc, 28, 266);
+	put64(doc, 36, 270);
+	put64(doc, 44, 282);
+	put64(doc, 52, 310);
+	put64(doc, 60, 328);
+	put32(doc, 132, 4);
+	at = put_text(doc, 136, "Windows.UI.Xaml.Controls");
+	at = put_text(doc, at, "ControlTemplate");
+	at = put_text(doc, at, "ContentPresenter");
+	at = put_text(doc, at, "Template");
+	put32(doc, 278, 0);
+	put32(doc, 282, 1);
+	put32(doc, 286, 0);
+	put32(doc, 290, 0);
+	put32(doc, 294, 2);
+	put32(doc, 298, 0);
+	put32(doc, 302, 0);
+	put32(doc, 306, 1);
+	put32(doc, 310, 0);
+	put32(doc, 314, 0);
+	put32(doc, 318, 2);
+	put32(doc, 322, 1);
+	put32(doc, 326, 0);
+	put32(doc, 330, 0);
+	put32(doc, 334, 3);
+	put32(doc, 340, 0);
+	put32(doc, 344, 1);
+	put32(doc, 348, 0);
+	put32(doc, 352, 40);
+	doc[356] = 0x14;
+	doc[357] = (unsigned char)(540 & 0xff);
+	doc[358] = (unsigned char)((540 >> 8) | 0x80);
+	doc[359] = 0x07;
+	doc[360] = (unsigned char)(999 & 0xff);
+	doc[361] = (unsigned char)((999 >> 8) | 0x80);
+	doc[362] = 0x14;
+	doc[363] = (unsigned char)(396 & 0xff);
+	doc[364] = (unsigned char)((396 >> 8) | 0x80);
+	doc[365] = 0x1a;
+	doc[366] = (unsigned char)(800 & 0xff);
+	doc[367] = (unsigned char)((800 >> 8) | 0x80);
+	doc[368] = 0x09;
+	put32(doc, 369, 2);
+	doc[373] = 'H'; doc[375] = 'i';
+	doc[377] = 0x02;
+	doc[378] = 0x07;
+	doc[379] = 0x00;
+	doc[380] = 0x00;
+	doc[381] = 0x14;
+	doc[382] = 0x00;
+	doc[383] = 0x00;
+	doc[384] = 0x14;
+	doc[385] = (unsigned char)(442 & 0xff);
+	doc[386] = (unsigned char)((442 >> 8) | 0x80);
+	doc[387] = 0x07;
+	doc[388] = (unsigned char)(648 & 0xff);
+	doc[389] = (unsigned char)((648 >> 8) | 0x80);
+	doc[390] = 0x14;
+	doc[391] = 0x01;
+	doc[392] = 0x00;
+	doc[393] = 0x02;
+	doc[394] = 0x02;
+	doc[395] = 0x02;
+	return 396;
+}
+
 static int same(HSTRING value, const WCHAR *text, UINT32 expected)
 {
 	UINT32 length = 0;
@@ -1108,6 +1190,91 @@ int raven_entry(void)
 		control_template_factory->lpVtbl->Release(control_template_factory);
 		WindowsDeleteString(textblock_key);
 		textblock_key = NULL;
+	}
+
+	/* XBF-declared templates: the loader path. The document declares the template under the button's "Template" property
+	 * (the document's own tables — the stable type table does not carry ControlTemplate or ContentPresenter), the loader
+	 * defers the application until the template's root is attached, and the button answers the applied template with its
+	 * root grid and the presenter inside it. The presenter resolves the button's Content through the same hook the render
+	 * walk reads, so the compiled document's template shows the control's content. */
+	{
+		typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIButton button1;
+		typedef HRESULT (*template_root_read_function)(IInspectable *, IInspectable **);
+		typedef HRESULT (*template_child_function)(IInspectable *, IInspectable **);
+		typedef HRESULT (*get_template_function2)(IInspectable *, IInspectable **);
+		template_root_read_function read_template_root = NULL;
+		template_child_function template_child = NULL;
+		get_template_function2 element_get_template2 = NULL;
+		HMODULE engine = LoadLibraryW(L"raven-xaml.dll");
+		unsigned char template_fixture[400];
+		IInspectable *loaded_button = NULL, *read_template = NULL, *root_grid = NULL, *presenter = NULL, *content_child = NULL;
+		button1 *loaded_button_iface = NULL;
+		void *loaded_template_iface = NULL;
+		panel1 *root_panel = NULL;
+		content_control1 *loaded_content = NULL;
+		textblock1 *content_text = NULL;
+		void *children_object = NULL;
+		struct fixture_vector *children = NULL;
+		HSTRING presenter_name = NULL, content_text_value = NULL;
+		UINT32 child_count = 0;
+		static const WCHAR presenter_class[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
+		if (!engine) return 740;
+		read_template_root = (template_root_read_function)GetProcAddress(engine, "raven_xaml_control_template_root");
+		template_child = (template_child_function)GetProcAddress(engine, "raven_xaml_element_template_child");
+		element_get_template2 = (get_template_function2)GetProcAddress(engine, "raven_xaml_element_get_template");
+		if (!read_template_root || !template_child || !element_get_template2) return 741;
+		if (load(template_fixture, (uint32_t)build_template_document(template_fixture), &loaded_button) != S_OK ||
+			!loaded_button) return 742;
+		if (loaded_button->lpVtbl->QueryInterface(loaded_button, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+			(void **)&loaded_button_iface) != S_OK || !loaded_button_iface) return 743;
+		loaded_button_iface->lpVtbl->Release(loaded_button_iface);
+		if (element_get_template2(loaded_button, &read_template) != S_OK || !read_template) return 744;
+		if (read_template->lpVtbl->QueryInterface(read_template,
+			&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, &loaded_template_iface) != S_OK ||
+			!loaded_template_iface) return 745;
+		((IUnknown *)loaded_template_iface)->lpVtbl->Release((IUnknown *)loaded_template_iface);
+		/* the template root: the grid the document declared inside the template */
+		if (read_template_root(read_template, &root_grid) != S_OK || !root_grid) return 746;
+		if (root_grid->lpVtbl->QueryInterface(root_grid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+			(void **)&root_panel) != S_OK || !root_panel) return 747;
+		if (root_panel->lpVtbl->get_Children(root_panel, (uint64_t)(uintptr_t)&children_object) != S_OK || !children_object)
+			return 748;
+		children = (struct fixture_vector *)children_object;
+		if (children->lpVtbl->get_Size(children, &child_count) != S_OK || child_count != 1) return 749;
+		if (children->lpVtbl->GetAt(children, 0, &presenter) != S_OK || !presenter) return 750;
+		if (presenter->lpVtbl->GetRuntimeClassName(presenter, &presenter_name) != S_OK || !presenter_name) return 751;
+		if (!same(presenter_name, presenter_class, ARRAYSIZE(presenter_class) - 1)) {
+			WindowsDeleteString(presenter_name);
+			return 752;
+		}
+		WindowsDeleteString(presenter_name);
+		children->lpVtbl->Release(children);
+		root_panel->lpVtbl->Release(root_panel);
+		root_grid->lpVtbl->Release(root_grid);
+		read_template->lpVtbl->Release(read_template);
+		read_template = NULL;
+		/* the presenter resolves the button's Content through the render walk's own hook */
+		if (template_child(presenter, &content_child) != S_OK || !content_child) return 753;
+		if (content_child->lpVtbl->QueryInterface(content_child, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+			(void **)&content_text) != S_OK || !content_text) return 754;
+		if (content_text->lpVtbl->get_Text(content_text, (uint64_t)(uintptr_t)&content_text_value) != S_OK || !content_text_value ||
+			!same(content_text_value, L"Hi", 2)) return 755;
+		WindowsDeleteString(content_text_value);
+		content_text->lpVtbl->Release(content_text);
+		content_child->lpVtbl->Release(content_child);
+		content_child = NULL;
+		/* the grid root is neither a button nor a presenter: the hook answers S_FALSE for it */
+		if (template_child(root_grid, &content_child) != S_FALSE) return 756;
+		/* the button's stored content still answers logically while the template is applied */
+		if (loaded_button->lpVtbl->QueryInterface(loaded_button, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl,
+			(void **)&loaded_content) != S_OK || !loaded_content) return 757;
+		if (loaded_content->lpVtbl->get_Content(loaded_content, (uint64_t)(uintptr_t)&content_child) != S_OK || !content_child)
+			return 758;
+		loaded_content->lpVtbl->Release(loaded_content);
+		content_child->lpVtbl->Release(content_child);
+		content_child = NULL;
+		presenter->lpVtbl->Release(presenter);
+		loaded_button->lpVtbl->Release(loaded_button);
 	}
 
 	/* The application metadata provider: the fixture composes its provider onto the XAML Application object, the loader

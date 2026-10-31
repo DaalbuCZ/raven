@@ -63,10 +63,8 @@ interface __x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate { CONST_VTBL te
 DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, 0xefd2418e, 0x41e0, 0x48bb, 0x8b, 0x82, 0x91,
 	0xed, 0xa1, 0xba, 0x3f, 0xe2);
 
-/* The visual-child hook of the element classes (xaml_elements.c): the templated control answers it with the root of its
- * applied ControlTemplate, so the render walk picks the tree up unchanged. Declared here because the shared internal
- * header stays untouched this increment. */
-HRESULT raven_xaml_element_template_child(IInspectable *object, IInspectable **out);
+/* The visual-child hook of the element classes and the template kind checks ride xaml_internal.h; the loader drives
+ * raven_xaml_object_is_control_template below when a compiled document declares a template node. */
 
 static const WCHAR frame_class[] = L"Windows.UI.Xaml.Controls.Frame";
 static const WCHAR page_class[] = L"Windows.UI.Xaml.Controls.Page";
@@ -898,6 +896,21 @@ HRESULT __declspec(dllexport) raven_xaml_control_template_root(IInspectable *tem
 	return S_OK;
 }
 
+/* The kind probe the loader's template-node handling drives: non-zero for an engine ControlTemplate, zero for any
+ * other object (including a foreign IControlTemplate implementation — the vtable check is the engine's own). */
+int raven_xaml_object_is_control_template(IInspectable *object)
+{
+	template1 *iface = NULL;
+	if (!object)
+		return 0;
+	if (FAILED(object->lpVtbl->QueryInterface(object,
+		&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, (void **)&iface)) || !iface)
+		return 0;
+	const int is_template = iface->lpVtbl == &template_table;
+	iface->lpVtbl->Release(iface);
+	return is_template;
+}
+
 HRESULT __declspec(dllexport) raven_xaml_control_template_put_root(IInspectable *template_object, IInspectable *root)
 {
 	IInspectable *probe = NULL;
@@ -1323,6 +1336,10 @@ HRESULT raven_xaml_element_set_object(IInspectable *object, const WCHAR *name, U
 	if (!object)
 		return E_POINTER;
 	if (same_text(name, length, L"Children"))
+		return raven_xaml_elements_set_object(object, name, length, value);
+	/* The "Template" object property (the loader's deferred template application) routes to the elements dispatch like
+	 * the children do; the elements side answers the button's control storage or the skip convention. */
+	if (same_text(name, length, L"Template"))
 		return raven_xaml_elements_set_object(object, name, length, value);
 	if (!same_text(name, length, L"Content"))
 		return S_FALSE;
