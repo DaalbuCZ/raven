@@ -32,6 +32,7 @@ struct stable_property_entry {
  * beside them, RowDefinitions and ColumnDefinitions the collections a grid holds its layout tracks in, and FontSize and
  * Foreground the text properties a TextBlock draws with. */
 static const struct stable_property_entry properties[] = {
+	{560, L"Template"},
 	{1047, L"CacheSize"},
 	{832, L"Content"},
 	{2408, L"Content"},
@@ -64,6 +65,11 @@ static const struct metadata_entry entries[] = {
 	{540, L"Button", L"Windows.UI.Xaml.Controls.Button"},
 	{106, L"RowDefinition", L"Windows.UI.Xaml.Controls.RowDefinition"},
 	{44, L"ColumnDefinition", L"Windows.UI.Xaml.Controls.ColumnDefinition"},
+	/* The template classes a real app XBF names by stable index: the property Control.Template (560) above and these two
+	 * types — the template value and the presenter inside it. ContentPresenter is not in the runtime catalog, so its
+	 * activation falls to the loader's engine-internal factory path, not RoActivateInstance. */
+	{191, L"ControlTemplate", L"Windows.UI.Xaml.Controls.ControlTemplate"},
+	{296, L"ContentPresenter", L"Windows.UI.Xaml.Controls.ContentPresenter"},
 };
 
 const WCHAR *raven_xaml_class_by_stable(uint32_t stable)

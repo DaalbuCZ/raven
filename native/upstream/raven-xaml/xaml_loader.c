@@ -17,8 +17,9 @@
  * Templates ride the object-property path: a ControlTemplate node opens a template scope that defers its application to
  * the target until the scope pops (so the root element the document declares inside it attaches first, through the
  * engine-internal put_root), and a ContentPresenter inside the template resolves its templated parent's Content at render
- * time through the element side's hook. Both classes build through the engine-internal factories — the stable type table
- * does not carry them.
+ * time through the element side's hook. Both classes build through the engine-internal factories when a stable-index
+ * reference names them — the runtime catalog does not list ContentPresenter — and a document's own type table resolves
+ * them by name through the same factories.
  *
  * The entry point is exported as RavenXamlLoad so the engine and its tests can hand it a compiled page. */
 #define CINTERFACE
@@ -261,8 +262,19 @@ static HRESULT create_reference(const struct metadata *m, uint16_t reference, II
 {
 	WCHAR buffer[MAX_NAME];
 	UINT32 length = 0;
-	if (reference & 0x8000)
-		return raven_xaml_create_stable(reference & 0x7FFF, out);
+	if (reference & 0x8000) {
+		const uint32_t stable = reference & 0x7FFF;
+		const HRESULT made = raven_xaml_create_stable(stable, out);
+		if (SUCCEEDED(made))
+			return made;
+		/* The catalog does not list every class the stable table carries (ContentPresenter), so a failed RoActivateInstance
+		 * still falls to the engine-internal factories when the stable table names a class they serve. */
+		const WCHAR *class_name = raven_xaml_class_by_stable(stable);
+		if (!class_name)
+			return made;
+		const HRESULT known = create_known(class_name, (UINT32)lstrlenW(class_name), out);
+		return known != CLASS_E_CLASSNOTAVAILABLE ? known : made;
+	}
 	if (FAILED(metadata_type_name(m, reference, buffer, MAX_NAME, &length)))
 		return E_INVALIDARG;
 	{
@@ -273,10 +285,11 @@ static HRESULT create_reference(const struct metadata *m, uint16_t reference, II
 	return raven_xaml_create_named(buffer, length, out);
 }
 
-/* The template-path classes a compiled document names that the stable type table does not carry: ControlTemplate (the
+/* The template-path classes a compiled document names by stable index or through its own tables: ControlTemplate (the
  * value a "Template" property declares) and ContentPresenter (the element inside a template that shows the control's
- * content). Both build through the engine-internal factories, so a document's own type table resolves them without a
- * running application's metadata provider; every other document-named type keeps the provider path. */
+ * content). Both build through the engine-internal factories, so a document resolves them without a running
+ * application's metadata provider and without a catalog entry for the presenter; every other document-named type keeps
+ * the provider path. */
 static HRESULT create_known(const WCHAR *name, UINT32 length, IInspectable **out)
 {
 	static const WCHAR template_name[] = L"Windows.UI.Xaml.Controls.ControlTemplate";
