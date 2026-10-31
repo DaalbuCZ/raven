@@ -1915,6 +1915,8 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_dependency_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_pointer_device_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_automation_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_dictionary_factory(name, out);

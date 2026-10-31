@@ -188,6 +188,7 @@ void NativeRegistry::register_runtime_classes()
 	// from the Application class and the core window of its UI thread.
 	static constexpr std::pair<const char16_t *, const char16_t *> runtime_classes[] = {
 		{u"Windows.Management.Deployment.PackageManager", u"raven-deployment.dll"},
+		{u"Windows.Devices.Input.PointerDevice", u"raven-xaml.dll"},
 		{u"Windows.UI.Core.CoreCursor", u"raven-xaml.dll"},
 		{u"Windows.UI.Core.CoreWindow", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Application", u"raven-xaml.dll"},

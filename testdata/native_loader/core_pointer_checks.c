@@ -272,6 +272,104 @@ static int history_checks(void)
 	return 0;
 }
 
+/* The PointerDevice statics, reached through GetProcAddress the way the history builder is: the
+ * class-name catalog entry and the RoGetActivationFactory chain stay with the integrator. */
+typedef HRESULT (*statics_create_function)(__x_ABI_CWindows_CDevices_CInput_CIPointerDeviceStatics **);
+static int device_checks(void)
+{
+	HMODULE component = GetModuleHandleW(L"raven-xaml.dll");
+	if (!component) return __LINE__;
+	statics_create_function create_statics =
+		(statics_create_function)GetProcAddress(component, "raven_pointer_device_statics");
+	if (!create_statics) return __LINE__;
+	IPointerDeviceStatics *statics = NULL;
+	if (create_statics(&statics) != S_OK || !statics) return __LINE__;
+	__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice *view = NULL;
+	if (IPointerDeviceStatics_GetPointerDevices(statics, &view) != S_OK || !view) return __LINE__;
+	UINT32 count = 0;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_get_Size(view, &count) != S_OK || count < 1) return __LINE__;
+	IPointerDevice *mouse = NULL;
+	UINT32 mouse_index = 0;
+	for (UINT32 i = 0; i < count; ++i) {
+		IPointerDevice *device = NULL;
+		if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_GetAt(view, i, &device) != S_OK || !device) return __LINE__;
+		PointerDeviceType type;
+		if (IPointerDevice_get_PointerDeviceType(device, &type) != S_OK) return __LINE__;
+		if (type == PointerDeviceType_Mouse && !mouse) {
+			mouse = device;
+			mouse_index = i;
+			continue;
+		}
+		IPointerDevice_Release(device);
+	}
+	if (!mouse) return __LINE__;
+	/* The view answers the same object identity the event path already verified. */
+	if (mouse != state.device) return __LINE__;
+	/* Documented mouse values: never integrated, one contact, an extent and its screen projection. */
+	boolean integrated = TRUE;
+	UINT32 contacts = 0;
+	Rect physical, screen;
+	if (IPointerDevice_get_IsIntegrated(mouse, &integrated) != S_OK || integrated) return __LINE__;
+	if (IPointerDevice_get_MaxContacts(mouse, &contacts) != S_OK || contacts != 1) return __LINE__;
+	if (IPointerDevice_get_PhysicalDeviceRect(mouse, &physical) != S_OK || physical.Width <= 0 || physical.Height <= 0) return __LINE__;
+	if (IPointerDevice_get_ScreenRect(mouse, &screen) != S_OK || screen.Width <= 0 || screen.Height <= 0) return __LINE__;
+	/* GetPointerDevice(1) resolves the mouse the events report; another id is an unknown pointer. */
+	IPointerDevice *by_id = NULL;
+	if (IPointerDeviceStatics_GetPointerDevice(statics, 1, &by_id) != S_OK || by_id != state.device) return __LINE__;
+	if (IPointerDevice_Release(by_id) != 3) return __LINE__; /* state.device, the view, the fetched mouse */
+	IPointerDevice *unknown = (void *)1;
+	if (IPointerDeviceStatics_GetPointerDevice(statics, 2, &unknown) != E_INVALIDARG || unknown) return __LINE__;
+	/* View bounds: one past the end answers E_BOUNDS; GetMany clips and reports what fit. */
+	IPointerDevice *beyond = (void *)1;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_GetAt(view, count, &beyond) != E_BOUNDS || beyond) return __LINE__;
+	BOOLEAN found = FALSE;
+	UINT32 index = 0;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_IndexOf(view, mouse, &index, &found) != S_OK ||
+		!found || index != mouse_index) return __LINE__;
+	IPointerDevice *many[8] = {0};
+	UINT32 got = 0;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_GetMany(view, 0, 8, many, &got) != S_OK ||
+		got != (count < 8 ? count : 8)) return __LINE__;
+	for (UINT32 i = 0; i < got; ++i) {
+		IPointerDevice *element = NULL;
+		if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_GetAt(view, i, &element) != S_OK ||
+			element != many[i]) return __LINE__;
+		IPointerDevice_Release(element);
+	}
+	UINT32 drained = 0;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_GetMany(view, count, 8, many, &drained) != S_OK || drained) return __LINE__;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_GetMany(view, count + 1, 8, many, &drained) != E_BOUNDS || drained) return __LINE__;
+	/* A second view is another snapshot of the same stable catalog: the mouse keeps its identity. */
+	__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice *again = NULL;
+	if (IPointerDeviceStatics_GetPointerDevices(statics, &again) != S_OK || !again) return __LINE__;
+	IPointerDevice *same = NULL;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_GetAt(again, mouse_index, &same) != S_OK ||
+		same != mouse) return __LINE__;
+	IPointerDevice_Release(same);
+	for (UINT32 i = 0; i < got; ++i)
+		if (IPointerDevice_Release(many[i]) != (many[i] == mouse ? 4 : 1)) return __LINE__; /* the second view already holds the mouse */
+	if (IPointerDevice_Release(mouse) != 3) return __LINE__; /* state.device and the two views remain */
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_Release(view) != 0) return __LINE__;
+	if (__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice_Release(again) != 0) return __LINE__;
+	/* The class answers RoGetActivationFactory like any cataloged runtime class: the statics QI off the
+	 * activation factory resolves the same singleton the export handed out. */
+	HMODULE combase = LoadLibraryW(L"combase.dll");
+	HRESULT (WINAPI *ro_factory)(HSTRING, REFIID, void **) = combase ?
+		(void *)GetProcAddress(combase, "RoGetActivationFactory") : NULL;
+	if (!ro_factory) return __LINE__;
+	HSTRING device_name = NULL;
+	static const WCHAR device_text[] = L"Windows.Devices.Input.PointerDevice";
+	if (WindowsCreateString(device_text, ARRAYSIZE(device_text) - 1, &device_name) != S_OK) return __LINE__;
+	IActivationFactory *device_activation = NULL;
+	if (ro_factory(device_name, &IID___x_ABI_CWindows_CDevices_CInput_CIPointerDeviceStatics,
+		(void **)&device_activation) != S_OK || !device_activation) return __LINE__;
+	if (device_activation != (IActivationFactory *)statics) return __LINE__; /* the same singleton, seen through the chain */
+	WindowsDeleteString(device_name);
+	if (IActivationFactory_Release(device_activation) != 1) return __LINE__; /* the export's create ref remains */
+	if (IPointerDeviceStatics_Release(statics) != 0) return __LINE__;
+	return 0;
+}
+
 int raven_pointer_checks(ICoreWindow *window, ICoreDispatcher *dispatcher, HWND hwnd)
 {
 	state.window = window;
@@ -358,6 +456,8 @@ int raven_pointer_checks(ICoreWindow *window, ICoreDispatcher *dispatcher, HWND 
 	if (!PostMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(6, 7)) ||
 		ICoreDispatcher_ProcessEvents(dispatcher, CoreProcessEventsOption_ProcessAllIfPresent) != E_ACCESSDENIED) return __LINE__;
 	state.fail_move = FALSE;
+	int device_result = device_checks();
+	if (device_result) return device_result;
 	return state.failure;
 }
 
