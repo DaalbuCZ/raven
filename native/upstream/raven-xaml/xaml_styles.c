@@ -13,9 +13,23 @@
  *
  * DependencyProperty is not implemented yet, so a Setter cannot carry a real property: ISetter.put_Property answers
  * E_NOTIMPL at its exact signature, and the engine addresses setters by their property NAME through
- * raven_style_add_setter, which stores (property-name string, value IInspectable) pairs the render readback in
- * xaml_elements.c walks. The Value property is real: put_Value takes the value as an IInspectable and get_Value hands it
- * back, so a Setter created through the factory already round-trips its value.
+ * raven_style_add_setter, which stores (property-name string, value IInspectable) pairs. The Value property is real:
+ * put_Value takes the value as an IInspectable and get_Value hands it back, so a Setter created through the factory
+ * already round-trips its value.
+ *
+ * What applies: an element's put_Style (xaml_elements.c) runs the style's setters against the element's OWN storage
+ * through raven_style_apply below — the BasedOn chain's setters first, the style's own after, so the derived style's
+ * value for a property the base also set lands last and wins. The walk guards a BasedOn cycle with a depth cap: a chain
+ * deeper than RAVEN_STYLE_CHAIN_MAX stops answering instead of hanging. A setter whose property the element stores but
+ * whose value is of the wrong kind (a number where a colour is wanted) fails the put with E_INVALIDARG before anything
+ * lands; a property the element has no storage for is skipped, because without DependencyProperty the engine cannot tell
+ * a name it does not store from one it will.
+ *
+ * What still does not: ControlTemplate application and the template stage, real DependencyProperty setters (a Setter
+ * carries a name string, not a property reference), style merging — the engine re-applies the chain at put time instead
+ * of building a merged setter list, and a Setter appended to an already-applied style does not re-apply (put_Style is
+ * the application point; raven_style_add_setter only re-renders). The TargetType is stored and round-tripped but not
+ * checked against the element the style is put on.
  *
  * The interface declarations come from Windows.UI.Xaml.winmd by scripts/generate-winrt-header.py into
  * windows_ui_xaml_style.h; the TargetType slots use the real TypeName struct mingw declares and the IVector`1<SetterBase>
@@ -978,8 +992,8 @@ HRESULT raven_style_setter_at(IInspectable *style, UINT32 index, const WCHAR **p
 	*value = NULL;
 	if (!self)
 		return S_FALSE;
-	/* The name points into the style's own storage: the element holds a reference on the style, and the readback copies
-	 * synchronously while it is alive. */
+		/* The name points into the style's own storage: the element holds a reference on the style, and the application
+		 * copies synchronously while it is alive. */
 	UINT32 position = 0;
 	for (UINT32 scan = 0; scan < self->setters->count; ++scan) {
 		struct setter_object *setter = self->setters->items[scan];
@@ -995,4 +1009,47 @@ HRESULT raven_style_setter_at(IInspectable *style, UINT32 index, const WCHAR **p
 		++position;
 	}
 	return E_BOUNDS;
+}
+
+/* The chain application the element's put_Style drives. The callback receives every stored setter pair — the BasedOn
+ * chain's setters first, the style's own after, so a property the derived style sets lands after what the base applied
+ * and wins, the real XAML precedence. The guard against a BasedOn cycle is the depth cap: a chain deeper than
+ * RAVEN_STYLE_CHAIN_MAX stops answering, so a cycle applies its setters at most cap times and returns instead of
+ * hanging. check_only runs the callback in its validation mode, so put_Style can reject a wrong-kind value before any
+ * setter of the chain lands. A style that is not an engine Style applies nothing and answers S_OK. The callback runs
+ * synchronously with the value reference borrowed; it does not outlive the call. */
+#define RAVEN_STYLE_CHAIN_MAX 32
+
+static HRESULT style_apply_walk(struct style_object *self, UINT32 depth,
+	HRESULT (*apply)(void *context, const WCHAR *name, UINT32 length, IInspectable *value, int check_only),
+	void *context, int check_only)
+{
+	if (!self || depth >= RAVEN_STYLE_CHAIN_MAX)
+		return S_OK;
+	struct style_object *base = style_of(self->based_on);
+	if (base) {
+		HRESULT result = style_apply_walk(base, depth + 1, apply, context, check_only);
+		if (FAILED(result))
+			return result;
+	}
+	for (UINT32 index = 0; index < self->setters->count; ++index) {
+		struct setter_object *setter = self->setters->items[index];
+		if (!setter || setter->lpVtbl != &setter_table || !setter->property)
+			continue;
+		UINT32 length = 0;
+		const WCHAR *name = WindowsGetStringRawBuffer(setter->property, &length);
+		HRESULT result = apply(context, name, length, setter->value, check_only);
+		if (FAILED(result))
+			return result;
+	}
+	return S_OK;
+}
+
+HRESULT raven_style_apply(IInspectable *style,
+	HRESULT (*apply)(void *context, const WCHAR *name, UINT32 length, IInspectable *value, int check_only),
+	void *context, int check_only)
+{
+	if (!apply)
+		return E_POINTER;
+	return style_apply_walk(style_of(style), 0, apply, context, check_only);
 }

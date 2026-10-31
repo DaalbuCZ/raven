@@ -700,8 +700,8 @@ struct grid {
 	COLORREF color;
 	BYTE alpha;
 	IInspectable *background;
-	/* The Style the element was given (an owned reference); the render readback applies its setters over the own state
-	 * above, so clearing the reference restores the own state exactly. */
+	/* The Style the element was given (an owned reference); put_Style applied its setters into the fields above at the
+	 * put, so the reference records what was applied rather than overriding the own state at read time. */
 	IInspectable *style;
 	float width, height;
 	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
@@ -920,11 +920,9 @@ struct textblock {
 	COLORREF foreground;
 	BYTE foreground_alpha;
 	IInspectable *foreground_brush;
-	/* The Style the element was given (an owned reference), plus the text override the style application last produced:
-	 * the override's boxed value hands out a fresh string per read, and the render pass copies the buffer synchronously,
-	 * so the element keeps the copy alive in the slot until the next read or the style clears. */
+	/* The Style the element was given (an owned reference); put_Style applied its setters into the fields above at the
+	 * put, so the reference records what was applied rather than overriding the own state at read time. */
 	IInspectable *style;
-	HSTRING styled_text;
 	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
 	 * sit beside them in the same order the store selector uses; a child without a span reads back one track. */
 	UINT32 row, column;
@@ -971,7 +969,6 @@ static ULONG WINAPI textblock_release(textblock1 *iface)
 	if (!refs) {
 		if (self->name) WindowsDeleteString(self->name);
 		if (self->text) WindowsDeleteString(self->text);
-		if (self->styled_text) WindowsDeleteString(self->styled_text);
 		if (self->foreground_brush)
 			self->foreground_brush->lpVtbl->Release(self->foreground_brush);
 		if (self->style)
@@ -1215,9 +1212,12 @@ struct button {
 	/* The size the layout pass gave the button: its Width and Height, or the cell it lays out into. The routing records the
 	 * rectangle this produces and the release-within-bounds check reads it back. */
 	float width, height;
-	/* The Style the element was given (an owned reference); the control chrome the setters would restyle does not render
-	 * yet, so the reference is stored until that stage wires the readback. */
+	/* The Style the element was given (an owned reference); put_Style applied its setters at the put. The Background a
+	 * setter carried sits in the fields below it — the control chrome does not render yet, so the colour waits for that
+	 * stage the way the reference itself waited for the style stage. */
 	IInspectable *style;
+	COLORREF color;
+	BYTE alpha;
 	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
 	 * sit beside them in the same order the store selector uses; a child without a span reads back one track. */
 	UINT32 row, column;
@@ -2152,16 +2152,29 @@ HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, 
 	return S_FALSE;
 }
 
-/* The per-element Style property and the style application of the render readback.
+/* The per-element Style property and the application of a style's setters.
  *
- * The element keeps its own owned reference (put_style clears it with NULL), and the application happens where the element's
- * render state is read — raven_xaml_element_render_info and raven_xaml_element_render_text below — so a setter OVERRIDES the
- * value the pass reads instead of mutating the own state: clearing the style restores the own state exactly. For each setter
- * pair the property name selects the field and the value kind selects the application, the same paths the loader uses: a
- * boxed string goes through the set_text spelling (the named colours, the text), a boxed number through the set_float path
- * (the font size, the extent), and a composition colour brush straight into the state the brush slot stores. Setter values
- * of any other kind — the set_object path — have no readback surface yet and are skipped; the dependency-property stage
- * wires the rest. The last matching setter wins, the way the real application order works. */
+ * put_Style is the application point: storing the style runs its Setters against the element's OWN storage — the BasedOn
+ * chain's setters first, the style's own after (raven_style_apply in xaml_styles.c), so a property the derived style sets
+ * lands after what the base applied and wins, the real XAML precedence. Each setter goes through the same stores the
+ * loader and the direct property puts use, so the pixel follows a styled value the way it follows a direct put: a colour
+ * through the named-colour path the compiled Background uses (the value an IInspectable HSTRING of the colour name) or a
+ * composition colour brush, a number into the font size or the extent. The application is validated before it mutates: a
+ * setter whose property the element stores but whose value is of the wrong kind fails the whole put with E_INVALIDARG —
+ * chosen over S_FALSE because S_FALSE reads as "succeeded with no effect" and would hide the bad setter — and the
+ * element keeps its previous state. A property the element has no storage for is skipped: without DependencyProperty the
+ * engine cannot tell a name it does not store from one it will, so only a wrong KIND on a stored property fails. A NULL
+ * put clears the reference and applies nothing: the engine RE-APPLIES on put and does not revert, so a property an old
+ * style set and the new one does not stays where the old one left it — the honest approximation until the engine tracks
+ * which values a style application owns. A setter appended to an already-applied style does not re-apply; put_Style is
+ * the application point. */
+
+/* The BasedOn-chain application xaml_styles.c provides for put_Style: it walks the style and its bases (base setters
+ * first, a depth cap guarding a cycle) and hands every stored setter pair to the callback. Declared here rather than in
+ * xaml_styles.h because the shared style header carries only the surface the previous stage needed. */
+HRESULT raven_style_apply(IInspectable *style,
+	HRESULT (*apply)(void *context, const WCHAR *name, UINT32 length, IInspectable *value, int check_only),
+	void *context, int check_only);
 
 /* A boxed string value: IReference`1<HSTRING>, what a WinRT caller passes for a string setter value. */
 static int style_boxed_text(IInspectable *value, HSTRING *out)
@@ -2208,97 +2221,169 @@ static int style_brush_color(IInspectable *value, COLORREF *color, BYTE *alpha)
 	return matched;
 }
 
-/* The override of one colour-valued property ("Background", "Foreground") from the stored style; 0 when no setter matches. */
-static int style_override_color(IInspectable *style, const WCHAR *property, COLORREF *color, BYTE *alpha)
+/* The application of one setter value to the grid's own storage. check_only validates the value kind without mutating:
+ * put_Style runs the whole chain through it before it stores anything, so a wrong-kind value fails the application with
+ * E_INVALIDARG and leaves the element exactly as it was. */
+static HRESULT grid_apply_setter(void *state, const WCHAR *name, UINT32 length, IInspectable *value, int check_only)
 {
-	UINT32 count = 0;
-	if (FAILED(raven_style_setter_count(style, &count)) || !count)
-		return 0;
-	for (UINT32 index = count; index--;) {
-		const WCHAR *name = NULL;
-		UINT32 length = 0;
-		IInspectable *value = NULL;
-		if (raven_style_setter_at(style, index, &name, &length, &value) != S_OK)
-			continue;
-		int matched = 0;
-		if (same_text(name, length, property) && value) {
-			if (style_brush_color(value, color, alpha))
-				matched = 1;
-			else {
-				HSTRING string = NULL;
-				if (style_boxed_text(value, &string)) {
-					UINT32 text_length = 0;
-					const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
-					if (named_color(text, text_length, color, alpha))
-						matched = 1;
-					WindowsDeleteString(string);
-				}
+	struct grid *self = state;
+	if (same_text(name, length, L"Background")) {
+		COLORREF color = 0;
+		BYTE alpha = 0;
+		if (value && style_brush_color(value, &color, &alpha)) {
+			if (!check_only)
+				grid_store_color(self, color, alpha);
+			return S_OK;
+		}
+		HSTRING string = NULL;
+		if (value && style_boxed_text(value, &string)) {
+			UINT32 text_length = 0;
+			const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
+			const int named = named_color(text, text_length, &color, &alpha);
+			WindowsDeleteString(string);
+			if (named) {
+				if (!check_only)
+					grid_store_color(self, color, alpha);
+				return S_OK;
 			}
 		}
-		if (value)
-			value->lpVtbl->Release(value);
-		if (matched)
-			return 1;
+		/* A value that is neither a colour brush nor a colour name — a number where a colour is wanted, or a spelling
+		 * the engine does not know — fails the application; put_Style answers E_INVALIDARG and stores nothing. */
+		return E_INVALIDARG;
 	}
-	return 0;
-}
-
-/* The override of one number-valued property ("FontSize", "Width", "Height"); 0 when no setter matches. */
-static int style_override_number(IInspectable *style, const WCHAR *property, float *number)
-{
-	UINT32 count = 0;
-	if (FAILED(raven_style_setter_count(style, &count)) || !count)
-		return 0;
-	for (UINT32 index = count; index--;) {
-		const WCHAR *name = NULL;
-		UINT32 length = 0;
-		IInspectable *value = NULL;
-		if (raven_style_setter_at(style, index, &name, &length, &value) != S_OK)
-			continue;
-		int matched = 0;
-		if (same_text(name, length, property) && value)
-			matched = style_boxed_number(value, number);
-		if (value)
-			value->lpVtbl->Release(value);
-		if (matched)
-			return 1;
-	}
-	return 0;
-}
-
-/* The override of the TextBlock's Text: the boxed string is stored in the element's slot so the buffer outlives the read
- * the way the element's own text does; 0 when no setter matches. */
-static int style_override_text(IInspectable *style, struct textblock *self, const WCHAR *property, const WCHAR **text,
-	UINT32 *length)
-{
-	UINT32 count = 0;
-	if (FAILED(raven_style_setter_count(style, &count)) || !count)
-		return 0;
-	for (UINT32 index = count; index--;) {
-		const WCHAR *name = NULL;
-		UINT32 name_length = 0;
-		IInspectable *value = NULL;
-		if (raven_style_setter_at(style, index, &name, &name_length, &value) != S_OK)
-			continue;
-		int matched = 0;
-		HSTRING string = NULL;
-		if (same_text(name, name_length, property) && value && style_boxed_text(value, &string)) {
-			if (self->styled_text)
-				WindowsDeleteString(self->styled_text);
-			self->styled_text = string;
-			*text = WindowsGetStringRawBuffer(self->styled_text, length);
-			if (!*text)
-				*length = 0;
-			matched = 1;
-		} else if (string) {
-			WindowsDeleteString(string);
+	if (same_text(name, length, L"Width") || same_text(name, length, L"Height")) {
+		float number = 0;
+		if (!value || !style_boxed_number(value, &number))
+			return E_INVALIDARG;
+		if (!check_only) {
+			if (same_text(name, length, L"Width"))
+				self->width = number;
+			else
+				self->height = number;
+			raven_render_changed();
 		}
-		if (value)
-			value->lpVtbl->Release(value);
-		if (matched)
-			return 1;
+		return S_OK;
 	}
-	return 0;
+	/* A property the grid does not store is skipped: without DependencyProperty the engine cannot tell a name it has no
+	 * storage for from one it will, so only a wrong kind on a stored property fails. */
+	return S_OK;
+}
+
+/* The same application for a TextBlock: the Foreground colour, the font size (the real property rejects a non-positive
+ * size and so does the application) and the text. */
+static HRESULT textblock_apply_setter(void *state, const WCHAR *name, UINT32 length, IInspectable *value, int check_only)
+{
+	struct textblock *self = state;
+	if (same_text(name, length, L"Foreground")) {
+		COLORREF color = 0;
+		BYTE alpha = 0;
+		if (value && style_brush_color(value, &color, &alpha)) {
+			if (!check_only)
+				textblock_store_color(self, color, alpha);
+			return S_OK;
+		}
+		HSTRING string = NULL;
+		if (value && style_boxed_text(value, &string)) {
+			UINT32 text_length = 0;
+			const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
+			const int named = named_color(text, text_length, &color, &alpha);
+			WindowsDeleteString(string);
+			if (named) {
+				if (!check_only)
+					textblock_store_color(self, color, alpha);
+				return S_OK;
+			}
+		}
+		return E_INVALIDARG;
+	}
+	if (same_text(name, length, L"FontSize")) {
+		float number = 0;
+		if (!value || !style_boxed_number(value, &number))
+			return E_INVALIDARG;
+		if (number <= 0.0f)
+			return E_INVALIDARG;
+		if (!check_only) {
+			self->font_size = number;
+			raven_render_changed();
+		}
+		return S_OK;
+	}
+	if (same_text(name, length, L"Text")) {
+		HSTRING string = NULL;
+		if (!value || !style_boxed_text(value, &string))
+			return E_INVALIDARG;
+		if (!check_only) {
+			UINT32 text_length = 0;
+			const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
+			store_name(&self->text, text, text_length);
+			raven_render_changed();
+		}
+		WindowsDeleteString(string);
+		return S_OK;
+	}
+	return S_OK;
+}
+
+/* The same application for a Button: the extent (the render pass reads both fields for the rectangle the hit test works
+ * from) and the Background colour, which the control chrome does not render yet — the fields store it until that stage,
+ * the way the style reference itself was stored before this one. */
+static HRESULT button_apply_setter(void *state, const WCHAR *name, UINT32 length, IInspectable *value, int check_only)
+{
+	struct button *self = state;
+	if (same_text(name, length, L"Background")) {
+		COLORREF color = 0;
+		BYTE alpha = 0;
+		if (value && style_brush_color(value, &color, &alpha)) {
+			if (!check_only) {
+				self->color = color;
+				self->alpha = alpha;
+			}
+			return S_OK;
+		}
+		HSTRING string = NULL;
+		if (value && style_boxed_text(value, &string)) {
+			UINT32 text_length = 0;
+			const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
+			const int named = named_color(text, text_length, &color, &alpha);
+			WindowsDeleteString(string);
+			if (named) {
+				if (!check_only) {
+					self->color = color;
+					self->alpha = alpha;
+				}
+				return S_OK;
+			}
+		}
+		return E_INVALIDARG;
+	}
+	if (same_text(name, length, L"Width") || same_text(name, length, L"Height")) {
+		float number = 0;
+		if (!value || !style_boxed_number(value, &number))
+			return E_INVALIDARG;
+		if (!check_only) {
+			if (same_text(name, length, L"Width"))
+				self->width = number;
+			else
+				self->height = number;
+			raven_render_changed();
+		}
+		return S_OK;
+	}
+	return S_OK;
+}
+
+/* The adapter raven_style_apply calls: the context carries the element's state, the per-kind setter application and the
+ * slot the owned style reference is stored in (the same field in every element class this handles). */
+struct style_target {
+	IInspectable **slot;
+	void *state;
+	HRESULT (*apply)(void *state, const WCHAR *name, UINT32 length, IInspectable *value, int check_only);
+};
+
+static HRESULT style_apply_dispatch(void *context, const WCHAR *name, UINT32 length, IInspectable *value, int check_only)
+{
+	const struct style_target *target = context;
+	return target->apply(target->state, name, length, value, check_only);
 }
 
 /* The fixture-facing exports of the style property; the component exports only what it marks, so the style fixture reaches
@@ -2308,59 +2393,67 @@ __declspec(dllexport) HRESULT raven_xaml_element_put_style(IInspectable *object,
 	grid1 *grid = NULL;
 	textblock1 *textblock = NULL;
 	button1 *button = NULL;
+	struct style_target target;
+	HRESULT result;
 	if (!object)
 		return E_POINTER;
+	target.slot = NULL;
+	target.state = NULL;
+	target.apply = NULL;
 	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
 		if (grid->lpVtbl != &grid1_table) {
 			grid->lpVtbl->Release(grid);
 			return S_FALSE;
 		}
 		struct grid *self = ((struct grid1_part *)grid)->owner;
-		if (style)
-			style->lpVtbl->AddRef(style);
-		if (self->style)
-			self->style->lpVtbl->Release(self->style);
-		self->style = style;
+		target.slot = &self->style;
+		target.state = self;
+		target.apply = grid_apply_setter;
 		grid->lpVtbl->Release(grid);
-		raven_render_changed();
-		return S_OK;
-	}
-	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+	} else if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
 		(void **)&textblock)) && textblock) {
 		if (textblock->lpVtbl != &textblock_table) {
 			textblock->lpVtbl->Release(textblock);
 			return S_FALSE;
 		}
 		struct textblock *self = (struct textblock *)textblock;
-		if (style)
-			style->lpVtbl->AddRef(style);
-		if (self->style)
-			self->style->lpVtbl->Release(self->style);
-		self->style = style;
-		/* The override slots the old style filled no longer apply. */
-		if (self->styled_text)
-			WindowsDeleteString(self->styled_text);
-		self->styled_text = NULL;
+		target.slot = &self->style;
+		target.state = self;
+		target.apply = textblock_apply_setter;
 		textblock->lpVtbl->Release(textblock);
-		raven_render_changed();
-		return S_OK;
-	}
-	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
+	} else if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
 		if (button->lpVtbl != &button1_table) {
 			button->lpVtbl->Release(button);
 			return S_FALSE;
 		}
 		struct button *self = ((struct button1_part *)button)->owner;
-		if (style)
-			style->lpVtbl->AddRef(style);
-		if (self->style)
-			IInspectable_Release(self->style);
-		self->style = style;
+		target.slot = &self->style;
+		target.state = self;
+		target.apply = button_apply_setter;
 		button->lpVtbl->Release(button);
-		raven_render_changed();
-		return S_OK;
+	} else {
+		return S_FALSE;
 	}
-	return S_FALSE;
+	/* Validate the whole chain before anything lands: a wrong-kind setter fails the put with E_INVALIDARG and the element
+	 * keeps its previous state, including the style it already had. */
+	if (style) {
+		result = raven_style_apply(style, style_apply_dispatch, &target, TRUE);
+		if (FAILED(result))
+			return result;
+	}
+	/* Store the owned reference; a NULL put clears it. The engine re-applies on put and does not revert: a property an
+	 * old style set and the new one does not stays where the old one left it. */
+	if (style)
+		style->lpVtbl->AddRef(style);
+	if (*target.slot)
+		(*target.slot)->lpVtbl->Release(*target.slot);
+	*target.slot = style;
+	/* Apply for real: the base setters first, the style's own after. Each store re-renders the way the direct put does;
+	 * the final changed call covers the NULL put and a style with no setter the element stores. */
+	if (style)
+		raven_style_apply(style, style_apply_dispatch, &target, FALSE);
+	raven_render_changed();
+	return S_OK;
 }
 
 __declspec(dllexport) HRESULT raven_xaml_element_get_style(IInspectable *object, IInspectable **out)
@@ -2430,21 +2523,8 @@ HRESULT raven_xaml_element_render_info(IInspectable *object, enum element_render
 			*width = self->width;
 			*height = self->height;
 			*child_count = self->children ? self->children->count : 0;
-			/* The stored style's setters override the own state before the pass reads it; without a style this is the
-			 * own state untouched, the way every pre-style tree renders. */
-			if (self->style) {
-				COLORREF styled_color = 0;
-				BYTE styled_alpha = 0;
-				float styled_number = 0;
-				if (style_override_color(self->style, L"Background", &styled_color, &styled_alpha)) {
-					*color = styled_color;
-					*alpha = styled_alpha;
-				}
-				if (style_override_number(self->style, L"Width", &styled_number) && styled_number > 0)
-					*width = styled_number;
-				if (style_override_number(self->style, L"Height", &styled_number) && styled_number > 0)
-					*height = styled_number;
-			}
+			/* A stored style contributed at put time: its setters landed in the fields above, so the pass reads the
+			 * own state untouched, the way it reads every directly-set value. */
 		}
 		grid->lpVtbl->Release(grid);
 		return S_OK;
@@ -2491,24 +2571,8 @@ HRESULT raven_xaml_element_render_text(IInspectable *object, const WCHAR **text,
 		*font_size = self->font_size;
 		*color = self->foreground;
 		*alpha = self->foreground_alpha;
-		/* The stored style's setters override the own state before the pass reads it. */
-		if (self->style) {
-			COLORREF styled_color = 0;
-			BYTE styled_alpha = 0;
-			float styled_number = 0;
-			const WCHAR *styled_text = NULL;
-			UINT32 styled_length = 0;
-			if (style_override_color(self->style, L"Foreground", &styled_color, &styled_alpha)) {
-				*color = styled_color;
-				*alpha = styled_alpha;
-			}
-			if (style_override_number(self->style, L"FontSize", &styled_number) && styled_number > 0)
-				*font_size = styled_number;
-			if (style_override_text(self->style, self, L"Text", &styled_text, &styled_length)) {
-				*text = styled_text;
-				*length = styled_length;
-			}
-		}
+		/* A stored style contributed at put time: its setters landed in the fields above, so the pass reads the own
+		 * state untouched. */
 		result = S_OK;
 	}
 	textblock->lpVtbl->Release(textblock);
