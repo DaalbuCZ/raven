@@ -1547,8 +1547,15 @@ static HRESULT map_lookup_entry(struct map_object *self, HSTRING name, BOOL scop
 		return E_POINTER;
 	if (!pri_state.entry_count)
 		return E_BOUNDS; /* no index: no resources */
-	if (!map_find_entry(self, text, length, scope, entry))
+	if (!map_find_entry(self, text, length, scope, entry)) {
+		WCHAR message[512] = L"raven-mrt: missing resource key: ";
+		UINT32 offset = (UINT32)ARRAYSIZE(L"raven-mrt: missing resource key: ") - 1;
+		for (UINT32 index = 0; index < length && offset < ARRAYSIZE(message) - 1; ++index)
+			message[offset++] = text[index] >= 0x20 && text[index] < 0x7f ? text[index] : L'?';
+		message[offset] = 0;
+		if (GetEnvironmentVariableW(L"RAVEN_TRACE_DEBUG", NULL, 0)) OutputDebugStringW(message);
 		return E_BOUNDS;
+	}
 	return S_OK;
 }
 

@@ -1295,16 +1295,25 @@ the same day — see the two entries below. Evidence:
   removal and release remaining subscriptions with the application. The
   desktop does not deliver suspend or resume lifecycle events yet.
 - The subsequent Shapr3D run passes lifecycle registration and reaches
-  `ApplicationData.LocalSettings`. A root container now exposes a persistent
-  values map for boxed Boolean, Int32, UInt32, Int64, UInt64, Single, Double
-  and String values. Each record is checked before replacement and written
-  through a flushed temporary file and rename. The supported PropertyValue
-  factories and their `IReference<T>` interfaces are registered. The storage
-  fixture checks identity, weak references, notifications, corrupt-record
-  refusal and persistence across separate processes on x64 and x86. Unsupported
-  boxed types, nested containers and bulk clear return errors; concurrent
-  updates across processes are not coordinated. Shapr3D gets past the root
-  getter and next calls `CreateContainer`, which remains unimplemented.
+  `ApplicationData.LocalSettings`. Root and nested containers now expose
+  persistent values maps for boxed Boolean, Int32, UInt32, Int64, UInt64,
+  Single, Double and String values. Nested containers use flat hashed
+  directories with checked identity manifests, parent generations and a
+  32-level depth limit. Recursive deletion preflights the whole subtree and
+  refuses corrupt manifests, unknown files and reparse points; stale container
+  handles stop addressing a deleted and recreated container. The storage
+  fixture checks hierarchy, `Containers` views, persistence, weak references,
+  notifications, corruption refusal, deletion safety and ABA behavior across
+  separate processes on x64 and x86. Unsupported boxed types and bulk clear
+  still return errors; concurrent updates across processes are not coordinated.
+  Shapr3D now gets through `CreateContainer` and reaches a managed
+  `COR_E_KEYNOTFOUND` (`0x80131577`) for the absent
+  `userPreferences.Values["inputDevice.usedPointerDevices"]` entry. The
+  exception message is `key`; the app directly indexes the map. The key is
+  absent on a fresh prefix and no defensible default value or type is visible
+  in the artifact, so the WinRT `E_BOUNDS` miss behavior remains intact.
+  `RoOriginateLanguageException` diagnostics can now include the HRESULT and
+  message when `RAVEN_TRACE_EXCEPTIONS` is set.
 - XBF input bounds (2026-10-31, stage 3): the loader validates metadata
   and declared node-stream extents, variable-length values, truncated
   operands and scope depth before returning a tree. Fixtures cover malformed

@@ -25,6 +25,7 @@ typedef __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet property_set;
 typedef __x_ABI_CWindows_CFoundation_CIPropertyValueStatics value_statics;
 typedef __x_ABI_CWindows_CFoundation_CIPropertyValue property_value;
 typedef __FIMap_2_HSTRING_IInspectable property_map;
+typedef __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainer container_view;
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
 struct weak_ref;
@@ -109,6 +110,263 @@ static int check_string(property_map *map, HSTRING key)
 	return matches;
 }
 
+static HRESULT container_map(container *item, property_map **out)
+{
+	property_set *set = NULL;
+	HRESULT status = item->lpVtbl->get_Values(item, &set);
+	*out = NULL;
+	if (FAILED(status)) return status;
+	status = set->lpVtbl->QueryInterface(set, &IID___FIMap_2_HSTRING_IInspectable, (void **)out);
+	set->lpVtbl->Release(set);
+	return status;
+}
+
+static int put_int(property_map *map, value_statics *maker, HSTRING key, INT32 number)
+{
+	IInspectable *boxed = NULL;
+	boolean replaced = TRUE;
+	if (maker->lpVtbl->CreateInt32(maker, number, &boxed) != S_OK || !boxed) return 0;
+	const HRESULT status = map->lpVtbl->Insert(map, key, boxed, &replaced);
+	boxed->lpVtbl->Release(boxed);
+	return status == S_OK && !replaced;
+}
+
+static int resolves_weak(IInspectable *object, REFIID iid)
+{
+	struct weak_source *source = NULL;
+	struct weak_ref *weak = NULL;
+	IInspectable *resolved = NULL;
+	IUnknown *expected = NULL, *actual = NULL;
+	int result = 0;
+	if (object->lpVtbl->QueryInterface(object, &IID_IWeakReferenceSource, (void **)&source) != S_OK || !source ||
+		source->lpVtbl->get(source, &weak) != S_OK || !weak || weak->lpVtbl->resolve(weak, iid, &resolved) != S_OK || !resolved ||
+		object->lpVtbl->QueryInterface(object, &IID_IUnknown, (void **)&expected) != S_OK || !expected ||
+		resolved->lpVtbl->QueryInterface(resolved, &IID_IUnknown, (void **)&actual) != S_OK || !actual)
+		goto done;
+	result = expected == actual;
+done:
+	if (actual) actual->lpVtbl->Release(actual);
+	if (expected) expected->lpVtbl->Release(expected);
+	if (resolved) resolved->lpVtbl->Release(resolved);
+	if (weak) weak->lpVtbl->release(weak);
+	if (source) ((IUnknown *)source)->lpVtbl->Release((IUnknown *)source);
+	return result;
+}
+
+static int expires_weak(container *root)
+{
+	HSTRING name = NULL;
+	container *child = NULL;
+	property_map *map = NULL;
+	struct weak_source *source = NULL;
+	struct weak_ref *child_weak = NULL, *values_weak = NULL;
+	IInspectable *resolved = NULL;
+	int result = 33;
+	if (WindowsCreateString(L"weak-release", 12, &name) != S_OK ||
+		root->lpVtbl->CreateContainer(root, name, ApplicationDataCreateDisposition_Always, &child) != S_OK || !child ||
+		container_map(child, &map) != S_OK || !map ||
+		child->lpVtbl->QueryInterface(child, &IID_IWeakReferenceSource, (void **)&source) != S_OK || !source ||
+		source->lpVtbl->get(source, &child_weak) != S_OK || !child_weak) goto done;
+	((IUnknown *)source)->lpVtbl->Release((IUnknown *)source);
+	source = NULL;
+	if (map->lpVtbl->QueryInterface(map, &IID_IWeakReferenceSource, (void **)&source) != S_OK || !source ||
+		source->lpVtbl->get(source, &values_weak) != S_OK || !values_weak) goto done;
+	((IUnknown *)source)->lpVtbl->Release((IUnknown *)source);
+	source = NULL;
+	map->lpVtbl->Release(map);
+	map = NULL;
+	child->lpVtbl->Release(child);
+	child = NULL;
+	if (child_weak->lpVtbl->resolve(child_weak, &IID___x_ABI_CWindows_CStorage_CIApplicationDataContainer, &resolved) != S_OK || resolved ||
+		values_weak->lpVtbl->resolve(values_weak, &IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet, &resolved) != S_OK || resolved ||
+		root->lpVtbl->DeleteContainer(root, name) != S_OK) goto done;
+	result = 0;
+done:
+	if (resolved) resolved->lpVtbl->Release(resolved);
+	if (values_weak) values_weak->lpVtbl->release(values_weak);
+	if (child_weak) child_weak->lpVtbl->release(child_weak);
+	if (source) ((IUnknown *)source)->lpVtbl->Release((IUnknown *)source);
+	if (map) map->lpVtbl->Release(map);
+	if (child) child->lpVtbl->Release(child);
+	WindowsDeleteString(name);
+	return result;
+}
+
+static int nested_depth(container *root)
+{
+	HSTRING name = NULL;
+	container *current = root, *next = NULL;
+	int result = 31;
+	if (WindowsCreateString(L"depth", 5, &name) != S_OK) return result;
+	current->lpVtbl->AddRef(current);
+	for (int level = 0; level < 32; ++level) {
+		result = 40 + level;
+		if (current->lpVtbl->CreateContainer(current, name, ApplicationDataCreateDisposition_Always, &next) != S_OK || !next)
+			goto done;
+		current->lpVtbl->Release(current);
+		current = next;
+		next = NULL;
+	}
+	result = 80;
+	if (SUCCEEDED(current->lpVtbl->CreateContainer(current, name, ApplicationDataCreateDisposition_Always, &next)) || next)
+		goto done;
+	current->lpVtbl->Release(current);
+	current = NULL;
+	result = 81;
+	if (root->lpVtbl->DeleteContainer(root, name) != S_OK) goto done;
+	result = 0;
+done:
+	if (next) next->lpVtbl->Release(next);
+	if (current) current->lpVtbl->Release(current);
+	WindowsDeleteString(name);
+	return result;
+}
+
+/* A deleted container must not acquire access to a new container with the same name through an old reference. */
+static int nested_aba(container *root, HSTRING key, HSTRING value_key, factory_function factory)
+{
+	HSTRING name = NULL;
+	container *old = NULL, *fresh = NULL, *fresh_child = NULL;
+	container_view *old_view = NULL;
+	property_map *old_map = NULL, *fresh_map = NULL;
+	value_statics *maker = NULL;
+	IInspectable *item = NULL, *boxed = NULL;
+	boolean replaced = FALSE;
+	int result = 32;
+	if (WindowsCreateString(L"recreated", 9, &name) != S_OK ||
+		factory(value_key, &IID___x_ABI_CWindows_CFoundation_CIPropertyValueStatics, (void **)&maker) != S_OK || !maker ||
+		root->lpVtbl->CreateContainer(root, name, ApplicationDataCreateDisposition_Always, &old) != S_OK || !old ||
+		container_map(old, &old_map) != S_OK || !old_map || old->lpVtbl->get_Containers(old, &old_view) != S_OK || !old_view ||
+		!put_int(old_map, maker, key, 1) ||
+		root->lpVtbl->DeleteContainer(root, name) != S_OK ||
+		root->lpVtbl->CreateContainer(root, name, ApplicationDataCreateDisposition_Always, &fresh) != S_OK || !fresh ||
+		container_map(fresh, &fresh_map) != S_OK || !fresh_map || !put_int(fresh_map, maker, key, 2) ||
+		fresh->lpVtbl->CreateContainer(fresh, name, ApplicationDataCreateDisposition_Always, &fresh_child) != S_OK || !fresh_child)
+		goto done;
+	boolean found = FALSE;
+	if (SUCCEEDED(old_view->lpVtbl->HasKey(old_view, name, &found)) && found) goto done;
+	if (SUCCEEDED(old_map->lpVtbl->Lookup(old_map, key, &item)) || item ||
+		maker->lpVtbl->CreateInt32(maker, 3, &boxed) != S_OK || !boxed ||
+		SUCCEEDED(old_map->lpVtbl->Insert(old_map, key, boxed, &replaced)) || !check_int(fresh_map, key, 2)) goto done;
+	if (root->lpVtbl->DeleteContainer(root, name) != S_OK) goto done;
+	result = 0;
+done:
+	if (boxed) boxed->lpVtbl->Release(boxed);
+	if (item) item->lpVtbl->Release(item);
+	if (fresh_map) fresh_map->lpVtbl->Release(fresh_map);
+	if (old_map) old_map->lpVtbl->Release(old_map);
+	if (old_view) old_view->lpVtbl->Release(old_view);
+	if (fresh_child) fresh_child->lpVtbl->Release(fresh_child);
+	if (fresh) fresh->lpVtbl->Release(fresh);
+	if (old) old->lpVtbl->Release(old);
+	if (maker) maker->lpVtbl->Release(maker);
+	WindowsDeleteString(name);
+	return result;
+}
+
+/* Four independent invocations prove that the hierarchy and values survive process exit. */
+static int nested_case(const WCHAR *mode, container *root, property_map *root_map,
+	factory_function factory, HSTRING value_key, HSTRING key)
+{
+	HSTRING first = NULL, sibling_name = NULL, grand_name = NULL, actual_name = NULL;
+	container *child = NULL, *sibling = NULL, *grand = NULL, *view_child = NULL;
+	container_view *view = NULL;
+	property_map *child_map = NULL, *sibling_map = NULL, *grand_map = NULL;
+	value_statics *maker = NULL;
+	boolean found = FALSE;
+	UINT32 size = 0, length = 0;
+	int status = 30;
+	if (WindowsCreateString(L"fixture-child", 13, &first) != S_OK ||
+		WindowsCreateString(L"\x010d\x00ed" L"slo", 5, &sibling_name) != S_OK ||
+		WindowsCreateString(L"fixture-grandchild", 18, &grand_name) != S_OK) goto done;
+	const int write = !lstrcmpW(mode, L"nested-write");
+	const int read = !lstrcmpW(mode, L"nested-read");
+	const int verify = !lstrcmpW(mode, L"nested-verify");
+	const int guard = !lstrcmpW(mode, L"nested-guard");
+	const int collision = !lstrcmpW(mode, L"nested-collision");
+	const __x_ABI_CWindows_CStorage_CApplicationDataCreateDisposition disposition = write ?
+		ApplicationDataCreateDisposition_Always : ApplicationDataCreateDisposition_Existing;
+	if (!write && !read && !verify && !guard && !collision) goto done;
+	if (guard || collision) {
+		/* Refuse damaged identities or unsafe deletion before changing any setting. */
+		if (root->lpVtbl->CreateContainer(root, sibling_name, disposition, &sibling) != S_OK || !sibling ||
+			container_map(sibling, &sibling_map) != S_OK || !sibling_map ||
+			!check_int(root_map, key, 10) || !check_int(sibling_map, key, 30) ||
+			(collision ? SUCCEEDED(root->lpVtbl->CreateContainer(root, first, ApplicationDataCreateDisposition_Always, &child)) :
+				SUCCEEDED(root->lpVtbl->DeleteContainer(root, first))) || child ||
+			!check_int(root_map, key, 10) || !check_int(sibling_map, key, 30)) goto done;
+		status = 0;
+		goto done;
+	}
+	if (verify) {
+		if (SUCCEEDED(root->lpVtbl->CreateContainer(root, first, ApplicationDataCreateDisposition_Existing, &child)) || child) goto done;
+	} else {
+		if (root->lpVtbl->CreateContainer(root, first, disposition, &child) != S_OK || !child ||
+			child->lpVtbl->CreateContainer(child, grand_name, disposition, &grand) != S_OK || !grand ||
+			container_map(child, &child_map) != S_OK || !child_map ||
+			container_map(grand, &grand_map) != S_OK || !grand_map) goto done;
+		if (!resolves_weak((IInspectable *)child, &IID___x_ABI_CWindows_CStorage_CIApplicationDataContainer) ||
+			!resolves_weak((IInspectable *)child_map, &IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet)) goto done;
+		if (child->lpVtbl->get_Name(child, &actual_name) != S_OK || !actual_name) goto done;
+		const WCHAR *actual = WindowsGetStringRawBuffer(actual_name, &length);
+		if (length != 13 || CompareStringOrdinal(actual, length, L"fixture-child", -1, FALSE) != CSTR_EQUAL) goto done;
+	}
+	if (root->lpVtbl->CreateContainer(root, sibling_name, disposition, &sibling) != S_OK || !sibling ||
+		container_map(sibling, &sibling_map) != S_OK || !sibling_map) goto done;
+	if (root->lpVtbl->get_Containers(root, &view) != S_OK || !view ||
+		view->lpVtbl->get_Size(view, &size) != S_OK || size != (verify ? 1U : 2U) ||
+		view->lpVtbl->HasKey(view, first, &found) != S_OK || found != (boolean)!verify) goto done;
+	if (!verify) {
+		if (view->lpVtbl->Lookup(view, first, &view_child) != S_OK || !view_child) goto done;
+		property_map *from_view = NULL;
+		if (container_map(view_child, &from_view) != S_OK || !from_view) goto done;
+		if (!write && !check_int(from_view, key, 20)) { from_view->lpVtbl->Release(from_view); goto done; }
+		from_view->lpVtbl->Release(from_view);
+	}
+	if (write) {
+		__FIObservableMap_2_HSTRING_IInspectable *root_events = NULL, *child_events = NULL;
+		struct changed_handler root_handler = {{(void *)&changed_table}, 1, 0, 0};
+		struct changed_handler child_handler = {{(void *)&changed_table}, 1, 0, 0};
+		EventRegistrationToken root_token = {0}, child_token = {0};
+		int ok = root_map->lpVtbl->QueryInterface(root_map, &IID___FIObservableMap_2_HSTRING_IInspectable, (void **)&root_events) == S_OK && root_events &&
+			child_map->lpVtbl->QueryInterface(child_map, &IID___FIObservableMap_2_HSTRING_IInspectable, (void **)&child_events) == S_OK && child_events &&
+			root_events->lpVtbl->add_MapChanged(root_events, &root_handler.iface, &root_token) == S_OK &&
+			child_events->lpVtbl->add_MapChanged(child_events, &child_handler.iface, &child_token) == S_OK &&
+			factory(value_key, &IID___x_ABI_CWindows_CFoundation_CIPropertyValueStatics, (void **)&maker) == S_OK && maker &&
+			put_int(root_map, maker, key, 10) && put_int(child_map, maker, key, 20) &&
+			put_int(sibling_map, maker, key, 30) && put_int(grand_map, maker, key, 40) &&
+			root_handler.calls == 1 && child_handler.calls == 1 && !root_handler.errors && !child_handler.errors;
+		if (child_token.value && child_events->lpVtbl->remove_MapChanged(child_events, child_token) != S_OK) ok = 0;
+		if (root_token.value && root_events->lpVtbl->remove_MapChanged(root_events, root_token) != S_OK) ok = 0;
+		if (root_handler.refs != 1 || child_handler.refs != 1) ok = 0;
+		if (child_events) child_events->lpVtbl->Release(child_events);
+		if (root_events) root_events->lpVtbl->Release(root_events);
+		if (!ok) goto done;
+	} else if (!check_int(root_map, key, 10) || !check_int(sibling_map, key, 30) ||
+		(!verify && (!check_int(child_map, key, 20) || !check_int(grand_map, key, 40)))) goto done;
+	if (read) {
+		IInspectable *stale = NULL;
+		if (root->lpVtbl->DeleteContainer(root, first) != S_OK ||
+			SUCCEEDED(child_map->lpVtbl->Lookup(child_map, key, &stale)) || stale ||
+			SUCCEEDED(grand_map->lpVtbl->Lookup(grand_map, key, &stale)) || stale) goto done;
+	}
+	if (verify && (root->lpVtbl->DeleteContainer(root, sibling_name) != S_OK || root_map->lpVtbl->Remove(root_map, key) != S_OK)) goto done;
+	status = 0;
+done:
+	if (maker) maker->lpVtbl->Release(maker);
+	if (grand_map) grand_map->lpVtbl->Release(grand_map);
+	if (sibling_map) sibling_map->lpVtbl->Release(sibling_map);
+	if (child_map) child_map->lpVtbl->Release(child_map);
+	if (view_child) view_child->lpVtbl->Release(view_child);
+	if (view) view->lpVtbl->Release(view);
+	if (grand) grand->lpVtbl->Release(grand);
+	if (sibling) sibling->lpVtbl->Release(sibling);
+	if (child) child->lpVtbl->Release(child);
+	WindowsDeleteString(actual_name);
+	WindowsDeleteString(first); WindowsDeleteString(sibling_name); WindowsDeleteString(grand_name);
+	return status;
+}
+
 int raven_entry(void)
 {
 	static const WCHAR appdata_name[] = L"Windows.Storage.ApplicationData";
@@ -158,10 +416,21 @@ int raven_entry(void)
 	resolved->lpVtbl->Release(resolved);
 	weak->lpVtbl->release(weak);
 	((IUnknown *)source)->lpVtbl->Release((IUnknown *)source);
-	container *nested = (void *)1;
-	if (settings->lpVtbl->CreateContainer(settings, int_key, ApplicationDataCreateDisposition_Always, &nested) != E_NOTIMPL || nested)
-		return 17;
-	if (!lstrcmpW(mode, L"write")) {
+	if (!lstrcmpW(mode, L"nested-weak")) {
+		const int result = expires_weak(settings);
+		if (result) return result;
+	} else if (!lstrcmpW(mode, L"nested-aba")) {
+		const int result = nested_aba(settings, int_key, value_key, factory);
+		if (result) return result;
+	} else if (!lstrcmpW(mode, L"nested-depth")) {
+		const int result = nested_depth(settings);
+		if (result) return result;
+	} else if (!lstrcmpW(mode, L"nested-write") || !lstrcmpW(mode, L"nested-read") ||
+		!lstrcmpW(mode, L"nested-verify") || !lstrcmpW(mode, L"nested-guard") ||
+		!lstrcmpW(mode, L"nested-collision")) {
+		const int result = nested_case(mode, settings, map, factory, value_key, int_key);
+		if (result) return result;
+	} else if (!lstrcmpW(mode, L"write")) {
 		__FIObservableMap_2_HSTRING_IInspectable *observable = NULL;
 		struct changed_handler handler = {{(void *)&changed_table}, 1, 0, 0};
 		EventRegistrationToken token;

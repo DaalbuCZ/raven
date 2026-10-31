@@ -1029,6 +1029,17 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			}
 		}
 		record.exception = call[2];
+		if (std::getenv("RAVEN_TRACE_EXCEPTIONS")) {
+			std::fprintf(stderr, "raven: originated language error %08x exception %llx message \"", error,
+				static_cast<unsigned long long>(record.exception));
+			for (char16_t character : record.message) {
+				if (character >= 0x20 && character < 0x7f && character != u'\\' && character != u'\"')
+					std::fputc(static_cast<char>(character), stderr);
+				else
+					std::fprintf(stderr, "\\u%04x", static_cast<unsigned>(character));
+			}
+			std::fprintf(stderr, "\"\n");
+		}
 		call.ret(1);
 	});
 	registry.add("RoParseTypeName", 3, [](ApiCall &call) { call.ret(0x80004001U); });

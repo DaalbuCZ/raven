@@ -30,52 +30,164 @@ struct settings_object {
 	__FIMap_2_HSTRING_IInspectable map;
 	__FIMapView_2_HSTRING_IInspectable view;
 	__FIObservableMap_2_HSTRING_IInspectable observable;
+	__FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainer children;
 	LONG refs;
 	SRWLOCK lock;
 	struct settings_handler *handlers;
 	UINT32 handler_count, handler_capacity;
 	LONGLONG next_token;
-	struct raven_weak_source container_weak, set_weak;
+	struct raven_weak_source container_weak, set_weak, children_weak;
+	BOOL dynamic;
+	UINT64 id;
+	UINT64 parent_id;
+	UINT64 generation_time, generation_id;
+	UINT32 depth;
+	HSTRING name;
 };
 static const __x_ABI_CWindows_CStorage_CIApplicationDataContainerVtbl settings_container_table;
 static const __x_ABI_CWindows_CFoundation_CCollections_CIPropertySetVtbl settings_set_table;
 static const __FIMap_2_HSTRING_IInspectableVtbl settings_map_vtbl;
 static const __FIMapView_2_HSTRING_IInspectableVtbl settings_view_vtbl;
 static const __FIObservableMap_2_HSTRING_IInspectableVtbl settings_observable_vtbl;
+static const __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainerVtbl settings_children_vtbl;
 static struct settings_object settings = {
-	{(void *)&settings_container_table},
-	{(void *)&settings_set_table},
-	{(void *)&settings_map_vtbl},
-	{(void *)&settings_view_vtbl},
-	{(void *)&settings_observable_vtbl},
-	0, /* the singleton is never freed; the count follows the references the guests hold, like Package.Current */
-	SRWLOCK_INIT,
-	NULL, 0, 0, 0,
-	{NULL}, {NULL},
+	.container = {(void *)&settings_container_table}, .set = {(void *)&settings_set_table},
+	.map = {(void *)&settings_map_vtbl}, .view = {(void *)&settings_view_vtbl},
+	.observable = {(void *)&settings_observable_vtbl}, .children = {(void *)&settings_children_vtbl}, .lock = SRWLOCK_INIT,
 };
 static LONG settings_sequence;
 static const WCHAR hex_digits[] = L"0123456789abcdef";
 
-/* A hash bounds the path length for Windows' 255-character keys. The stored key is checked on every access, so a
- * collision is an error rather than silently reading or replacing a different setting. */
-static HRESULT settings_path(HSTRING key, WCHAR *path, WCHAR *temporary)
+/* Container identifiers are flat: even a 32-level hierarchy cannot exhaust MAX_PATH merely by nesting. Each
+ * directory has a manifest containing its parent and exact name, so a hash collision never aliases settings. */
+#define CONTAINER_MAGIC 0x31435652U
+struct container_record {
+	UINT32 magic, depth, name_length, reserved;
+	UINT64 parent, generation_time, generation_id, parent_generation_time, parent_generation_id;
+	WCHAR name[256];
+};
+
+static HRESULT settings_root_path(WCHAR *path, BOOL create)
 {
-	WCHAR directory[MAX_PATH];
-	UINT32 length = 0;
-	const WCHAR *text = WindowsGetStringRawBuffer(key, &length);
-	UINT64 hash = 14695981039346656037ULL;
 	DWORD attributes;
-	if (length > 255) return E_INVALIDARG;
-	if (!executable_directory(directory)) return last_error();
-	if (lstrlenW(directory) + 1 + 13 + 1 + 16 + 4 + 26 >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
-	lstrcpyW(path, directory);
+	if (!executable_directory(path)) return last_error();
+	if (lstrlenW(path) + 14 >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
 	lstrcatW(path, L"\\LocalSettings");
 	attributes = GetFileAttributesW(path);
-	if (attributes == INVALID_FILE_ATTRIBUTES) {
+	if (attributes == INVALID_FILE_ATTRIBUTES && create) {
 		if (!CreateDirectoryW(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return last_error();
 		attributes = GetFileAttributesW(path);
 	}
-	if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) return HRESULT_FROM_WIN32(ERROR_DIRECTORY);
+	if (attributes == INVALID_FILE_ATTRIBUTES) return last_error();
+	return (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT) ? S_OK : HRESULT_FROM_WIN32(ERROR_DIRECTORY);
+}
+
+static HRESULT settings_containers_path(WCHAR *path, BOOL create)
+{
+	HRESULT result = settings_root_path(path, create);
+	DWORD attributes;
+	if (FAILED(result)) return result;
+	if (lstrlenW(path) + 12 + 1 + 16 + 1 + 16 + 4 + 26 >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+	lstrcatW(path, L"\\containers");
+	attributes = GetFileAttributesW(path);
+	if (attributes == INVALID_FILE_ATTRIBUTES && create) {
+		if (!CreateDirectoryW(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return last_error();
+		attributes = GetFileAttributesW(path);
+	}
+	if (attributes == INVALID_FILE_ATTRIBUTES) return last_error();
+	return (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT) ? S_OK : HRESULT_FROM_WIN32(ERROR_DIRECTORY);
+}
+
+static HRESULT settings_id_path(UINT64 id, WCHAR *path, BOOL create_base)
+{
+	HRESULT result = settings_containers_path(path, create_base);
+	if (FAILED(result)) return result;
+	SIZE_T offset = (SIZE_T)lstrlenW(path);
+	path[offset++] = L'\\';
+	for (int i = 15; i >= 0; --i) path[offset++] = hex_digits[(id >> (i * 4)) & 15];
+	path[offset] = 0;
+	return S_OK;
+}
+
+static UINT64 settings_child_id(UINT64 parent, const WCHAR *name, UINT32 length)
+{
+	UINT64 hash = 14695981039346656037ULL;
+	for (int i = 0; i < 8; ++i) hash = (hash ^ ((parent >> (i * 8)) & 255)) * 1099511628211ULL;
+	for (UINT32 i = 0; i < length; ++i) {
+		hash = (hash ^ (name[i] & 255)) * 1099511628211ULL;
+		hash = (hash ^ (name[i] >> 8)) * 1099511628211ULL;
+	}
+	return hash;
+}
+
+static HRESULT settings_read_container(UINT64 id, struct container_record *record)
+{
+	WCHAR path[MAX_PATH];
+	DWORD got = 0;
+	LARGE_INTEGER size;
+	HRESULT result = settings_id_path(id, path, FALSE);
+	if (FAILED(result)) return result;
+	DWORD attributes = GetFileAttributesW(path);
+	if (attributes == INVALID_FILE_ATTRIBUTES) return last_error();
+	if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+	lstrcatW(path, L"\\container.rvc");
+	attributes = GetFileAttributesW(path);
+	if (attributes == INVALID_FILE_ATTRIBUTES) return last_error();
+	if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+	HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+		OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE) return last_error();
+	if (!GetFileSizeEx(file, &size)) { result = last_error(); CloseHandle(file); return result; }
+	if (size.QuadPart != sizeof *record) { CloseHandle(file); return HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
+	if (!ReadFile(file, record, sizeof *record, &got, NULL)) { result = last_error(); CloseHandle(file); return result; }
+	CloseHandle(file);
+	if (got != sizeof *record || record->magic != CONTAINER_MAGIC || !record->depth || record->depth > 32 ||
+		record->name_length > 255 || !record->name_length ||
+		settings_child_id(record->parent, record->name, record->name_length) != id)
+		return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+	return S_OK;
+}
+
+static HRESULT settings_directory(struct settings_object *self, WCHAR *path)
+{
+	if (!self->dynamic) return settings_root_path(path, TRUE);
+	struct container_record record;
+	HRESULT result = settings_read_container(self->id, &record);
+	if (FAILED(result)) return result;
+	UINT32 length = 0;
+	const WCHAR *name = WindowsGetStringRawBuffer(self->name, &length);
+	if (record.parent != self->parent_id || record.depth != self->depth || record.name_length != length ||
+		record.generation_time != self->generation_time || record.generation_id != self->generation_id ||
+		memcmp(record.name, name, length * sizeof(WCHAR))) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+	UINT32 depth = record.depth;
+	UINT64 parent = record.parent;
+	UINT64 parent_time = record.parent_generation_time, parent_generation = record.parent_generation_id;
+	while (depth > 1) {
+		if (!parent) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+		result = settings_read_container(parent, &record);
+		if (FAILED(result)) return result;
+		if (record.depth != --depth || record.generation_time != parent_time || record.generation_id != parent_generation)
+			return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+		parent = record.parent;
+		parent_time = record.parent_generation_time; parent_generation = record.parent_generation_id;
+	}
+	if (parent || parent_time || parent_generation) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+	return settings_id_path(self->id, path, FALSE);
+}
+
+/* A hash bounds the path length for Windows' 255-character keys. The stored key is checked on every access, so a
+ * collision is an error rather than silently reading or replacing a different setting. */
+static HRESULT settings_directory(struct settings_object *self, WCHAR *path);
+
+static HRESULT settings_path(struct settings_object *self, HSTRING key, WCHAR *path, WCHAR *temporary)
+{
+	UINT32 length = 0;
+	const WCHAR *text = WindowsGetStringRawBuffer(key, &length);
+	UINT64 hash = 14695981039346656037ULL;
+	if (length > 255) return E_INVALIDARG;
+	HRESULT result = settings_directory(self, path);
+	if (FAILED(result)) return result;
+	if (lstrlenW(path) + 1 + 16 + 4 + 26 >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
 	for (UINT32 i = 0; i < length; ++i) {
 		hash = (hash ^ (text[i] & 255)) * 1099511628211ULL;
 		hash = (hash ^ (text[i] >> 8)) * 1099511628211ULL;
@@ -97,19 +209,31 @@ static HRESULT settings_path(HSTRING key, WCHAR *path, WCHAR *temporary)
 	return S_OK;
 }
 
-static HRESULT settings_read(HSTRING key, struct settings_record *record, WCHAR *path)
+static HRESULT settings_read(struct settings_object *self, HSTRING key, struct settings_record *record, WCHAR *path)
 {
 	DWORD got = 0;
 	LARGE_INTEGER size;
 	UINT32 key_length = 0;
 	const WCHAR *text = WindowsGetStringRawBuffer(key, &key_length);
-	HRESULT result = settings_path(key, path, NULL);
+	HRESULT result = settings_path(self, key, path, NULL);
 	if (FAILED(result)) return result;
+	DWORD attributes = GetFileAttributesW(path);
+	if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+		return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
 	HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (file == INVALID_HANDLE_VALUE) {
 		DWORD error = GetLastError();
-		return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? E_BOUNDS : last_error();
+		if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+			WCHAR message[320] = L"raven-settings: missing value key: ";
+			UINT32 offset = (UINT32)ARRAYSIZE(L"raven-settings: missing value key: ") - 1;
+			for (UINT32 index = 0; index < key_length && offset < ARRAYSIZE(message) - 1; ++index)
+				message[offset++] = text[index] >= 0x20 && text[index] < 0x7f ? text[index] : L'?';
+			message[offset] = 0;
+			if (GetEnvironmentVariableW(L"RAVEN_TRACE_DEBUG", NULL, 0)) OutputDebugStringW(message);
+			return E_BOUNDS;
+		}
+		return last_error();
 	}
 	if (!GetFileSizeEx(file, &size)) {
 		result = last_error();
@@ -202,18 +326,18 @@ static HRESULT settings_decode(const struct settings_record *record, IInspectabl
 	return result;
 }
 
-static HRESULT settings_lookup(HSTRING key, IInspectable **value)
+static HRESULT settings_lookup(struct settings_object *self, HSTRING key, IInspectable **value)
 {
 	struct settings_record record;
 	WCHAR path[MAX_PATH];
 	HRESULT result;
 	if (!value) return E_POINTER;
 	*value = NULL;
-	result = settings_read(key, &record, path);
+	result = settings_read(self, key, &record, path);
 	return SUCCEEDED(result) ? settings_decode(&record, value) : result;
 }
 
-static HRESULT settings_insert(HSTRING key, IInspectable *value, boolean *replaced)
+static HRESULT settings_insert(struct settings_object *self, HSTRING key, IInspectable *value, boolean *replaced)
 {
 	struct settings_record record = {0}, previous;
 	WCHAR path[MAX_PATH], temporary[MAX_PATH], old_path[MAX_PATH];
@@ -227,7 +351,7 @@ static HRESULT settings_insert(HSTRING key, IInspectable *value, boolean *replac
 	if (length > 255) return E_INVALIDARG;
 	result = settings_encode(value, &record);
 	if (FAILED(result)) return result;
-	result = settings_read(key, &previous, old_path);
+	result = settings_read(self, key, &previous, old_path);
 	if (FAILED(result) && result != E_BOUNDS) return result;
 	if (SUCCEEDED(result)) {
 		IInspectable *check = NULL;
@@ -236,7 +360,7 @@ static HRESULT settings_insert(HSTRING key, IInspectable *value, boolean *replac
 		IInspectable_Release(check);
 		*replaced = TRUE;
 	}
-	result = settings_path(key, path, temporary);
+	result = settings_path(self, key, path, temporary);
 	if (FAILED(result)) return result;
 	record.magic = SETTINGS_MAGIC;
 	record.key_length = length;
@@ -253,12 +377,12 @@ static HRESULT settings_insert(HSTRING key, IInspectable *value, boolean *replac
 	return result;
 }
 
-static HRESULT settings_remove(HSTRING key)
+static HRESULT settings_remove(struct settings_object *self, HSTRING key)
 {
 	struct settings_record record;
 	WCHAR path[MAX_PATH];
 	IInspectable *check = NULL;
-	HRESULT result = settings_read(key, &record, path);
+	HRESULT result = settings_read(self, key, &record, path);
 	if (FAILED(result)) return result;
 	result = settings_decode(&record, &check);
 	if (FAILED(result)) return result;
@@ -278,7 +402,7 @@ static HRESULT settings_remove(HSTRING key)
 #define SETTINGS_OWNER(iface, field) ((struct settings_object *)((char *)(iface) - offsetof(struct settings_object, field)))
 #define SETTINGS_ARGS(iface) ((struct settings_change *)((char *)(iface) - offsetof(struct settings_change, iface)))
 
-static void settings_dispatch(__x_ABI_CWindows_CFoundation_CCollections_CCollectionChange change, HSTRING key);
+static void settings_dispatch(struct settings_object *self, __x_ABI_CWindows_CFoundation_CCollections_CCollectionChange change, HSTRING key);
 
 static const IID *settings_iids_list[] = {
 	&IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet,
@@ -306,7 +430,21 @@ static HRESULT WINAPI settings_copied_iids(const IID *list, ULONG size, ULONG *c
 
 static ULONG settings_addref(struct settings_object *self) { return (ULONG)InterlockedIncrement(&self->refs); }
 
-static ULONG settings_release(struct settings_object *self) { return (ULONG)InterlockedDecrement(&self->refs); }
+static ULONG settings_release(struct settings_object *self)
+{
+	LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs && self->dynamic) {
+		raven_weak_source_disconnect(&self->container_weak);
+		raven_weak_source_disconnect(&self->set_weak);
+		raven_weak_source_disconnect(&self->children_weak);
+		for (UINT32 i = 0; i < self->handler_count; ++i) self->handlers[i].handler->lpVtbl->Release(self->handlers[i].handler);
+		FREE(self->handlers);
+		WindowsDeleteString(self->name);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
 
 /* GetIids answers the interfaces the object really implements, never an empty list; the buffer answers with the same
  * HeapAlloc the other GetIids paths of the component hand out (see resources.c static_iids). */
@@ -328,39 +466,39 @@ static HRESULT settings_owned_iids(struct settings_object *self, ULONG *count, I
 	return S_OK;
 }
 
-static HRESULT WINAPI settings_owner_query(REFIID iid, void **out)
+static HRESULT WINAPI settings_owner_query(struct settings_object *self, REFIID iid, void **out)
 {
 	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) ||
 		IsEqualIID(iid, &IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet))
-		*out = &settings.set;
+		*out = &self->set;
 	else if (IsEqualIID(iid, &IID___FIMap_2_HSTRING_IInspectable))
-		*out = &settings.map;
+		*out = &self->map;
 	else if (IsEqualIID(iid, &IID___FIMapView_2_HSTRING_IInspectable))
-		*out = &settings.view;
+		*out = &self->view;
 	else if (IsEqualIID(iid, &IID___FIObservableMap_2_HSTRING_IInspectable))
-		*out = &settings.observable;
+		*out = &self->observable;
 	else if (IsEqualIID(iid, &IID_IWeakReferenceSource))
-		*out = &settings.set_weak;
+		*out = &self->set_weak;
 	else
 		return E_NOINTERFACE;
-	settings_addref(&settings);
+	settings_addref(self);
 	return S_OK;
 }
 
 static HRESULT WINAPI settings_container_query(settings_container_i *iface, REFIID iid, void **out)
 {
-	(void)iface;
+	struct settings_object *self = SETTINGS_OWNER(iface, container);
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
 	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) ||
 		IsEqualIID(iid, &IID___x_ABI_CWindows_CStorage_CIApplicationDataContainer))
-		*out = &settings.container;
+		*out = &self->container;
 	else if (IsEqualIID(iid, &IID_IWeakReferenceSource))
-		*out = &settings.container_weak;
+		*out = &self->container_weak;
 	else
 		return E_NOINTERFACE;
-	settings_addref(&settings);
+	settings_addref(self);
 	return S_OK;
 }
 
@@ -372,7 +510,7 @@ static HRESULT settings_set_name(HSTRING *name)
 }
 
 /* The number of stored settings equals the number of record files in LocalSettings. */
-static HRESULT settings_walk(UINT32 *count)
+static HRESULT settings_walk(struct settings_object *self, UINT32 *count)
 {
 	WCHAR directory[MAX_PATH], pattern[MAX_PATH];
 	WIN32_FIND_DATAW found;
@@ -381,11 +519,10 @@ static HRESULT settings_walk(UINT32 *count)
 	if (!count)
 		return E_POINTER;
 	*count = 0;
-	if (!executable_directory(directory))
-		return last_error();
-	if ((UINT32)lstrlenW(directory) + 1 + 13 + 1 + 5 >= MAX_PATH)
+	HRESULT result = settings_directory(self, directory);
+	if (FAILED(result)) return result;
+	if ((UINT32)lstrlenW(directory) + 1 + 5 >= MAX_PATH)
 		return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
-	lstrcatW(directory, L"\\LocalSettings");
 	lstrcpyW(pattern, directory);
 	lstrcatW(pattern, L"\\*.rvs");
 	handle = FindFirstFileW(pattern, &found);
@@ -408,14 +545,12 @@ static HRESULT settings_walk(UINT32 *count)
 
 static HRESULT WINAPI settings_map_lookup(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value)
 {
-	(void)iface;
-	return settings_lookup(key, value);
+	return settings_lookup(SETTINGS_OWNER(iface, map), key, value);
 }
 
 static HRESULT WINAPI settings_map_size(__FIMap_2_HSTRING_IInspectable *iface, UINT32 *size)
 {
-	(void)iface;
-	return settings_walk(size);
+	return settings_walk(SETTINGS_OWNER(iface, map), size);
 }
 
 static HRESULT WINAPI settings_map_has_key(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key, boolean *found)
@@ -423,10 +558,9 @@ static HRESULT WINAPI settings_map_has_key(__FIMap_2_HSTRING_IInspectable *iface
 	struct settings_record record;
 	WCHAR path[MAX_PATH];
 	HRESULT result;
-	(void)iface;
 	if (!found)
 		return E_POINTER;
-	result = settings_read(key, &record, path);
+	result = settings_read(SETTINGS_OWNER(iface, map), key, &record, path);
 	if (SUCCEEDED(result)) {
 		IInspectable *value = NULL;
 		result = settings_decode(&record, &value);
@@ -450,12 +584,12 @@ static HRESULT WINAPI settings_map_insert(__FIMap_2_HSTRING_IInspectable *iface,
 	boolean *replaced)
 {
 	HRESULT result;
-	(void)iface;
-	result = settings_insert(key, value, replaced);
+	struct settings_object *self = SETTINGS_OWNER(iface, map);
+	result = settings_insert(self, key, value, replaced);
 	if (SUCCEEDED(result)) {
 		HSTRING change_key = NULL;
 		if (WindowsDuplicateString(key, &change_key) == S_OK) {
-			settings_dispatch(*replaced ? CollectionChange_ItemChanged : CollectionChange_ItemInserted, change_key);
+			settings_dispatch(self, *replaced ? CollectionChange_ItemChanged : CollectionChange_ItemInserted, change_key);
 			WindowsDeleteString(change_key);
 		}
 	}
@@ -465,12 +599,12 @@ static HRESULT WINAPI settings_map_insert(__FIMap_2_HSTRING_IInspectable *iface,
 static HRESULT WINAPI settings_map_remove(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key)
 {
 	HRESULT result;
-	(void)iface;
-	result = settings_remove(key);
+	struct settings_object *self = SETTINGS_OWNER(iface, map);
+	result = settings_remove(self, key);
 	if (SUCCEEDED(result)) {
 		HSTRING change_key = NULL;
 		if (WindowsDuplicateString(key, &change_key) == S_OK) {
-			settings_dispatch(CollectionChange_ItemRemoved, change_key);
+			settings_dispatch(self, CollectionChange_ItemRemoved, change_key);
 			WindowsDeleteString(change_key);
 		}
 	}
@@ -486,20 +620,17 @@ static HRESULT WINAPI settings_map_clear(__FIMap_2_HSTRING_IInspectable *iface)
 
 static HRESULT WINAPI settings_view_lookup(__FIMapView_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value)
 {
-	(void)iface;
-	return settings_lookup(key, value);
+	return settings_lookup(SETTINGS_OWNER(iface, view), key, value);
 }
 
 static HRESULT WINAPI settings_view_size(__FIMapView_2_HSTRING_IInspectable *iface, UINT32 *size)
 {
-	(void)iface;
-	return settings_walk(size);
+	return settings_walk(SETTINGS_OWNER(iface, view), size);
 }
 
 static HRESULT WINAPI settings_view_has_key(__FIMapView_2_HSTRING_IInspectable *iface, HSTRING key, boolean *found)
 {
-	(void)iface;
-	return settings_map_has_key(&settings.map, key, found);
+	return settings_map_has_key(&SETTINGS_OWNER(iface, view)->map, key, found);
 }
 
 static HRESULT WINAPI settings_view_split(__FIMapView_2_HSTRING_IInspectable *iface, __FIMapView_2_HSTRING_IInspectable **first,
@@ -698,9 +829,8 @@ static HRESULT settings_change_create(__x_ABI_CWindows_CFoundation_CCollections_
 
 /* Every handler raised so far receives exactly one event, and no later registration or removal changes the catch: the list
  * is snapshotted. A failing or re-entering handler never stops the pass. */
-static void settings_dispatch(__x_ABI_CWindows_CFoundation_CCollections_CCollectionChange change, HSTRING key)
+static void settings_dispatch(struct settings_object *self, __x_ABI_CWindows_CFoundation_CCollections_CCollectionChange change, HSTRING key)
 {
-	struct settings_object *self = &settings;
 	__FIMapChangedEventHandler_2_HSTRING_IInspectable **askers = NULL;
 	__FIMapChangedEventArgs_1_HSTRING *event_args = NULL;
 	UINT32 count = 0;
@@ -730,10 +860,10 @@ static void settings_dispatch(__x_ABI_CWindows_CFoundation_CCollections_CCollect
 static HRESULT WINAPI settings_container_name(settings_container_i *iface, HSTRING *value)
 {
 	static const WCHAR text[] = L"Local";
-	(void)iface;
+	struct settings_object *self = SETTINGS_OWNER(iface, container);
 	if (!value)
 		return E_POINTER;
-	return WindowsCreateString(text, (UINT32)ARRAYSIZE(text) - 1, value);
+	return self->dynamic ? WindowsDuplicateString(self->name, value) : WindowsCreateString(text, (UINT32)ARRAYSIZE(text) - 1, value);
 }
 
 static HRESULT WINAPI settings_container_locality(settings_container_i *iface,
@@ -748,40 +878,122 @@ static HRESULT WINAPI settings_container_locality(settings_container_i *iface,
 
 static HRESULT WINAPI settings_container_values(settings_container_i *iface, settings_set_i **value)
 {
+	WCHAR path[MAX_PATH];
 	if (!value)
 		return E_POINTER;
-	settings_addref(&settings);
-	*value = &settings.set;
+	struct settings_object *self = SETTINGS_OWNER(iface, container);
+	*value = NULL;
+	HRESULT result = settings_directory(self, path);
+	if (FAILED(result)) return result;
+	settings_addref(self);
+	*value = &self->set;
 	return S_OK;
 }
 
-/* shortcut: nested containers are unsupported, add isolated persistent namespaces before enabling them. */
+static HRESULT WINAPI settings_container_weak_query(void *owner, REFIID iid, void **out);
+static HRESULT WINAPI settings_set_weak_query(void *owner, REFIID iid, void **out);
+static HRESULT WINAPI settings_children_weak_query(void *owner, REFIID iid, void **out);
+
+static HRESULT settings_open_child(struct settings_object *parent, HSTRING name,
+	__x_ABI_CWindows_CStorage_CApplicationDataCreateDisposition disposition, settings_container_i **out)
+{
+	WCHAR path[MAX_PATH], manifest[MAX_PATH], parent_path[MAX_PATH];
+	UINT32 length = 0;
+	const WCHAR *text = WindowsGetStringRawBuffer(name, &length);
+	struct container_record record = {0}, existing;
+	struct settings_object *child;
+	DWORD written = 0;
+	BOOL created = FALSE;
+	HRESULT result;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (!length || length > 255 || (disposition != ApplicationDataCreateDisposition_Always &&
+		disposition != ApplicationDataCreateDisposition_Existing)) return E_INVALIDARG;
+	if (parent->depth >= 32) return HRESULT_FROM_WIN32(ERROR_DIRECTORY);
+	result = settings_directory(parent, parent_path);
+	if (FAILED(result)) return result;
+	UINT64 id = settings_child_id(parent->id, text, length);
+	if (!id) return HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+	result = settings_id_path(id, path, disposition == ApplicationDataCreateDisposition_Always);
+	if (FAILED(result)) return result;
+	child = ALLOC(sizeof *child);
+	if (!child) return E_OUTOFMEMORY;
+	result = WindowsDuplicateString(name, &child->name);
+	if (FAILED(result)) { FREE(child); return result; }
+	if (disposition == ApplicationDataCreateDisposition_Always) {
+		if (CreateDirectoryW(path, NULL)) created = TRUE;
+		else if (GetLastError() != ERROR_ALREADY_EXISTS) { result = last_error(); goto fail; }
+	}
+	if (created) {
+		record.magic = CONTAINER_MAGIC; record.parent = parent->id; record.depth = parent->depth + 1; record.name_length = length;
+		FILETIME now;
+		GetSystemTimeAsFileTime(&now);
+		record.generation_time = ((UINT64)now.dwHighDateTime << 32) | now.dwLowDateTime;
+		record.generation_id = ((UINT64)GetCurrentProcessId() << 32) | (UINT32)InterlockedIncrement(&settings_sequence);
+		record.parent_generation_time = parent->generation_time; record.parent_generation_id = parent->generation_id;
+		memcpy(record.name, text, length * sizeof(WCHAR));
+		lstrcpyW(manifest, path); lstrcatW(manifest, L"\\container.rvc");
+		HANDLE file = CreateFileW(manifest, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (file == INVALID_HANDLE_VALUE) { result = last_error(); RemoveDirectoryW(path); goto fail; }
+		if (!WriteFile(file, &record, sizeof record, &written, NULL)) result = last_error();
+		else if (written != sizeof record) result = HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+		else if (!FlushFileBuffers(file)) result = last_error();
+		else result = S_OK;
+		if (!CloseHandle(file) && SUCCEEDED(result)) result = last_error();
+		if (FAILED(result)) { DeleteFileW(manifest); RemoveDirectoryW(path); goto fail; }
+	} else {
+		result = settings_read_container(id, &existing);
+		if (FAILED(result)) goto fail;
+		if (existing.parent != parent->id || existing.depth != parent->depth + 1 || existing.name_length != length ||
+			existing.parent_generation_time != parent->generation_time || existing.parent_generation_id != parent->generation_id ||
+			memcmp(existing.name, text, length * sizeof(WCHAR))) { result = HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS); goto fail; }
+		record = existing;
+	}
+	child->container.lpVtbl = (void *)&settings_container_table;
+	child->set.lpVtbl = (void *)&settings_set_table;
+	child->map.lpVtbl = (void *)&settings_map_vtbl;
+	child->view.lpVtbl = (void *)&settings_view_vtbl;
+	child->observable.lpVtbl = (void *)&settings_observable_vtbl;
+	child->children.lpVtbl = (void *)&settings_children_vtbl;
+	InitializeSRWLock(&child->lock);
+	child->refs = 1; child->dynamic = TRUE; child->id = id; child->parent_id = parent->id; child->depth = parent->depth + 1;
+	child->generation_time = record.generation_time; child->generation_id = record.generation_id;
+	raven_weak_source_init(&child->container_weak, child, &child->refs, settings_container_weak_query);
+	raven_weak_source_init(&child->set_weak, child, &child->refs, settings_set_weak_query);
+	raven_weak_source_init(&child->children_weak, child, &child->refs, settings_children_weak_query);
+	InterlockedIncrement(&raven_xaml_objects);
+	*out = &child->container;
+	return S_OK;
+fail:
+	WindowsDeleteString(child->name);
+	FREE(child);
+	return result;
+}
+
+static HRESULT settings_delete_child(struct settings_object *parent, HSTRING name);
+
 static HRESULT WINAPI settings_container_view(settings_container_i *iface, __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainer **value)
 {
-	(void)iface;
+	struct settings_object *self = SETTINGS_OWNER(iface, container);
 	if (!value)
 		return E_POINTER;
-	*value = NULL;
-	return E_NOTIMPL;
+	WCHAR path[MAX_PATH];
+	HRESULT result = settings_directory(self, path);
+	if (FAILED(result)) { *value = NULL; return result; }
+	settings_addref(self);
+	*value = &self->children;
+	return S_OK;
 }
 
 static HRESULT WINAPI settings_container_create_container(settings_container_i *iface, HSTRING name,
 	__x_ABI_CWindows_CStorage_CApplicationDataCreateDisposition disposition, settings_container_i **container)
 {
-	(void)iface;
-	(void)name;
-	(void)disposition;
-	if (!container)
-		return E_POINTER;
-	*container = NULL;
-	return E_NOTIMPL;
+	return settings_open_child(SETTINGS_OWNER(iface, container), name, disposition, container);
 }
 
 static HRESULT WINAPI settings_container_delete_container(settings_container_i *iface, HSTRING name)
 {
-	(void)iface;
-	(void)name;
-	return E_NOTIMPL;
+	return settings_delete_child(SETTINGS_OWNER(iface, container), name);
 }
 
 static HRESULT WINAPI settings_container_class(settings_container_i *iface, HSTRING *name)
@@ -932,29 +1144,26 @@ static HRESULT WINAPI settings_set_trust(settings_set_i *iface, TrustLevel *leve
 
 static HRESULT WINAPI settings_map_query(__FIMap_2_HSTRING_IInspectable *iface, REFIID iid, void **out)
 {
-	(void)iface;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	return settings_owner_query(iid, out);
+	return settings_owner_query(SETTINGS_OWNER(iface, map), iid, out);
 }
 
 static HRESULT WINAPI settings_view_query(__FIMapView_2_HSTRING_IInspectable *iface, REFIID iid, void **out)
 {
-	(void)iface;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	return settings_owner_query(iid, out);
+	return settings_owner_query(SETTINGS_OWNER(iface, view), iid, out);
 }
 
 static HRESULT WINAPI settings_observed_query(__FIObservableMap_2_HSTRING_IInspectable *iface, REFIID iid, void **out)
 {
-	(void)iface;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	return settings_owner_query(iid, out);
+	return settings_owner_query(SETTINGS_OWNER(iface, observable), iid, out);
 }
 
 static const __FIMap_2_HSTRING_IInspectableVtbl settings_map_vtbl = {
@@ -1003,11 +1212,10 @@ static ULONG WINAPI settings_set_release_v(settings_set_i *iface)
 
 static HRESULT WINAPI settings_set_query_v(settings_set_i *iface, REFIID iid, void **out)
 {
-	(void)iface;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	return settings_owner_query(iid, out);
+	return settings_owner_query(SETTINGS_OWNER(iface, set), iid, out);
 }
 
 static HRESULT WINAPI settings_set_class(settings_set_i *iface, HSTRING *name) { return settings_set_name(name); }
@@ -1021,21 +1229,222 @@ static HRESULT WINAPI settings_set_trust(settings_set_i *iface, TrustLevel *leve
 	return S_OK;
 }
 
-static HRESULT WINAPI settings_weak_query(void *owner, REFIID iid, void **out)
+/* Walk the flat container directory. A corrupt manifest blocks enumeration and deletion rather than risking a
+ * different namespace. The two-pass delete validates the entire subtree before changing any file. */
+static HRESULT settings_walk_children(UINT64 parent, UINT32 parent_depth, UINT64 parent_time, UINT64 parent_generation,
+	BOOL remove, BOOL validate_only, UINT32 *count);
+
+static HRESULT settings_delete_tree(UINT64 id, const struct container_record *manifest, BOOL validate_only)
 {
-	if (owner == &settings.container)
-		return settings_container_query(&settings.container, iid, out);
+	WCHAR path[MAX_PATH], pattern[MAX_PATH], expected[MAX_PATH], file_path[MAX_PATH];
+	WIN32_FIND_DATAW found;
+	HANDLE search;
+	HRESULT result;
+	UINT32 ignored = 0;
+	struct settings_object temporary = {0};
+	HSTRING name = NULL;
+	result = settings_walk_children(id, manifest->depth, manifest->generation_time, manifest->generation_id, TRUE, validate_only, &ignored);
+	if (FAILED(result)) return result;
+	result = WindowsCreateString(manifest->name, manifest->name_length, &name);
+	if (FAILED(result)) return result;
+	temporary.dynamic = TRUE; temporary.id = id; temporary.parent_id = manifest->parent;
+	temporary.depth = manifest->depth; temporary.name = name;
+	temporary.generation_time = manifest->generation_time; temporary.generation_id = manifest->generation_id;
+	result = settings_id_path(id, path, FALSE);
+	if (FAILED(result)) goto done;
+	lstrcpyW(pattern, path); lstrcatW(pattern, L"\\*");
+	search = FindFirstFileW(pattern, &found);
+	if (search == INVALID_HANDLE_VALUE) { result = last_error(); goto done; }
+	do {
+		struct settings_record record;
+		HSTRING key = NULL;
+		IInspectable *value = NULL;
+		DWORD got = 0;
+		LARGE_INTEGER size;
+		if (!lstrcmpW(found.cFileName, L".") || !lstrcmpW(found.cFileName, L"..") ||
+			!lstrcmpW(found.cFileName, L"container.rvc")) continue;
+		if ((found.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || lstrlenW(found.cFileName) != 20 ||
+			lstrcmpW(found.cFileName + 16, L".rvs")) { result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); break; }
+		lstrcpyW(file_path, path); lstrcatW(file_path, L"\\"); lstrcatW(file_path, found.cFileName);
+		HANDLE file = CreateFileW(file_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (file == INVALID_HANDLE_VALUE) { result = last_error(); break; }
+		if (!GetFileSizeEx(file, &size) || size.QuadPart < 16 + sizeof record.key || size.QuadPart > sizeof record ||
+			!ReadFile(file, &record, (DWORD)size.QuadPart, &got, NULL)) {
+			CloseHandle(file); result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); break;
+		}
+		CloseHandle(file);
+		if (got != (DWORD)size.QuadPart || record.magic != SETTINGS_MAGIC || record.key_length > 255 ||
+			record.length > SETTINGS_LIMIT || size.QuadPart != (LONGLONG)(16 + sizeof record.key + record.length)) {
+			result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); break;
+		}
+		result = WindowsCreateString(record.key, record.key_length, &key);
+		if (SUCCEEDED(result)) result = settings_path(&temporary, key, expected, NULL);
+		if (SUCCEEDED(result) && lstrcmpW(expected, file_path)) result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+		if (SUCCEEDED(result)) result = settings_decode(&record, &value);
+		if (value) IInspectable_Release(value);
+		WindowsDeleteString(key);
+		if (FAILED(result)) break;
+		if (!validate_only && !DeleteFileW(file_path)) { result = last_error(); break; }
+	} while (FindNextFileW(search, &found));
+	if (SUCCEEDED(result) && GetLastError() != ERROR_NO_MORE_FILES) result = last_error();
+	FindClose(search);
+	if (SUCCEEDED(result) && !validate_only) {
+		lstrcpyW(file_path, path); lstrcatW(file_path, L"\\container.rvc");
+		if (!DeleteFileW(file_path) || !RemoveDirectoryW(path)) result = last_error();
+	}
+done:
+	WindowsDeleteString(name);
+	return result;
+}
+
+static HRESULT settings_walk_children(UINT64 parent, UINT32 parent_depth, UINT64 parent_time, UINT64 parent_generation,
+	BOOL remove, BOOL validate_only, UINT32 *count)
+{
+	WCHAR path[MAX_PATH], pattern[MAX_PATH];
+	WIN32_FIND_DATAW found;
+	HRESULT result = settings_containers_path(path, FALSE);
+	*count = 0;
+	if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) || result == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)) return S_OK;
+	if (FAILED(result)) return result;
+	lstrcpyW(pattern, path); lstrcatW(pattern, L"\\*");
+	HANDLE search = FindFirstFileW(pattern, &found);
+	if (search == INVALID_HANDLE_VALUE) {
+		DWORD error = GetLastError();
+		return error == ERROR_FILE_NOT_FOUND ? S_OK : HRESULT_FROM_WIN32(error);
+	}
+	do {
+		UINT64 id = 0;
+		struct container_record record;
+		if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || lstrlenW(found.cFileName) != 16) continue;
+		if (found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); break; }
+		BOOL valid = TRUE;
+		for (int i = 0; i < 16; ++i) {
+			int digit;
+			for (digit = 0; digit < 16 && hex_digits[digit] != found.cFileName[i]; ++digit) {}
+			if (digit == 16) { valid = FALSE; break; }
+			id = (id << 4) | (UINT64)digit;
+		}
+		if (!valid || !id) continue;
+		result = settings_read_container(id, &record);
+		/* FindFirstFile snapshots the flat directory; descendants removed by this same walk may still appear. */
+		if (remove && !validate_only && (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ||
+			result == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND))) { result = S_OK; continue; }
+		if (FAILED(result)) break;
+		if (record.parent != parent) continue;
+		if (parent_depth >= 32 || record.depth != parent_depth + 1 || record.parent_generation_time != parent_time ||
+			record.parent_generation_id != parent_generation) { result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA); break; }
+		++*count;
+		if (remove) {
+			result = settings_delete_tree(id, &record, validate_only);
+			if (FAILED(result)) break;
+		}
+	} while (FindNextFileW(search, &found));
+	if (SUCCEEDED(result) && GetLastError() != ERROR_NO_MORE_FILES) result = last_error();
+	FindClose(search);
+	return result;
+}
+
+static HRESULT settings_delete_child(struct settings_object *parent, HSTRING name)
+{
+	settings_container_i *child = NULL;
+	struct container_record record;
+	HRESULT result = settings_open_child(parent, name, ApplicationDataCreateDisposition_Existing, &child);
+	if (FAILED(result)) return result;
+	struct settings_object *self = SETTINGS_OWNER(child, container);
+	result = settings_read_container(self->id, &record);
+	if (SUCCEEDED(result)) result = settings_delete_tree(self->id, &record, TRUE);
+	if (SUCCEEDED(result)) result = settings_delete_tree(self->id, &record, FALSE);
+	child->lpVtbl->Release(child);
+	return result;
+}
+
+typedef __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainer children_i;
+static HRESULT WINAPI children_query(children_i *iface, REFIID iid, void **out)
+{
 	if (!out) return E_POINTER;
 	*out = NULL;
-	return settings_owner_query(iid, out);
+	struct settings_object *self = SETTINGS_OWNER(iface, children);
+	if (IsEqualIID(iid, &IID_IWeakReferenceSource)) *out = &self->children_weak;
+	else if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) ||
+		IsEqualIID(iid, &IID___FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainer)) *out = iface;
+	else return E_NOINTERFACE;
+	settings_addref(self);
+	return S_OK;
+}
+static ULONG WINAPI children_addref(children_i *iface) { return settings_addref(SETTINGS_OWNER(iface, children)); }
+static ULONG WINAPI children_release(children_i *iface) { return settings_release(SETTINGS_OWNER(iface, children)); }
+static HRESULT WINAPI children_iids(children_i *iface, ULONG *count, IID **iids)
+{ (void)iface; return settings_copied_iids(&IID___FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainer, 1, count, iids); }
+static HRESULT WINAPI children_name(children_i *iface, HSTRING *name)
+{ static const WCHAR text[] = L"Windows.Foundation.Collections.IMapView`2<String,Windows.Storage.ApplicationDataContainer>";
+  (void)iface; return name ? WindowsCreateString(text, ARRAYSIZE(text) - 1, name) : E_POINTER; }
+static HRESULT WINAPI children_trust(children_i *iface, TrustLevel *level)
+{ (void)iface; if (!level) return E_POINTER; *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI children_lookup(children_i *iface, HSTRING key, settings_container_i **out)
+{
+	struct settings_object *self = SETTINGS_OWNER(iface, children);
+	WCHAR path[MAX_PATH];
+	if (!out) return E_POINTER;
+	*out = NULL;
+	HRESULT result = settings_directory(self, path);
+	if (FAILED(result)) return result;
+	result = settings_open_child(self, key, ApplicationDataCreateDisposition_Existing, out);
+	return result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) || result == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND) ? E_BOUNDS : result;
+}
+static HRESULT WINAPI children_size(children_i *iface, UINT32 *out)
+{
+	struct settings_object *self = SETTINGS_OWNER(iface, children);
+	WCHAR path[MAX_PATH];
+	if (!out) return E_POINTER;
+	*out = 0;
+	HRESULT result = settings_directory(self, path);
+	return FAILED(result) ? result : settings_walk_children(self->id, self->depth, self->generation_time,
+		self->generation_id, FALSE, TRUE, out);
+}
+static HRESULT WINAPI children_has_key(children_i *iface, HSTRING key, boolean *out)
+{
+	settings_container_i *child = NULL;
+	if (!out) return E_POINTER;
+	HRESULT result = children_lookup(iface, key, &child);
+	*out = SUCCEEDED(result);
+	if (child) child->lpVtbl->Release(child);
+	return result == E_BOUNDS ? S_OK : result;
+}
+static HRESULT WINAPI children_split(children_i *iface, children_i **first, children_i **second)
+{ (void)iface; if (!first || !second) return E_POINTER; *first = NULL; *second = NULL; return S_OK; }
+static const __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainerVtbl settings_children_vtbl = {
+	children_query, children_addref, children_release, children_iids, children_name, children_trust,
+	children_lookup, children_size, children_has_key, children_split
+};
+
+static HRESULT WINAPI settings_container_weak_query(void *owner, REFIID iid, void **out)
+{
+	struct settings_object *self = owner;
+	return settings_container_query(&self->container, iid, out);
+}
+
+static HRESULT WINAPI settings_set_weak_query(void *owner, REFIID iid, void **out)
+{
+	struct settings_object *self = owner;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	return settings_owner_query(self, iid, out);
+}
+
+static HRESULT WINAPI settings_children_weak_query(void *owner, REFIID iid, void **out)
+{
+	struct settings_object *self = owner;
+	return children_query(&self->children, iid, out);
 }
 
 static void settings_init_weak(void)
 {
 	static LONG once;
 	if (InterlockedCompareExchange(&once, 1, 0) == 0) {
-		raven_weak_source_init(&settings.container_weak, &settings.container, &settings.refs, settings_weak_query);
-		raven_weak_source_init(&settings.set_weak, &settings.set, &settings.refs, settings_weak_query);
+		raven_weak_source_init(&settings.container_weak, &settings, &settings.refs, settings_container_weak_query);
+		raven_weak_source_init(&settings.set_weak, &settings, &settings.refs, settings_set_weak_query);
+		raven_weak_source_init(&settings.children_weak, &settings, &settings.refs, settings_children_weak_query);
 		InterlockedExchange(&once, 2);
 	} else {
 		while (InterlockedCompareExchange(&once, 2, 2) != 2) Sleep(0);
