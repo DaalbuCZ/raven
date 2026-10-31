@@ -199,8 +199,10 @@ built for both.
   repeat changes. Close and thread teardown cancel timers and pending work,
   notify ShutdownStarting/ShutdownCompleted, and release subscriptions even when
   a shutdown handler fails. This is immediate CoreWindow-owned shutdown:
-  standalone DispatcherQueueController creation, shutdown draining and deferrals
-  remain unsupported (`GetDeferral` returns `E_NOTIMPL`).
+  it finishes synchronously on the window thread, so `GetDeferral` there
+  still returns `E_NOTIMPL` — deferrals are honored on the controller pump
+  (see the deferred-shutdown entry). Standalone DispatcherQueueController
+  creation and shutdown draining are supported.
 - DispatcherQueue verification: `dispatcher_queue_fixture64` and
   `dispatcher_queue_fixture32`, with `ctest --test-dir build -R
   native_dispatcher_queue_ --output-on-failure`, pass all four normal/parallel
@@ -685,6 +687,43 @@ built for both.
   `native_style_x64`/`_x32`: a red template root with a presenter shows
   the button's green content inside it, and clearing falls back to
   rendering the content directly.
+- Stable-index templates (2026-10-31, stage 3): the metadata tables carry
+  `Control.Template` (property 560), `ControlTemplate` (type 191) and
+  `ContentPresenter` (type 296), indices verified against the numbering
+  convention of `scripts/xbf-stable-indices.json` (array index == stable
+  index, cross-checked against every already-registered entry). The
+  loader's stable branch gained a fallback: when `RoActivateInstance`
+  fails for a stable type, the class name resolves through
+  `raven_xaml_class_by_stable` and the engine-internal factory path —
+  load-bearing for ContentPresenter, which has no catalog entry;
+  successful activations keep the normal path. A real-shaped XBF whose
+  metadata section is empty — every node resolved by stable index
+  (Button 540 → Content 999 → TextBlock 396 → Template 560 →
+  ControlTemplate 191 → Grid 442 → Children 648 → ContentPresenter 296) —
+  now loads and applies its template: `native_xaml_application_x64`/`_x32`
+  verify the applied template identity, the root grid, the presenter
+  resolving the button's content, and the logical `get_Content`.
+  Template-adjacent members beyond these three (e.g.
+  `ContentPresenter.ContentTemplate` 525) remain unresolved by stable
+  index.
+- DispatcherQueue deferred shutdown (2026-10-31, stage 1): a
+  `ShutdownStarting` handler on the controller pump can now
+  `GetDeferral` — a real `IDeferral` (mingw's precomputed
+  `IID___x_ABI_...CIDeferral`, no guessed GUID). While a deferral is
+  outstanding the close work — queued below every client priority —
+  records it and returns without closing; when the last deferral's
+  `Complete` runs (idempotent), the close is re-posted at idle-minus-one,
+  so work posted during the deferral window still drains before
+  `ShutdownCompleted`. The deferral owns a queue reference, so a deferral
+  held past the drain cannot free the queue, and a cross-thread
+  `Complete` after the queue already closed is a safe no-op. On the
+  immediate CoreWindow-owned close `GetDeferral` stays `E_NOTIMPL`: that
+  close finishes synchronously on the window thread and cannot wait —
+  fixture-covered refusal. `native_dispatcher_controller_x64`/`_x32` run
+  two deterministic rounds (Complete-from-final-work-item with a
+  double-Complete idempotency check; handler failing `E_ACCESSDENIED`
+  with a second OS thread completing cross-thread on signal), and
+  `native_dispatcher_queue_x64`/`_x32` cover the immediate-path refusal.
 - Package identity (2026-10-28, stage 5 begun): `Windows.ApplicationModel.Package`
   is implemented in `package.c` from the app's `AppxManifest.xml` — the
   package root resolves from the executable's directory (`<exe>.AppxManifest`
@@ -769,8 +808,8 @@ built for both.
   `ShutdownQueueAsync` returns an action that runs the documented shutdown on
   the dedicated thread (`ShutdownStarting`, drain, close driving the existing
   window/queue teardown and `ShutdownCompleted`), joins the thread, and
-  completes; a failing `ShutdownStarting` handler never stalls the shutdown,
-  and `GetDeferral` stays `E_NOTIMPL` per the plan. Post-shutdown queues
+  completes; a failing `ShutdownStarting` handler never stalls the shutdown.
+  Post-shutdown queues
   reject work the way closed queues do. `native_dispatcher_controller_x64`/
   `_x32` cover creation, cross-thread posting in priority order, the event
   ordering, the thread-exited-before-completed invariant, and
@@ -1176,9 +1215,14 @@ remain passing after the trial implementation was removed.
    XBF-declared templates through the loader path and ContentPresenter
    support landed the same day (see those entries); remaining there:
    stable-index references in the type/property tables, and generalizing
-   the presenter beyond the button path.
-4. Extend DispatcherQueue with standalone controllers and deferred shutdown when
-   required by app traces.
+   the presenter beyond the button path. Stable-index references for
+   Template/ControlTemplate/ContentPresenter landed 2026-10-31; remaining:
+   further template-adjacent members (e.g. ContentTemplate 525).
+4. ~~Extend DispatcherQueue with standalone controllers and deferred shutdown
+   when required by app traces.~~ Done (2026-10-31): standalone controllers
+   landed 2026-10-28 and deferred shutdown (ShutdownStarting deferrals
+   honored on the controller pump) on 2026-10-31 — remaining if app traces
+   require it: deferral deadlines and the immediate-close deferral.
 5. ~~Finish pointer history/static access, cursor objects and touch/pen
    delivery as native input sources permit.~~ Pointer history, the
    CoreCursor/`PointerCursor` objects and the `PointerDevice` statics are
