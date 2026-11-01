@@ -125,21 +125,21 @@ struct application_factory {
 
 /* Resources stores the ResourceDictionary the application assigns; the engine reads it once the style stage applies resources.
  * A put re-renders like every other property store, even though nothing reaches the tree yet. */
-static HRESULT WINAPI application1_get_Resources(xaml_application1 *iface, uint64_t out)
+static HRESULT WINAPI application1_get_Resources(xaml_application1 *iface, IInspectable **out)
 {
 	struct application *self = ((struct application1_part *)iface)->owner;
 	if (!out)
 		return E_POINTER;
-	*(void **)(uintptr_t)out = self->resources;
+	*out = self->resources;
 	if (self->resources)
 		self->resources->lpVtbl->AddRef(self->resources);
 	return S_OK;
 }
 
-static HRESULT WINAPI application1_put_Resources(xaml_application1 *iface, uint64_t value)
+static HRESULT WINAPI application1_put_Resources(xaml_application1 *iface, IInspectable *value)
 {
 	struct application *self = ((struct application1_part *)iface)->owner;
-	IInspectable *dictionary = (IInspectable *)(uintptr_t)value;
+	IInspectable *dictionary = value;
 	if (dictionary)
 		dictionary->lpVtbl->AddRef(dictionary);
 	if (self->resources)

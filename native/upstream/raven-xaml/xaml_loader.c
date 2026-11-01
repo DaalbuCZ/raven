@@ -27,6 +27,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include "windows_ui_xaml_application.h"
+#include "windows_ui_xaml_dictionary.h"
 #include <stdint.h>
 #include <winstring.h>
 
@@ -227,23 +228,50 @@ static HRESULT metadata_string(const struct metadata *m, uint32_t id, const WCHA
 	return S_OK;
 }
 
+/* A type record's first field names the table its second field indexes. Value 2 is the XML namespace table: every type record
+ * in Shapr3D's compiled pages uses it, and the entry it names is a compiler "using:<CLR namespace>" directive (verified across
+ * all 235 type records in the package's 84 loadable pages), so the directive prefix is stripped before the name is handed to
+ * the application's metadata provider. Other values keep the type-namespace table the older documents and the hand-built
+ * fixtures use, where the second field indexes a namespace entry whose second half is the namespace string. A "using:" entry
+ * carrying an assembly qualifier is refused rather than dropped: the provider is asked by type name only, so dropping it could
+ * resolve a same-named type from the wrong assembly. */
 static HRESULT metadata_type_name(const struct metadata *m, uint32_t id, WCHAR *buffer, size_t capacity, UINT32 *length)
 {
+	static const WCHAR using_prefix[] = L"using:";
 	size_t position;
-	uint32_t namespace_id, name_id, namespace_name_id;
+	uint32_t namespace_kind, namespace_id, name_id, namespace_name_id;
 	const WCHAR *namespace_text = NULL, *name_text = NULL;
 	UINT32 namespace_length = 0, name_length = 0;
 	if (id >= m->type_count)
 		return E_INVALIDARG;
 	position = m->types + 4 + (size_t)id * 12;
+	namespace_kind = read_u32(m->data + position);
 	namespace_id = read_u32(m->data + position + 4);
 	name_id = read_u32(m->data + position + 8);
-	if (namespace_id >= m->namespace_count)
+	if (FAILED(metadata_string(m, name_id, &name_text, &name_length)))
 		return E_INVALIDARG;
-	namespace_name_id = read_u32(m->data + m->namespaces + 4 + (size_t)namespace_id * 8 + 4);
-	if (FAILED(metadata_string(m, namespace_name_id, &namespace_text, &namespace_length)) ||
-		FAILED(metadata_string(m, name_id, &name_text, &name_length)))
-		return E_INVALIDARG;
+	if (namespace_kind == 2) {
+		if (namespace_id >= m->xmlns_count)
+			return E_INVALIDARG;
+		namespace_name_id = read_u32(m->data + m->xmlns + 4 + (size_t)namespace_id * 4);
+		if (FAILED(metadata_string(m, namespace_name_id, &namespace_text, &namespace_length)) ||
+			namespace_length < ARRAYSIZE(using_prefix) - 1 ||
+			CompareStringOrdinal(namespace_text, ARRAYSIZE(using_prefix) - 1, using_prefix, -1, TRUE) != CSTR_EQUAL)
+			return E_INVALIDARG;
+		namespace_text += ARRAYSIZE(using_prefix) - 1;
+		namespace_length -= ARRAYSIZE(using_prefix) - 1;
+		if (!namespace_length)
+			return E_INVALIDARG;
+		for (UINT32 index = 0; index < namespace_length; ++index)
+			if (namespace_text[index] == L';')
+				return E_INVALIDARG;
+	} else {
+		if (namespace_id >= m->namespace_count)
+			return E_INVALIDARG;
+		namespace_name_id = read_u32(m->data + m->namespaces + 4 + (size_t)namespace_id * 8 + 4);
+		if (FAILED(metadata_string(m, namespace_name_id, &namespace_text, &namespace_length)))
+			return E_INVALIDARG;
+	}
 	if ((size_t)namespace_length + 1 + name_length + 1 > capacity)
 		return E_INVALIDARG;
 	for (UINT32 index = 0; index < namespace_length; ++index)
@@ -460,6 +488,54 @@ static HRESULT use_target(const struct metadata *m, uint16_t reference, IInspect
 	return S_OK;
 }
 
+typedef __x_ABI_CWindows_CUI_CXaml_CIApplication application_i;
+typedef __x_ABI_CWindows_CUI_CXaml_CIResourceDictionary dictionary_i;
+typedef __FIVector_1_Windows__CUI__CXaml__CResourceDictionary dictionary_vector_i;
+
+static BOOL is_application_dictionary(IInspectable *parent, IInspectable *child)
+{
+	application_i *app = NULL;
+	dictionary_i *dictionary = NULL;
+	BOOL found = SUCCEEDED(IInspectable_QueryInterface(parent, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&app)) && app &&
+		SUCCEEDED(IInspectable_QueryInterface(child, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary)) && dictionary;
+	if (dictionary) dictionary->lpVtbl->Release(dictionary);
+	if (app) app->lpVtbl->Release(app);
+	return found;
+}
+static HRESULT set_application_resources(IInspectable *parent, IInspectable *child)
+{
+	application_i *app = NULL;
+	HRESULT result = IInspectable_QueryInterface(parent, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&app);
+	if (FAILED(result)) return result;
+	result = app->lpVtbl->put_Resources(app, child);
+	app->lpVtbl->Release(app);
+	return result;
+}
+static HRESULT get_merged_dictionaries(IInspectable *object, IInspectable **out)
+{
+	dictionary_i *dictionary = NULL;
+	if (!object || !out) return E_POINTER;
+	*out = NULL;
+	HRESULT result = IInspectable_QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary);
+	if (FAILED(result)) return result;
+	result = dictionary->lpVtbl->get_MergedDictionaries(dictionary, (void **)out);
+	dictionary->lpVtbl->Release(dictionary);
+	return result;
+}
+static HRESULT append_dictionary(IInspectable *collection, IInspectable *item)
+{
+	dictionary_vector_i *vector = NULL;
+	dictionary_i *dictionary = NULL;
+	HRESULT result;
+	if (!collection || !item) return E_INVALIDARG;
+	result = IInspectable_QueryInterface(collection, &IID___FIVector_1_Windows__CUI__CXaml__CResourceDictionary, (void **)&vector);
+	if (SUCCEEDED(result)) result = IInspectable_QueryInterface(item, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary);
+	if (SUCCEEDED(result)) result = vector->lpVtbl->Append(vector, dictionary);
+	if (dictionary) dictionary->lpVtbl->Release(dictionary);
+	if (vector) vector->lpVtbl->Release(vector);
+	return result;
+}
+
 #define LOADER_DEPTH 64
 
 /* One open scope. kind 0 is an element scope; 1 a ControlTemplate whose root element has not arrived; 2 a
@@ -482,6 +558,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	struct scope stack[LOADER_DEPTH];
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
+	IInspectable *last_object = NULL;
 	UINT32 pending_length = 0;
 	HRESULT status = S_OK;
 	while (r.at < r.end) {
@@ -501,14 +578,15 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			}
 			break;
 		case 2: case 33: case 39: case 40:
+			if (!depth && target) { status = E_INVALIDARG; goto done; }
 			if (depth) {
 				struct scope *scope = &stack[--depth];
 				/* The deferred template application: the template scope closes with its root attached, so the control
 				 * stores the finished tree. A failed application fails the document the way a failed scoped property
 				 * does — the caller is not handed a tree that silently lost its template. */
 				if (scope->kind && scope->deferred_target && scope->object) {
-					const HRESULT applied = raven_xaml_element_set_object(scope->deferred_target,
-						scope->deferred_name, scope->deferred_length, scope->object);
+					const HRESULT applied = scope->kind == 4 ? set_application_resources(scope->deferred_target, scope->object) :
+						raven_xaml_element_set_object(scope->deferred_target, scope->deferred_name, scope->deferred_length, scope->object);
 					if (FAILED(applied)) {
 						if (scope->object)
 							IInspectable_Release(scope->object);
@@ -516,9 +594,17 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						goto done;
 					}
 				}
-				if (scope->object)
-					IInspectable_Release(scope->object);
+				if (scope->object && depth && stack[depth - 1].kind == 3) {
+					if (last_object) IInspectable_Release(last_object);
+					last_object = scope->object;
+				} else if (scope->object) IInspectable_Release(scope->object);
 			}
+			break;
+		case 8:
+			if (!depth || stack[depth - 1].kind != 3 || !last_object) { status = E_INVALIDARG; goto done; }
+			status = append_dictionary(stack[depth - 1].object, last_object);
+			IInspectable_Release(last_object); last_object = NULL;
+			if (FAILED(status)) goto done;
 			break;
 		case 20: case 21: case 22: {
 			const uint16_t reference = next_u16(&r);
@@ -538,6 +624,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				if (FAILED(status)) goto done;
 				*target_used = TRUE;
 			} else status = create_reference(m, reference, &object);
+			if (target && (FAILED(status) || !object)) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
 			if (object) {
 				if (raven_xaml_object_is_control_template(object)) {
 					/* The template scope opens; the pending property name rides the scope as the deferred
@@ -583,11 +670,14 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						IInspectable_Release(object);
 					}
 				} else {
-					if (pending_name && depth) {
+					BOOL application_resources = depth && stack[depth - 1].object &&
+						(!pending_name || (pending_length == 9 && !memcmp(pending_name, L"Resources", 9 * sizeof(WCHAR)))) &&
+						is_application_dictionary(stack[depth - 1].object, object);
+					if (pending_name && depth && !application_resources) {
 						const HRESULT applied = raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
-						if (FAILED(applied)) {
+						if (FAILED(applied) || (target && applied != S_OK)) {
 							IInspectable_Release(object);
-							status = applied;
+							status = FAILED(applied) ? applied : E_NOTIMPL;
 							goto done;
 						}
 					}
@@ -598,8 +688,8 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					}
 					if (depth < LOADER_DEPTH) {
 						stack[depth].object = object;
-						stack[depth].kind = 0;
-						stack[depth].deferred_target = NULL;
+						stack[depth].kind = application_resources ? 4 : 0;
+						stack[depth].deferred_target = application_resources ? stack[depth - 1].object : NULL;
 						stack[depth].deferred_name = NULL;
 						stack[depth].deferred_length = 0;
 						++depth;
@@ -638,16 +728,27 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					stack[depth - 1].object = object;
 					IInspectable_AddRef(object);
 				}
-			} else (void)create_reference(m, reference, &object);
+			} else status = create_reference(m, reference, &object);
+			if (target && (FAILED(status) || !object)) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
 			if (object) {
+				if (depth && !stack[depth - 1].object) {
+					stack[depth - 1].object = object;
+					IInspectable_AddRef(object);
+				}
 				if (depth && stack[depth - 1].kind == 1) {
 					/* A non-scoped object under a template scope is the root the same way a scoped one is. */
 					if (raven_xaml_control_template_put_root(stack[depth - 1].object, object) == S_OK)
 						stack[depth - 1].kind = 2;
 					pending_name = NULL;
 				} else {
-					if (pending_name && depth)
-						(void)raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
+					if (pending_name && depth) {
+						HRESULT applied = raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
+						if (target && applied != S_OK) {
+							IInspectable_Release(object);
+							status = FAILED(applied) ? applied : E_NOTIMPL;
+							goto done;
+						}
+					}
 					pending_name = NULL;
 				}
 				if (!*root) {
@@ -661,16 +762,21 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 		case 3: case 18:
 			next_u16(&r);
 			status = skip_string(&r);
-			if (FAILED(status))
-				goto done;
+			if (FAILED(status)) goto done;
+			if (kind == 18) {
+				if (depth == LOADER_DEPTH) { status = E_INVALIDARG; goto done; }
+				memset(&stack[depth++], 0, sizeof stack[0]);
+			}
 			break;
 		case 13: {
 			struct value value = {value_none, NULL, 0, 0, 0};
 			status = read_constant(&r, m, &value);
 			if (FAILED(status))
 				goto done;
-			if (depth && value.kind == value_string)
-				(void)raven_xaml_element_set_name(stack[depth - 1].object, value.text, value.length);
+			if (depth && value.kind == value_string) {
+				HRESULT applied = raven_xaml_element_set_name(stack[depth - 1].object, value.text, value.length);
+				if (target && applied != S_OK) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+			} else if (target) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 7: case 19: case 32: {
@@ -678,17 +784,27 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const WCHAR *name = NULL;
 			UINT32 length = 0;
 			pending_name = NULL;
-			if (SUCCEEDED(property_reference(m, reference, &name, &length))) {
-				pending_name = name;
-				pending_length = length;
+			status = property_reference(m, reference, &name, &length);
+			if (FAILED(status)) { if (target) goto done; status = S_OK; break; }
+			if (kind == 19) {
+				IInspectable *collection = NULL;
+				if (!depth || depth == LOADER_DEPTH || length != 18 || memcmp(name, L"MergedDictionaries", 18 * sizeof(WCHAR))) {
+					status = E_NOTIMPL; goto done;
+				}
+				status = get_merged_dictionaries(stack[depth - 1].object, &collection);
+				if (FAILED(status)) goto done;
+				memset(&stack[depth], 0, sizeof stack[depth]);
+				stack[depth].object = collection; stack[depth].kind = 3; ++depth;
+			} else {
+				pending_name = name; pending_length = length;
 			}
 			break;
 		}
 		case 4: case 10: case 12: case 14: case 34: case 35: {
 			struct value value = {value_none, NULL, 0, 0, 0};
 			status = read_constant(&r, m, &value);
-			if (FAILED(status))
-				goto done;
+			if (FAILED(status)) goto done;
+			if (target) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 11:
@@ -707,6 +823,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			}
 			for (uint64_t index = 0; index < (uint64_t)statics + (uint64_t)themes; ++index)
 				next_u16(&r);
+			if (target) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 26: case 27: case 30: case 36: {
@@ -717,13 +834,16 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			status = read_constant(&r, m, &value);
 			if (FAILED(status))
 				goto done;
-			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length)))
-				(void)apply_value(stack[depth - 1].object, name, length, &value);
+			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length))) {
+				HRESULT applied = apply_value(stack[depth - 1].object, name, length, &value);
+				if (target && applied != S_OK) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+			} else if (target) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 28: case 29: case 31: case 38:
 			next_u16(&r);
 			next_u16(&r);
+			if (target) { status = r.invalid ? E_INVALIDARG : E_NOTIMPL; goto done; }
 			break;
 		default: {
 			char message[] = "raven-xaml: unsupported XBF node 000\n";
@@ -742,6 +862,8 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 		}
 	}
 done:
+	if (SUCCEEDED(status) && target && (pending_name || last_object)) status = E_INVALIDARG;
+	if (last_object) IInspectable_Release(last_object);
 	/* The scopes unwind without their deferred applications: a failed document never half-applies the templates it
 	 * declared, and the objects the unwind releases own the only references the deferred targets held through them. */
 	while (depth) {

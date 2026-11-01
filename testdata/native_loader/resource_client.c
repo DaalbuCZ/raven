@@ -394,7 +394,7 @@ int raven_entry(void)
 		merged_i *merged = NULL;
 		resource_i *appended = NULL, *at_zero = NULL;
 		IInspectable *appended_inspectable = NULL;
-		if (resource->lpVtbl->get_MergedDictionaries(resource, (uint64_t)(uintptr_t)&merged) != S_OK || !merged)
+		if (resource->lpVtbl->get_MergedDictionaries(resource, (void **)&merged) != S_OK || !merged)
 			return 36;
 		if (merged->lpVtbl->get_Size(merged, &size) != S_OK || size)
 			return 37;
@@ -455,13 +455,13 @@ int raven_entry(void)
 		if (application->lpVtbl->QueryInterface(application, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication,
 			(void **)&app) != S_OK || !app)
 			return 49;
-		if (app->lpVtbl->get_Resources(app, (uint64_t)(uintptr_t)&stored) != S_OK || stored)
+		if (app->lpVtbl->get_Resources(app, &stored) != S_OK || stored)
 			return 50;
 		if (activate(dictionary_name, &assigned) != S_OK || !assigned)
 			return 51;
-		if (app->lpVtbl->put_Resources(app, (uint64_t)(uintptr_t)assigned) != S_OK)
+		if (app->lpVtbl->put_Resources(app, assigned) != S_OK)
 			return 52;
-		if (app->lpVtbl->get_Resources(app, (uint64_t)(uintptr_t)&stored) != S_OK || !stored)
+		if (app->lpVtbl->get_Resources(app, &stored) != S_OK || !stored)
 			return 53;
 		if (!same_unknown(stored, assigned))
 			return 54;
@@ -481,7 +481,7 @@ int raven_entry(void)
 		stored = NULL;
 		if (app->lpVtbl->put_Resources(app, 0) != S_OK)
 			return 58;
-		if (app->lpVtbl->get_Resources(app, (uint64_t)(uintptr_t)&stored) != S_OK || stored)
+		if (app->lpVtbl->get_Resources(app, &stored) != S_OK || stored)
 			return 59;
 		app->lpVtbl->Release(app);
 		application->lpVtbl->Release(application);

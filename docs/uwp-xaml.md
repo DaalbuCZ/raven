@@ -1357,8 +1357,46 @@ the same day — see the two entries below. Evidence:
   an `--extended` mode to embed real XBF blobs, and
   `native_load_component_x64`/`_x32` cover the resolved load, the
   supplied instance receiving the tree, and the refusals;
-  `native_mrt_extended_x64`/`_x32` cover the extended PRI. Shapr3D gets
-  past the `LoadComponent` call on this path.
+  `native_mrt_extended_x64`/`_x32` cover the extended PRI. Shapr3D reaches
+  this call, but loading its application resources still fails.
+- Application resource dictionaries (2026-11-01): the XBF loader handles
+  namespace scopes, `MergedDictionaries` and collection append operations,
+  and attaches a completed resource dictionary to the supplied application.
+  The x64 and x86 `LoadComponent` fixtures cover two merged dictionaries and
+  verify that a failed load does not attach an incomplete dictionary. Unknown
+  classes and unsupported operations fail instead of silently producing an
+  incomplete application tree. A fresh-prefix trace reaches the creation of
+  `XamlControlsResources` and fails there with `E_INVALIDARG`. That resource
+  class, dictionary sources, theme dictionaries and custom runtime data still
+  need implementation.
+- Compiler xmlns type records (2026-11-01, stage 3): the loader assumed a
+  type record's first field indexed the type-namespace table. Real compiler
+  output uses field 0 == 2, indexing the XML namespace table, whose entry is
+  a `using:<CLR namespace>` directive — verified across all 235 type records
+  in the package's 84 loadable XBF documents. `metadata_type_name` now
+  selects the xmlns table for that marker, strips `using:`, and refuses empty
+  directives or `using:` entries carrying a `;` assembly qualifier rather
+  than silently dropping it; non-`using:` XML namespaces still fail
+  `E_INVALIDARG`. `native_xaml_controls_x64`/`_x32` cover the positive form
+  and the refusal (checks 1639–1660).
+- WinUI 2.x activation ceiling (2026-11-01, stage 7): after the resource
+  dictionary work a fresh Shapr3D trace's first wall is
+  `Microsoft.UI.Xaml.Controls.XamlControlsResources` activation —
+  `CLASS_E_CLASSNOTAVAILABLE` from the catalog lookup
+  (`launch-stage7c-4.log`, lines 1557–1574). A standalone guest probe loaded
+  the prefix's `Microsoft.UI.Xaml.dll` and called its
+  `DllGetActivationFactory` directly: WinUI itself answers
+  `CLASS_E_CLASSNOTAVAILABLE`, because internally it asks for
+  `Windows.UI.Xaml.PropertyMetadata` (IID `c1b81cc0-…`) and then for
+  `Windows.UI.Xaml.dll`/`windows.ui.dll`, none of which exist here. WinUI 2.x
+  is a control library layered on the inbox platform runtime; it cannot
+  serve its factory on a WinRT-only raven-xaml.dll, and cataloging
+  `Microsoft.UI.*` names would only move the failure. The policy is
+  therefore recorded rather than faked: WinUI 2.x apps are outside the
+  current platform-XAML surface until framework-package registration and the
+  platform classes WinUI asks for (starting with activatable
+  `Windows.UI.Xaml.PropertyMetadata`) exist. Evidence:
+  `launch-stage7c-1`…`-4.log`; the app still opens no window.
 - XBF input bounds (2026-10-31, stage 3): the loader validates metadata
   and declared node-stream extents, variable-length values, truncated
   operands and scope depth before returning a tree. Fixtures cover malformed

@@ -479,6 +479,56 @@ static size_t build_provider_document(unsigned char *doc)
 	return 243;
 }
 
+/* The same application page encoded the way the XAML compiler writes it: the type record's first field is 2 (an XML namespace
+ * table index, not a type-namespace table index) and the entry it names is the "using:Shapr3D.App" directive the compiler
+ * emits for the page's own XML namespace. The loader must strip the directive and resolve "Shapr3D.App.HomePage" through the
+ * provider exactly as the older encoding above does. An XML namespace that is not a "using:" directive stays unresolved. */
+static size_t build_provider_xmlns_document(unsigned char *doc, const char *xmlns)
+{
+	size_t at, assemblies, namespaces, types, properties, xmlns_table, table, metadata_size;
+	for (size_t index = 0; index < 320; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 120);              /* strings, relative to the metadata start */
+	/* the strings table at metadata+120: count, the directive, the type name */
+	put32(doc, 132, 2);
+	at = put_text(doc, 136, xmlns);
+	at = put_text(doc, at, "HomePage");
+	assemblies = at;
+	put32(doc, assemblies, 0);
+	namespaces = assemblies + 4;
+	put32(doc, namespaces, 0);
+	types = namespaces + 4;
+	put32(doc, types, 1);
+	put32(doc, types + 4, 2);         /* the XML namespace table */
+	put32(doc, types + 8, 0);         /* its first entry */
+	put32(doc, types + 12, 1);        /* "HomePage" */
+	properties = types + 16;
+	put32(doc, properties, 0);
+	xmlns_table = properties + 4;
+	put32(doc, xmlns_table, 1);
+	put32(doc, xmlns_table + 4, 0);   /* the directive string */
+	at = xmlns_table + 8;
+	metadata_size = at - 12;
+	put64(doc, 28, assemblies - 12);
+	put64(doc, 36, namespaces - 12);
+	put64(doc, 44, types - 12);
+	put64(doc, 52, properties - 12);
+	put64(doc, 60, xmlns_table - 12);
+	put32(doc, 4, (uint32_t)metadata_size);
+	put32(doc, 8, 15);
+	table = at;
+	put32(doc, table, 1);
+	put32(doc, table + 4, 0);
+	put32(doc, table + 8, 3);
+	doc[table + 12] = 0x14;           /* PushScopeCreateTypeBeginInit */
+	doc[table + 13] = 0x00;           /* type record 0 */
+	doc[table + 14] = 0x00;
+	return table + 15;
+}
+
 static void put_text_at(unsigned char *doc, size_t at, const char *text)
 {
 	size_t length = 0;
@@ -1586,6 +1636,28 @@ int raven_entry(void)
 	marker_unknown->lpVtbl->Release(marker_unknown);
 	root_unknown->lpVtbl->Release(root_unknown);
 	provider_root->lpVtbl->Release(provider_root);
+	/* The compiler's own encoding of the same page: the type record names the "using:" XML namespace directive, which the
+	 * loader strips before asking the provider. A namespace that is not a "using:" directive names no CLR type and must not
+	 * resolve. */
+	unsigned char xmlns_fixture[320];
+	IInspectable *xmlns_root = NULL;
+	HRESULT xmlns_status = load(xmlns_fixture,
+		(uint32_t)build_provider_xmlns_document(xmlns_fixture, "using:Shapr3D.App"), &xmlns_root);
+	if (xmlns_status != S_OK || !xmlns_root) return 3000 + (int)(xmlns_status & 0xffff);
+	IUnknown *xmlns_unknown = NULL, *marker_again = NULL;
+	if (xmlns_root->lpVtbl->QueryInterface(xmlns_root, &IID_IUnknown, (void **)&xmlns_unknown) != S_OK || !xmlns_unknown)
+		return 692;
+	if (marker->lpVtbl->QueryInterface(marker, &IID_IUnknown, (void **)&marker_again) != S_OK || !marker_again) return 693;
+	if (xmlns_unknown != marker_again) return 694;
+	marker_again->lpVtbl->Release(marker_again);
+	xmlns_unknown->lpVtbl->Release(xmlns_unknown);
+	xmlns_root->lpVtbl->Release(xmlns_root);
+	unsigned char foreign_fixture[320];
+	IInspectable *foreign_root = (IInspectable *)1;
+	HRESULT foreign_status = load(foreign_fixture,
+		(uint32_t)build_provider_xmlns_document(foreign_fixture, "http://schemas.microsoft.com/winfx/2006/xaml/presentation"),
+		&foreign_root);
+	if (foreign_status != E_INVALIDARG || foreign_root) return 695;
 	/* Frame navigation resolves the same application type through the provider. */
 	HSTRING app_page_key = NULL;
 	if (WindowsCreateString(app_page_name, ARRAYSIZE(app_page_name) - 1, &app_page_key) != S_OK) return 685;

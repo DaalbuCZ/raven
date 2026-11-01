@@ -1,6 +1,6 @@
 /* Generated from Windows.UI.Xaml.winmd (SHA-256 c55875b03b9829c2e6ed6ad8b2d1ba33bd80c31208ba3bcda1a12ac46eddc41d) by
- * scripts/generate-winrt-header.py. Do not edit the generated section; the parameterized-interface sections below are hand
- * derived, because a generic instantiation has no winmd of its own (see the derivation notes before each). */
+ * scripts/generate-winrt-header.py; get_MergedDictionaries is adapted to its pointer ABI. The parameterized-interface
+ * sections below are hand derived, because a generic instantiation has no winmd of its own (see the derivation notes). */
 #pragma once
 
 #include <windows.h>
@@ -25,7 +25,7 @@ typedef struct __x_ABI_CWindows_CUI_CXaml_CIResourceDictionaryVtbl {
 
 	HRESULT (STDMETHODCALLTYPE *get_Source)(__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *This, uint64_t a1);
 	HRESULT (STDMETHODCALLTYPE *put_Source)(__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *get_MergedDictionaries)(__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *This, uint64_t a1);
+	HRESULT (STDMETHODCALLTYPE *get_MergedDictionaries)(__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *This, void **a1);
 	HRESULT (STDMETHODCALLTYPE *get_ThemeDictionaries)(__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *This, uint64_t a1);
 	END_INTERFACE
 } __x_ABI_CWindows_CUI_CXaml_CIResourceDictionaryVtbl;

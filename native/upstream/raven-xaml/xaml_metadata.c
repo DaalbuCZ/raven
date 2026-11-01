@@ -32,6 +32,10 @@ struct stable_property_entry {
  * beside them, RowDefinitions and ColumnDefinitions the collections a grid holds its layout tracks in, and FontSize and
  * Foreground the text properties a TextBlock draws with. */
 static const struct stable_property_entry properties[] = {
+	{73, L"Resources"},
+	{687, L"MergedDictionaries"},
+	{688, L"Source"},
+	{689, L"ThemeDictionaries"},
 	{560, L"Template"},
 	/* ContentPresenter.ContentTemplate: the template-adjacent member beside Control.Template — the loader stores it on
 	 * the presenter element through the engine-internal store (not applied to the render yet, see the presenter
@@ -73,6 +77,7 @@ static const struct stable_property_entry properties[] = {
 
 static const struct metadata_entry entries[] = {
 	{31, L"Application", L"Windows.UI.Xaml.Application"},
+	{371, L"ResourceDictionary", L"Windows.UI.Xaml.ResourceDictionary"},
 	{141, L"Window", L"Windows.UI.Xaml.Window"},
 	{509, L"Frame", L"Windows.UI.Xaml.Controls.Frame"},
 	{525, L"Page", L"Windows.UI.Xaml.Controls.Page"},

@@ -233,13 +233,13 @@ static HRESULT WINAPI resource_put_source(resource1 *iface, uint64_t value)
 	return E_NOTIMPL;
 }
 
-static HRESULT WINAPI resource_get_merged(resource1 *iface, uint64_t out)
+static HRESULT WINAPI resource_get_merged(resource1 *iface, void **out)
 {
 	struct dictionary *self = ((struct resource_part *)iface)->owner;
 	if (!out)
 		return E_POINTER;
 	InterlockedIncrement(&self->merged->refs);
-	*(void **)(uintptr_t)out = self->merged;
+	*out = self->merged;
 	return S_OK;
 }
 

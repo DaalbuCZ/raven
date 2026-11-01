@@ -1,4 +1,4 @@
-/* Generated from Windows.UI.Xaml.winmd (SHA-256 c55875b03b9829c2e6ed6ad8b2d1ba33bd80c31208ba3bcda1a12ac46eddc41d) by scripts/generate-winrt-header.py. RequestedTheme and LoadComponent parameter types adapted to the WinRT ABI. */
+/* Generated from Windows.UI.Xaml.winmd (SHA-256 c55875b03b9829c2e6ed6ad8b2d1ba33bd80c31208ba3bcda1a12ac46eddc41d) by scripts/generate-winrt-header.py. Resources, RequestedTheme and LoadComponent parameter types adapted to the WinRT ABI. */
 #pragma once
 
 #include <windows.h>
@@ -21,8 +21,8 @@ typedef struct __x_ABI_CWindows_CUI_CXaml_CIApplicationVtbl {
 
 	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, TrustLevel *level);
 
-	HRESULT (STDMETHODCALLTYPE *get_Resources)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *put_Resources)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
+	HRESULT (STDMETHODCALLTYPE *get_Resources)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, IInspectable **a1);
+	HRESULT (STDMETHODCALLTYPE *put_Resources)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, IInspectable *a1);
 	HRESULT (STDMETHODCALLTYPE *get_DebugSettings)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
 	HRESULT (STDMETHODCALLTYPE *get_RequestedTheme)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, INT32 *a1);
 	HRESULT (STDMETHODCALLTYPE *put_RequestedTheme)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, INT32 a1);

@@ -209,6 +209,25 @@ def data_items(resources):
     return struct.pack("<IHHI", 0, len(strings), len(blobs), len(payload)) + string_table + blob_table + payload
 
 
+def application_dictionary_xbf(unknown_child=False):
+    """Application resources with two merged dictionaries, including a namespace scope."""
+    child = 0xffff if unknown_child else 0x8000 | 371
+    nodes = (b"\x12\x00\x00" + struct.pack("<I", 0) +
+             b"\x17\x1f\x80" + b"\x14\x73\x81" + b"\x13\xaf\x82" +
+             b"\x12\x00\x00" + struct.pack("<I", 0) + b"\x17" + struct.pack("<H", child) +
+             b"\x21\x08\x14\x73\x81\x21\x08\x02\x21\x02")
+    document = bytearray(188)
+    document[:4] = b"XBF\0"
+    struct.pack_into("<IIII", document, 4, 164, 12 + len(nodes), 2, 1)
+    for index, offset in enumerate((0x78, 0x8c, 0x90, 0x94, 0x98, 0x9c)):
+        struct.pack_into("<Q", document, 20 + index * 8, offset)
+    struct.pack_into("<I", document, 132, 2)
+    struct.pack_into("<IHHIHH", document, 136, 1, ord("A"), 0, 1, ord("B"), 0)
+    struct.pack_into("<II", document, 168, 1, 0)
+    struct.pack_into("<III", document, 176, 1, 0, len(nodes))
+    return bytes(document) + nodes
+
+
 def textblock_xbf():
     """A TextBlock plus a two-entry null-terminated metadata string table."""
     nodes = b"\x14\x8c\x81\x1a\x20\x83\x09" + struct.pack("<I", 6) + "Loaded".encode("utf-16le") + b"\x02"
@@ -279,6 +298,8 @@ def main():
         malformed = bytearray(textblock_xbf())
         malformed[142] = 1  # the first string's required terminator
         resources["Files/Fixture/Invalid.xbf"] = bytes(malformed)
+        resources["Files/Fixture/Dictionaries.xbf"] = application_dictionary_xbf()
+        resources["Files/Fixture/MissingType.xbf"] = application_dictionary_xbf(unknown_child=True)
     args.out.write_bytes(build(resources, args.extended))
     print(f"{args.out}: {len(resources)} resources")
 
