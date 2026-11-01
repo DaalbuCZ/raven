@@ -1456,6 +1456,15 @@ the same day — see the two entries below. Evidence:
   from the test prefix; it had made earlier traces look as if the current
   component was running. `RAVEN_TRACE_STRINGS=1` now renders created
   HSTRINGs in the API trace, which is how the failing class name was read.
+  Loading the prefix's `Microsoft.UI.Xaml.dll` from a freestanding probe and
+  calling its `DllGetActivationFactory` directly no longer even answers:
+  after the `PropertyMetadata` work it faults at load
+  (`microsoft.ui.xaml.dll+45d8f`, reading `0x1400021d0`) before any factory
+  is asked for. Its 148 imports include the eventing provider, threadpool,
+  COM activation and locale surface, none of which this platform provides;
+  the WinUI 2.x ceiling recorded above therefore still holds, now with a
+  fault rather than a `CLASS_E_CLASSNOTAVAILABLE` answer as evidence. The
+  probe and its copied library were removed again.
 
 ## Performance rules
 
