@@ -565,6 +565,97 @@ static HRESULT set_application_resources(IInspectable *parent, IInspectable *chi
 	app->lpVtbl->Release(app);
 	return result;
 }
+/* One open scope. kind 0 is an element scope; 1 a ControlTemplate whose root element has not arrived; 2 a
+ * ControlTemplate whose root is attached. A template scope defers its application to the target the pending property
+ * named until the scope pops — the compiled document creates the template object before the elements inside it, and the
+ * control must store the template only once its root is attached, so the presenter binding (and every later read of the
+ * template) sees the final tree. The deferred target is a borrowed pointer into the scope below. */
+struct scope {
+	IInspectable *object;
+	unsigned char kind;
+	IInspectable *deferred_target;
+	const WCHAR *deferred_name;
+	UINT32 deferred_length;
+};
+
+/* The application's resource dictionary: the last stage of a lookup. Owned by the caller. */
+static HRESULT application_resources(IInspectable **out)
+{
+	IInspectable *current = NULL;
+	application_i *app = NULL;
+	HRESULT result;
+	*out = NULL;
+	result = raven_xaml_application_current(&current);
+	if (FAILED(result) || !current)
+		return E_BOUNDS;
+	result = IInspectable_QueryInterface(current, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&app);
+	IInspectable_Release(current);
+	if (FAILED(result) || !app)
+		return E_BOUNDS;
+	result = app->lpVtbl->get_Resources(app, out);
+	app->lpVtbl->Release(app);
+	if (SUCCEEDED(result) && !*out)
+		return E_BOUNDS;
+	return result;
+}
+
+/* The theme a ThemeResource lookup selects: the application's requested theme, named the way ThemeDictionaries keys are.
+ * Without an application (or with the default Light theme) the "Light" selector applies; "Default" is the fallback. */
+static void requested_theme_name(const WCHAR **name, UINT32 *length)
+{
+	static const WCHAR light[] = L"Light";
+	static const WCHAR dark[] = L"Dark";
+	IInspectable *current = NULL;
+	application_i *app = NULL;
+	INT32 theme = 0;
+	*name = light;
+	*length = ARRAYSIZE(light) - 1;
+	if (FAILED(raven_xaml_application_current(&current)) || !current)
+		return;
+	if (SUCCEEDED(IInspectable_QueryInterface(current, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&app)) && app) {
+		if (FAILED(app->lpVtbl->get_RequestedTheme(app, &theme)))
+			theme = 0;
+		app->lpVtbl->Release(app);
+	}
+	IInspectable_Release(current);
+	/* ApplicationTheme: Light is 0, Dark is 1. */
+	if (theme == 1) {
+		*name = dark;
+		*length = ARRAYSIZE(dark) - 1;
+	}
+}
+
+/* The value a StaticResource or ThemeResource names: the resources of the innermost scope first, then each enclosing scope,
+ * then Application.Resources. Within one dictionary the lookup handles merged dictionaries (newest-first) and, for a theme
+ * resource, the theme stage. */
+static HRESULT resolve_resource(const struct scope *stack, size_t depth, int theme_resource, const WCHAR *key,
+	UINT32 length, IInspectable **out)
+{
+	const WCHAR *theme = NULL;
+	UINT32 theme_length = 0;
+	IInspectable *dictionary = NULL;
+	HRESULT result = E_BOUNDS;
+	*out = NULL;
+	if (theme_resource)
+		requested_theme_name(&theme, &theme_length);
+	for (size_t index = depth; index; ) {
+		dictionary = raven_xaml_element_resources_existing(stack[--index].object);
+		if (!dictionary)
+			continue;
+		result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
+			raven_xaml_dictionary_lookup(dictionary, key, length, out);
+		if (SUCCEEDED(result))
+			return result;
+	}
+	result = application_resources(&dictionary);
+	if (FAILED(result) || !dictionary)
+		return E_BOUNDS;
+	result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
+		raven_xaml_dictionary_lookup(dictionary, key, length, out);
+	IInspectable_Release(dictionary);
+	return result;
+}
+
 static HRESULT get_merged_dictionaries(IInspectable *object, IInspectable **out)
 {
 	dictionary_i *dictionary = NULL;
@@ -649,19 +740,6 @@ done:
 }
 
 #define LOADER_DEPTH 64
-
-/* One open scope. kind 0 is an element scope; 1 a ControlTemplate whose root element has not arrived; 2 a
- * ControlTemplate whose root is attached. A template scope defers its application to the target the pending property
- * named until the scope pops — the compiled document creates the template object before the elements inside it, and the
- * control must store the template only once its root is attached, so the presenter binding (and every later read of the
- * template) sees the final tree. The deferred target is a borrowed pointer into the scope below. */
-struct scope {
-	IInspectable *object;
-	unsigned char kind;
-	IInspectable *deferred_target;
-	const WCHAR *deferred_name;
-	UINT32 deferred_length;
-};
 
 static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root,
 	IInspectable *target, BOOL *target_used)
@@ -975,15 +1053,29 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			break;
 		}
 		case 26: case 27: case 30: case 36: {
+			/* 26/27 carry the value as the constant that follows the property; 30 (StaticResource) and 36 (ThemeResource)
+			 * carry a resource key instead and the value is the one the scope stack resolves it to. A StringReference
+			 * constant is the key form a compiled document uses. */
 			const uint16_t reference = next_u16(&r);
 			const WCHAR *name = NULL;
 			UINT32 length = 0;
+			const int resource = kind == 30 || kind == 36;
 			struct value value = {value_none, NULL, 0, 0, 0};
 			status = read_constant(&r, m, &value);
 			if (FAILED(status))
 				goto done;
 			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length))) {
-				HRESULT applied = apply_value(stack[depth - 1].object, name, length, &value);
+				HRESULT applied = S_FALSE;
+				if (!resource) {
+					applied = apply_value(stack[depth - 1].object, name, length, &value);
+				} else if (value.kind == value_string && value.text) {
+					IInspectable *resolved = NULL;
+					if (SUCCEEDED(resolve_resource(stack, depth, kind == 36, value.text, value.length, &resolved)) &&
+						resolved) {
+						applied = raven_xaml_element_apply_value(stack[depth - 1].object, name, length, resolved);
+						IInspectable_Release(resolved);
+					}
+				}
 				if (target && applied != S_OK) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
 			} else if (target) { status = E_NOTIMPL; goto done; }
 			break;

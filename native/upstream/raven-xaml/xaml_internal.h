@@ -72,6 +72,11 @@ HRESULT raven_xaml_element_set_text(IInspectable *object, const WCHAR *name, UIN
  * so the loader refuses the form instead of applying a guess. */
 HRESULT raven_xaml_element_set_type(IInspectable *object, const WCHAR *name, UINT32 length, const WCHAR *type_name,
 	UINT32 type_length);
+HRESULT raven_xaml_element_apply_value(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
+IInspectable *raven_xaml_element_resources_existing(IInspectable *object);
+HRESULT raven_xaml_dictionary_lookup(IInspectable *dictionary, const WCHAR *text, UINT32 length, IInspectable **out);
+HRESULT raven_xaml_dictionary_lookup_theme(IInspectable *dictionary, const WCHAR *text, UINT32 length,
+	const WCHAR *theme, UINT32 theme_length, IInspectable **out);
 HRESULT raven_xaml_element_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
 HRESULT raven_xaml_window_set_name(IInspectable *object, const WCHAR *text, UINT32 length);
 BOOL raven_xaml_window_notify(DWORD reason, void *reserved);

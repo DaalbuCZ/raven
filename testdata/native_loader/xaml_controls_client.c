@@ -319,6 +319,131 @@ static size_t build_style_document(unsigned char *doc)
 	return 177;
 }
 
+/* A Grid whose resources hold "Greeting" = "Hi" and whose TextBlock takes its Text (800) from that key through
+ * SetValueFromStaticResource (node 30) with a StringReference constant, the form a compiled page uses. The metadata
+ * section carries the one string the key names. */
+static size_t build_static_resource_document(unsigned char *doc)
+{
+	for (size_t index = 0; index < 174; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 112);
+	put32(doc, 8, 50);
+	put64(doc, 20, 56); /* the string table, holding "Greeting" */
+	put64(doc, 28, 80);
+	put64(doc, 36, 84);
+	put64(doc, 44, 88);
+	put64(doc, 52, 92);
+	put64(doc, 60, 96);
+	put32(doc, 68, 1);
+	put32(doc, 72, 8);
+	doc[76] = 'G'; doc[78] = 'r'; doc[80] = 'e'; doc[82] = 'e';
+	doc[84] = 't'; doc[86] = 'i'; doc[88] = 'n'; doc[90] = 'g';
+	put32(doc, 124, 1);
+	put32(doc, 128, 0);
+	put32(doc, 132, 38);
+	doc[136] = 0x14; /* create Grid (442) */
+	doc[137] = (unsigned char)(442 & 0xff);
+	doc[138] = (unsigned char)((442 >> 8) | 0x80);
+	doc[139] = 0x07; /* SetValue FrameworkElement.Resources (404) */
+	doc[140] = (unsigned char)(404 & 0xff);
+	doc[141] = (unsigned char)((404 >> 8) | 0x80);
+	doc[142] = 0x14; /* create ResourceDictionary (371) */
+	doc[143] = (unsigned char)(371 & 0xff);
+	doc[144] = (unsigned char)((371 >> 8) | 0x80);
+	doc[145] = 0x04; /* PushConstant "Hi" */
+	doc[146] = 0x09;
+	put32(doc, 147, 2);
+	doc[151] = 'H'; doc[153] = 'i';
+	doc[155] = 0x0a; /* AddToDictionaryWithKey StringReference 0: "Greeting" */
+	doc[156] = 0x05;
+	doc[157] = 0; doc[158] = 0;
+	doc[159] = 0x21; /* close the dictionary scope */
+	doc[160] = 0x07; /* SetValue Panel.Children (648) */
+	doc[161] = (unsigned char)(648 & 0xff);
+	doc[162] = (unsigned char)((648 >> 8) | 0x80);
+	doc[163] = 0x14; /* create TextBlock (396) */
+	doc[164] = (unsigned char)(396 & 0xff);
+	doc[165] = (unsigned char)((396 >> 8) | 0x80);
+	doc[166] = 0x1e; /* SetValueFromStaticResource Text (800), key StringReference 0 */
+	doc[167] = (unsigned char)(800 & 0xff);
+	doc[168] = (unsigned char)((800 >> 8) | 0x80);
+	doc[169] = 0x05;
+	doc[170] = 0; doc[171] = 0;
+	doc[172] = 0x21; /* close the text block scope */
+	doc[173] = 0x21; /* close the grid scope */
+	return 174;
+}
+
+/* A Grid whose resources carry ThemeDictionaries (689) with a "Light" dictionary holding "Greeting" = "Themed", and
+ * whose TextBlock takes its Text through SetValueFromThemeResource (node 36). The application's requested theme defaults
+ * to Light, which is the selector the lookup uses; "Default" is the fallback when no selector matches. */
+static size_t build_theme_resource_document(unsigned char *doc)
+{
+	for (size_t index = 0; index < 210; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 128);
+	put32(doc, 8, 70);
+	put64(doc, 20, 56); /* the string table: "Greeting" (0), "Light" (1) */
+	put64(doc, 28, 94);
+	put64(doc, 36, 98);
+	put64(doc, 44, 102);
+	put64(doc, 52, 106);
+	put64(doc, 60, 110);
+	put32(doc, 68, 2);
+	put32(doc, 72, 8);
+	doc[76] = 'G'; doc[78] = 'r'; doc[80] = 'e'; doc[82] = 'e';
+	doc[84] = 't'; doc[86] = 'i'; doc[88] = 'n'; doc[90] = 'g';
+	put32(doc, 92, 5);
+	doc[96] = 'L'; doc[98] = 'i'; doc[100] = 'g'; doc[102] = 'h'; doc[104] = 't';
+	put32(doc, 140, 1);
+	put32(doc, 144, 0);
+	put32(doc, 148, 58);
+	doc[152] = 0x14; /* create Grid (442) */
+	doc[153] = (unsigned char)(442 & 0xff);
+	doc[154] = (unsigned char)((442 >> 8) | 0x80);
+	doc[155] = 0x07; /* SetValue FrameworkElement.Resources (404) */
+	doc[156] = (unsigned char)(404 & 0xff);
+	doc[157] = (unsigned char)((404 >> 8) | 0x80);
+	doc[158] = 0x14; /* create the page's ResourceDictionary (371) */
+	doc[159] = (unsigned char)(371 & 0xff);
+	doc[160] = (unsigned char)((371 >> 8) | 0x80);
+	doc[161] = 0x13; /* PushScopeGetValue ThemeDictionaries (689) */
+	doc[162] = (unsigned char)(689 & 0xff);
+	doc[163] = (unsigned char)((689 >> 8) | 0x80);
+	doc[164] = 0x14; /* create the "Light" ResourceDictionary (371) */
+	doc[165] = (unsigned char)(371 & 0xff);
+	doc[166] = (unsigned char)((371 >> 8) | 0x80);
+	doc[167] = 0x04; /* PushConstant "Themed" */
+	doc[168] = 0x09;
+	put32(doc, 169, 6);
+	doc[173] = 'T'; doc[175] = 'h'; doc[177] = 'e'; doc[179] = 'm'; doc[181] = 'e'; doc[183] = 'd';
+	doc[185] = 0x0a; /* AddToDictionaryWithKey "Greeting" */
+	doc[186] = 0x05;
+	doc[187] = 0; doc[188] = 0;
+	doc[189] = 0x21; /* close the dictionary: the theme map receives it */
+	doc[190] = 0x0a; /* AddToDictionaryWithKey "Light" */
+	doc[191] = 0x05;
+	doc[192] = 1; doc[193] = 0;
+	doc[194] = 0x21; /* close the theme map */
+	doc[195] = 0x21; /* close the page dictionary */
+	doc[196] = 0x07; /* SetValue Panel.Children (648) */
+	doc[197] = (unsigned char)(648 & 0xff);
+	doc[198] = (unsigned char)((648 >> 8) | 0x80);
+	doc[199] = 0x14; /* create TextBlock (396) */
+	doc[200] = (unsigned char)(396 & 0xff);
+	doc[201] = (unsigned char)((396 >> 8) | 0x80);
+	doc[202] = 0x24; /* SetValueFromThemeResource Text (800), key "Greeting" */
+	doc[203] = (unsigned char)(800 & 0xff);
+	doc[204] = (unsigned char)((800 >> 8) | 0x80);
+	doc[205] = 0x05;
+	doc[206] = 0; doc[207] = 0;
+	doc[208] = 0x21;
+	doc[209] = 0x21;
+	return 210;
+}
+
 /* A Grid whose FrameworkElement.Resources (404) arrives the way a compiled page carries it: a SetValue naming the property
  * and a ResourceDictionary (371) scope that follows it without being applied as a child. The dictionary holds one entry
  * ("Title" = "Hello") so the fixture can tell the compiled dictionary from an empty one. */
@@ -1232,6 +1357,66 @@ int raven_entry(void)
 		created->lpVtbl->Release(created);
 		compiled->lpVtbl->Release(compiled);
 		resources_root->lpVtbl->Release(resources_root);
+	}
+	/* A SetValueFromStaticResource node resolves the key against the enclosing element's resources and applies the value:
+	 * the TextBlock's Text becomes the dictionary entry. */
+	{
+		unsigned char lookup_fixture[174];
+		IInspectable *lookup_root = NULL, *children_object = NULL, *text_object = NULL;
+		struct fixture_vector *children = NULL;
+		panel1 *lookup_panel = NULL;
+		textblock1 *lookup_text = NULL;
+		HSTRING resolved_text = NULL;
+		UINT32 child_count = 0;
+		if (load(lookup_fixture, (uint32_t)build_static_resource_document(lookup_fixture), &lookup_root) != S_OK ||
+			!lookup_root) return 719;
+		if (lookup_root->lpVtbl->QueryInterface(lookup_root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+			(void **)&lookup_panel) != S_OK || !lookup_panel) return 720;
+		if (lookup_panel->lpVtbl->get_Children(lookup_panel, (uint64_t)(uintptr_t)&children_object) != S_OK ||
+			!children_object) return 721;
+		children = (struct fixture_vector *)children_object;
+		if (children->lpVtbl->get_Size(children, &child_count) != S_OK || child_count != 1) return 722;
+		if (children->lpVtbl->GetAt(children, 0, &text_object) != S_OK || !text_object) return 723;
+		if (text_object->lpVtbl->QueryInterface(text_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+			(void **)&lookup_text) != S_OK || !lookup_text) return 724;
+		if (lookup_text->lpVtbl->get_Text(lookup_text, (uint64_t)(uintptr_t)&resolved_text) != S_OK || !resolved_text ||
+			!same(resolved_text, L"Hi", 2)) return 725;
+		WindowsDeleteString(resolved_text);
+		lookup_text->lpVtbl->Release(lookup_text);
+		text_object->lpVtbl->Release(text_object);
+		children->lpVtbl->Release(children);
+		lookup_panel->lpVtbl->Release(lookup_panel);
+		lookup_root->lpVtbl->Release(lookup_root);
+	}
+	/* A SetValueFromThemeResource node selects the dictionary the requested theme names ("Light" by default) and resolves
+	 * the key there. */
+	{
+		unsigned char theme_fixture[210];
+		IInspectable *theme_root = NULL, *children_object = NULL, *text_object = NULL;
+		struct fixture_vector *children = NULL;
+		panel1 *theme_panel = NULL;
+		textblock1 *theme_text = NULL;
+		HSTRING theme_value = NULL;
+		UINT32 child_count = 0;
+		if (load(theme_fixture, (uint32_t)build_theme_resource_document(theme_fixture), &theme_root) != S_OK ||
+			!theme_root) return 726;
+		if (theme_root->lpVtbl->QueryInterface(theme_root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+			(void **)&theme_panel) != S_OK || !theme_panel) return 727;
+		if (theme_panel->lpVtbl->get_Children(theme_panel, (uint64_t)(uintptr_t)&children_object) != S_OK ||
+			!children_object) return 728;
+		children = (struct fixture_vector *)children_object;
+		if (children->lpVtbl->get_Size(children, &child_count) != S_OK || child_count != 1) return 729;
+		if (children->lpVtbl->GetAt(children, 0, &text_object) != S_OK || !text_object) return 730;
+		if (text_object->lpVtbl->QueryInterface(text_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+			(void **)&theme_text) != S_OK || !theme_text) return 731;
+		if (theme_text->lpVtbl->get_Text(theme_text, (uint64_t)(uintptr_t)&theme_value) != S_OK || !theme_value ||
+			!same(theme_value, L"Themed", 6)) return 732;
+		WindowsDeleteString(theme_value);
+		theme_text->lpVtbl->Release(theme_text);
+		text_object->lpVtbl->Release(text_object);
+		children->lpVtbl->Release(children);
+		theme_panel->lpVtbl->Release(theme_panel);
+		theme_root->lpVtbl->Release(theme_root);
 	}
 
 	unsigned char property_fixture[194];

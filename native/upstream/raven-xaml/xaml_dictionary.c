@@ -435,6 +435,105 @@ static HRESULT WINAPI map_trust(__FIMap_2_IInspectable_IInspectable *iface, Trus
 	return inspectable_trust(level);
 }
 
+/* One store's content lookup: the key a compiled document names resolves through the same boxed-string comparison the map
+ * uses, so a resource key and an entry inserted by the document meet in the middle. */
+static HRESULT store_lookup(struct dictionary_store *store, const WCHAR *text, UINT32 length, IInspectable **out)
+{
+	IInspectable *key;
+	struct dictionary_entry *entry;
+	HRESULT result = E_BOUNDS;
+	if (!out || !text)
+		return E_POINTER;
+	*out = NULL;
+	key = raven_xaml_boxed_string(text, length);
+	if (!key)
+		return E_OUTOFMEMORY;
+	entry = store_find(store, key);
+	if (entry && entry->value) {
+		entry->value->lpVtbl->AddRef(entry->value);
+		*out = entry->value;
+		result = S_OK;
+	}
+	key->lpVtbl->Release(key);
+	return result;
+}
+
+/* The dictionary a QI handed back is one identity: its map part names the owner and the store that part reads. */
+static struct dictionary *dictionary_of(IInspectable *object)
+{
+	__FIMap_2_IInspectable_IInspectable *map = NULL;
+	struct dictionary *self = NULL;
+	if (!object)
+		return NULL;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map)) || !map)
+		return NULL;
+	self = ((struct map_part *)map)->owner;
+	map->lpVtbl->Release(map);
+	return self;
+}
+
+#define LOOKUP_DEPTH 16
+
+/* Resource lookup in one dictionary: its own entries first, then its merged dictionaries newest-first, the same precedence
+ * the real lookup gives a merged dictionary appended later. Theme dictionaries are a separate stage (see below). */
+static HRESULT dictionary_lookup_depth(struct dictionary *self, const WCHAR *text, UINT32 length, IInspectable **out,
+	int depth)
+{
+	HRESULT result = store_lookup(&self->store, text, length, out);
+	if (SUCCEEDED(result) || depth >= LOOKUP_DEPTH)
+		return result;
+	for (UINT32 index = self->merged->count; index; ) {
+		struct dictionary *merged = dictionary_of((IInspectable *)self->merged->items[--index]);
+		if (!merged)
+			continue;
+		result = dictionary_lookup_depth(merged, text, length, out, depth + 1);
+		if (SUCCEEDED(result))
+			return result;
+	}
+	return E_BOUNDS;
+}
+
+HRESULT raven_xaml_dictionary_lookup(IInspectable *object, const WCHAR *text, UINT32 length, IInspectable **out)
+{
+	struct dictionary *self;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	self = dictionary_of(object);
+	if (!self)
+		return E_NOINTERFACE;
+	return dictionary_lookup_depth(self, text, length, out, 0);
+}
+
+/* A theme resource adds the ThemeDictionaries stage: the selector the requested theme names ("Dark"/"Light"), then
+ * "Default", each one a dictionary the entry is looked up in. The plain stage runs first, as in the real lookup. */
+HRESULT raven_xaml_dictionary_lookup_theme(IInspectable *object, const WCHAR *text, UINT32 length,
+	const WCHAR *theme, UINT32 theme_length, IInspectable **out)
+{
+	static const WCHAR fallback[] = L"Default";
+	struct dictionary *self;
+	IInspectable *selected = NULL;
+	HRESULT result;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	self = dictionary_of(object);
+	if (!self)
+		return E_NOINTERFACE;
+	result = dictionary_lookup_depth(self, text, length, out, 0);
+	if (SUCCEEDED(result))
+		return result;
+	if (theme && theme_length)
+		result = store_lookup(&self->themes, theme, theme_length, &selected);
+	if (FAILED(result))
+		result = store_lookup(&self->themes, fallback, ARRAYSIZE(fallback) - 1, &selected);
+	if (FAILED(result) || !selected)
+		return E_BOUNDS;
+	result = raven_xaml_dictionary_lookup(selected, text, length, out);
+	selected->lpVtbl->Release(selected);
+	return result;
+}
+
 static HRESULT WINAPI map_lookup(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key, IInspectable **value)
 {
 	struct map_part *part = (struct map_part *)iface;

@@ -2641,6 +2641,17 @@ HRESULT __declspec(dllexport) raven_xaml_element_put_resources(IInspectable *obj
 	return S_OK;
 }
 
+/* The dictionary the element holds, borrowed and not created: resource lookup walks the scope stack and must not turn
+ * every element it passes into one that owns an empty dictionary. */
+IInspectable *raven_xaml_element_resources_existing(IInspectable *object)
+{
+	IInspectable **slot;
+	if (!object)
+		return NULL;
+	slot = element_resources_slot(object);
+	return slot ? *slot : NULL;
+}
+
 HRESULT __declspec(dllexport) raven_xaml_element_get_resources(IInspectable *object, IInspectable **out)
 {
 	IInspectable **slot;
@@ -2971,54 +2982,85 @@ static HRESULT style_apply_dispatch(void *context, const WCHAR *name, UINT32 len
 	return target->apply(target->state, name, length, value, check_only);
 }
 
-/* The fixture-facing exports of the style property; the component exports only what it marks, so the style fixture reaches
- * these through GetProcAddress the way it reaches RavenXamlLoad. */
-__declspec(dllexport) HRESULT raven_xaml_element_put_style(IInspectable *object, IInspectable *style)
+/* The element's setter application: which class it is, its state, and the slot its owned style reference lives in. Both the
+ * Style put and a resource value resolved by the loader go through it. */
+static int element_style_target(IInspectable *object, struct style_target *target)
 {
 	grid1 *grid = NULL;
 	textblock1 *textblock = NULL;
 	button1 *button = NULL;
+	if (!object || !target)
+		return 0;
+	target->slot = NULL;
+	target->state = NULL;
+	target->apply = NULL;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl != &grid1_table) {
+			grid->lpVtbl->Release(grid);
+			return 0;
+		}
+		struct grid *self = ((struct grid1_part *)grid)->owner;
+		target->slot = &self->style;
+		target->state = self;
+		target->apply = grid_apply_setter;
+		grid->lpVtbl->Release(grid);
+		return 1;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+		(void **)&textblock)) && textblock) {
+		if (textblock->lpVtbl != &textblock_table) {
+			textblock->lpVtbl->Release(textblock);
+			return 0;
+		}
+		struct textblock *self = (struct textblock *)textblock;
+		target->slot = &self->style;
+		target->state = self;
+		target->apply = textblock_apply_setter;
+		textblock->lpVtbl->Release(textblock);
+		return 1;
+	}
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+		(void **)&button)) && button) {
+		if (button->lpVtbl != &button1_table) {
+			button->lpVtbl->Release(button);
+			return 0;
+		}
+		struct button *self = ((struct button1_part *)button)->owner;
+		target->slot = &self->style;
+		target->state = self;
+		target->apply = button_apply_setter;
+		button->lpVtbl->Release(button);
+		return 1;
+	}
+	return 0;
+}
+
+/* A value the loader resolved from a resource dictionary: object properties first (Style, Resources, Template, Content),
+ * then the per-kind setter stores, so a resource holding a brush, a colour name or a number lands where a style setter
+ * would put it. S_FALSE is the skip convention for a name and element the engine stores nowhere. */
+HRESULT __declspec(dllexport) raven_xaml_element_apply_value(IInspectable *object, const WCHAR *name, UINT32 length,
+	IInspectable *value)
+{
 	struct style_target target;
 	HRESULT result;
 	if (!object)
 		return E_POINTER;
-	target.slot = NULL;
-	target.state = NULL;
-	target.apply = NULL;
-	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
-		if (grid->lpVtbl != &grid1_table) {
-			grid->lpVtbl->Release(grid);
-			return S_FALSE;
-		}
-		struct grid *self = ((struct grid1_part *)grid)->owner;
-		target.slot = &self->style;
-		target.state = self;
-		target.apply = grid_apply_setter;
-		grid->lpVtbl->Release(grid);
-	} else if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
-		(void **)&textblock)) && textblock) {
-		if (textblock->lpVtbl != &textblock_table) {
-			textblock->lpVtbl->Release(textblock);
-			return S_FALSE;
-		}
-		struct textblock *self = (struct textblock *)textblock;
-		target.slot = &self->style;
-		target.state = self;
-		target.apply = textblock_apply_setter;
-		textblock->lpVtbl->Release(textblock);
-	} else if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
-		if (button->lpVtbl != &button1_table) {
-			button->lpVtbl->Release(button);
-			return S_FALSE;
-		}
-		struct button *self = ((struct button1_part *)button)->owner;
-		target.slot = &self->style;
-		target.state = self;
-		target.apply = button_apply_setter;
-		button->lpVtbl->Release(button);
-	} else {
+	result = raven_xaml_elements_set_object(object, name, length, value);
+	if (result != S_FALSE || !element_style_target(object, &target))
+		return result;
+	return target.apply(target.state, name, length, value, FALSE);
+}
+
+/* The fixture-facing exports of the style property; the component exports only what it marks, so the style fixture reaches
+ * these through GetProcAddress the way it reaches RavenXamlLoad. */
+__declspec(dllexport) HRESULT raven_xaml_element_put_style(IInspectable *object, IInspectable *style)
+{
+	struct style_target target;
+	HRESULT result;
+	if (!object)
+		return E_POINTER;
+	if (!element_style_target(object, &target))
 		return S_FALSE;
-	}
 	/* Validate the whole chain before anything lands: a wrong-kind setter fails the put with E_INVALIDARG and the element
 	 * keeps its previous state, including the style it already had. */
 	if (style) {

@@ -1462,6 +1462,24 @@ the same day — see the two entries below. Evidence:
   is `__cdecl` popped the arguments twice and corrupted the 32-bit stack; the
   engine-internal exports are all `__cdecl`, and guest declarations of them
   must omit `WINAPI`.
+- Resource lookup and resource-valued properties (2026-11-01, stage 3):
+  `SetValueFromStaticResource` (node 30) and `SetValueFromThemeResource` (node 36) now carry a resource key — a
+  StringReference constant, the form `welcome.xbf` uses for `FrameworkElement.Style`,
+  `TextElement.Foreground` and application properties — instead of a literal value. The key resolves through the
+  resources of the innermost open scope first and then each enclosing scope, then through `Application.Resources`, the
+  documented lookup order. Inside one dictionary the own entries win, then `MergedDictionaries` newest-first, the
+  precedence that makes a later merged dictionary override an earlier one; a theme resource adds the theme stage —
+  the `ThemeDictionaries` entry named by the application's `RequestedTheme` (`Light` for the default 0, `Dark` for 1),
+  falling back to `Default`. The resolved object is applied through the element's setter application (object properties
+  through `raven_xaml_elements_set_object`, values through the same per-kind stores a style setter uses), so a resource
+  holding a string reaches `Text` the way a literal does. A key that resolves nowhere is skipped when no target is
+  present and is `E_NOTIMPL` with a target, consistent with the loader's other unapplied forms.
+  `raven_xaml_element_resources_existing` hands the loader the slot without creating a dictionary for elements it only
+  walks past. `scripts/inspect-xbf.py`'s sibling dumper (kept out of the tree) confirmed the operand form and the
+  placement of these nodes in a real page document. The x64/x86 fixtures check a static lookup ending in the resolved
+  `Text` (checks 719–725) and a theme lookup through a `Light` theme dictionary (checks 726–732).
+  `ProvideStaticResourceValue`/`ProvideThemeResourceValue` (nodes 34/35) still refuse: no collected document has shown
+  their operand form, and guessing it would corrupt the node stream.
 - Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
   fresh trace and the current component the first wall is still
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`
