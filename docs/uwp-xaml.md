@@ -1306,12 +1306,11 @@ the same day — see the two entries below. Evidence:
   notifications, corruption refusal, deletion safety and ABA behavior across
   separate processes on x64 and x86. Unsupported boxed types still return
   errors; concurrent updates across processes are not coordinated.
-  Shapr3D now gets through `CreateContainer` and reaches a managed
-  `COR_E_KEYNOTFOUND` (`0x80131577`) for the absent
-  `userPreferences.Values["inputDevice.usedPointerDevices"]` entry. The
-  exception message is `key`; the app directly indexes the map. The key is
-  absent on a fresh prefix and no defensible default value or type is visible
-  in the artifact, so the WinRT `E_BOUNDS` miss behavior remains intact.
+  Shapr3D originally failed with `COR_E_KEYNOTFOUND` when indexing absent
+  preferences. Microsoft documents that a missing LocalSettings value is null
+  in C# ([settings guide](https://learn.microsoft.com/en-us/windows/uwp/get-started/settings-learning-track));
+  the values map now returns a successful null for an absent key. With that fix
+  the app gets through the fresh-prefix preference lookups without seeded values.
   `RoOriginateLanguageException` diagnostics can now include the HRESULT and
   message when `RAVEN_TRACE_EXCEPTIONS` is set.
 - LocalSettings values clear (2026-10-31): `IMap.Clear` validates every
@@ -1323,11 +1322,43 @@ the same day — see the two entries below. Evidence:
 - Disposable preference probe (2026-10-31): placing empty boxed strings in an
   isolated prefix for `inputDevice.usedPointerDevices` and then `device.id`
   advanced execution to `settings.requestedTheme`. Supplying a third empty
-  string advanced it to a separate `E_NOTIMPL` during startup; the originating
-  method is not yet identified. These experiments establish neither the correct
-  types nor defaults and do not justify seeding real settings. The temporary
+  string advanced it to `Application.RequestedTheme`, whose getter and setter
+  were unimplemented. The getter and setter now store the application's selected
+  light/dark value, defaulting to light. Theme-specific resource selection,
+  system preference and rejecting changes after startup remain unimplemented.
+  These experiments establish neither the correct types nor defaults and do not justify seeding real settings. The temporary
   records were removed. The language view's `GetMany` now propagates failure
   from string creation instead of reporting a successful empty result.
+- Fresh-prefix startup (2026-10-31): `Application.Start` now invokes the
+  composed application's `OnWindowCreated` and `OnLaunched` overrides and runs
+  the CoreWindow dispatcher until exit. The base override interface supports
+  calls from the composed app, and launch arguments expose a false prelaunch
+  flag. X64 and x86 fixtures check callback order, arguments and shutdown.
+  Shapr3D now reaches `OnLaunched` on a fresh prefix. The direct XAML startup
+  path does not yet provide a `CoreApplicationView` session or other activation
+  kinds.
+- URI activation (2026-10-31): `Windows.Foundation.Uri` now exposes its
+  factory, URI, stringable and weak-reference interfaces. Simple absolute
+  hierarchical ASCII URIs retain their raw text and expose scheme, path, query
+  and fragment. Normalization, escaped and non-ASCII forms, complex authorities,
+  relative resolution and several component getters still return `E_NOTIMPL`;
+  this is a limited parser, not a complete WinRT URI implementation. The x64 and
+  x86 fixtures cover the supported form, identity and unsupported inputs.
+  Shapr3D creates `ms-appx:///App/App.xaml` and hands it to
+  `Application.LoadComponent` (see the next entry).
+- Application.LoadComponent (2026-10-31, stage 3): the three-argument
+  `LoadComponent` resolves an `ms-appx:///…xaml` locator through the PRI
+  (`/Files/…xbf`, the compiled form of the same path), fetches the blob,
+  and loads it into the supplied application instance; the two-argument
+  form goes through the same path and the location argument accepts only
+  "from URI" (`E_NOTIMPL` for XAML-island form, `E_INVALIDARG` otherwise).
+  Escaped, qualified, backslash or query/fragment locators are refused
+  with `E_NOTIMPL` rather than guessed. `scripts/make_test_pri.py` grew
+  an `--extended` mode to embed real XBF blobs, and
+  `native_load_component_x64`/`_x32` cover the resolved load, the
+  supplied instance receiving the tree, and the refusals;
+  `native_mrt_extended_x64`/`_x32` cover the extended PRI. Shapr3D gets
+  past the `LoadComponent` call on this path.
 - XBF input bounds (2026-10-31, stage 3): the loader validates metadata
   and declared node-stream extents, variable-length values, truncated
   operands and scope depth before returning a tree. Fixtures cover malformed
