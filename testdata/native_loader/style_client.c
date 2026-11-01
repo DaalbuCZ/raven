@@ -471,7 +471,8 @@ static HRESULT WINAPI metadata_default_value(metadata_i *iface, IInspectable **v
 	return S_OK;
 }
 
-static HRESULT WINAPI metadata_create_callback(metadata_i *iface, void **value)
+static HRESULT WINAPI metadata_create_callback(metadata_i *iface,
+	__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback **value)
 {
 	(void)iface;
 	if (!value)
@@ -509,6 +510,85 @@ static void fixture_metadata_release(struct fixture_metadata *self)
 {
 	if (self)
 		fixture_metadata_release_any(self);
+}
+
+/* A hand-rolled ICreateDefaultValueCallback: the lazy default creator a factory-backed PropertyMetadata holds. The
+ * delegate ABI is IUnknown plus one Invoke slot; the fixture answers the value it was built with and counts the calls,
+ * so the engine invoking it exactly when a default is needed is provable. */
+typedef __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback create_cb_i;
+struct fixture_create_cb {
+	const __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallbackVtbl *lpVtbl;
+	LONG refs;
+	IInspectable *value;
+	LONG invoked;
+};
+
+static ULONG fixture_create_cb_addref(struct fixture_create_cb *self)
+{
+	return (ULONG)InterlockedIncrement(&self->refs);
+}
+
+static ULONG WINAPI create_cb_addref(create_cb_i *iface)
+{
+	return fixture_create_cb_addref((struct fixture_create_cb *)iface);
+}
+
+static ULONG WINAPI create_cb_release(create_cb_i *iface)
+{
+	struct fixture_create_cb *self = (struct fixture_create_cb *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->value)
+			self->value->lpVtbl->Release(self->value);
+		HeapFree(GetProcessHeap(), 0, self);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI create_cb_query(create_cb_i *iface, REFIID iid, void **object)
+{
+	struct fixture_create_cb *self = (struct fixture_create_cb *)iface;
+	if (!object)
+		return E_POINTER;
+	*object = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID___x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback))
+		*object = iface;
+	else
+		return E_NOINTERFACE;
+	fixture_create_cb_addref(self);
+	return S_OK;
+}
+
+static HRESULT WINAPI create_cb_invoke(create_cb_i *iface, IInspectable **value)
+{
+	struct fixture_create_cb *self = (struct fixture_create_cb *)iface;
+	if (!value)
+		return E_POINTER;
+	*value = NULL;
+	InterlockedIncrement(&self->invoked);
+	if (self->value) {
+		self->value->lpVtbl->AddRef(self->value);
+		*value = self->value;
+	}
+	return S_OK;
+}
+
+static const __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallbackVtbl create_cb_table = {
+	create_cb_query, create_cb_addref, create_cb_release, create_cb_invoke,
+};
+
+static struct fixture_create_cb *make_create_cb(IInspectable *value)
+{
+	struct fixture_create_cb *self = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *self);
+	if (!self)
+		return NULL;
+	self->lpVtbl = &create_cb_table;
+	self->refs = 1;
+	if (value) {
+		value->lpVtbl->AddRef(value);
+		self->value = value;
+	}
+	return self;
 }
 
 /* The parameterized IVector`1<UIElement> a panel's Children hands out: the GUID is the derivation the element layer
@@ -1409,6 +1489,134 @@ int raven_entry(void)
 		return 203;
 	if (text_iface->lpVtbl->get_FontSize(text_iface, (uint64_t)(uintptr_t)&font_size) != S_OK || font_size != 40.0f)
 		return 204;
+	/* The PropertyMetadata stage: the class DependencyProperty.Register takes its metadata from is itself activatable,
+	 * and its factory is the one WinUI 2.8 asks for first. The composable factory carries both constructor forms, the
+	 * statics carry PropertyMetadata.Create, the factory-backed form holds a create-default-value delegate the engine
+	 * invokes through its internal reader, the agile marker is answered on the factory and metadata identities, and
+	 * the documented refusals stay refusals. */
+	{
+		static const WCHAR metadata_class[] = L"Windows.UI.Xaml.PropertyMetadata";
+		HSTRING metadata_key = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *metadata_factory = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *metadata_statics = NULL;
+		IActivationFactory *metadata_activation = NULL;
+		IInspectable *agile = NULL;
+		IInspectable *number = (IInspectable *)make_number(7.5);
+		IInspectable *read_default = NULL;
+		metadata_i *meta = NULL, *meta2 = NULL, *meta_factory_backed = NULL;
+		raven_property_metadata_interop *meta_interop = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *read_factory = NULL;
+		struct fixture_create_cb *callback = NULL;
+		if (WindowsCreateString(metadata_class, ARRAYSIZE(metadata_class) - 1, &metadata_key) != S_OK)
+			return 210;
+		if (get_factory(metadata_key, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory,
+			(void **)&metadata_factory) != S_OK || !metadata_factory)
+			return 211;
+		WindowsDeleteString(metadata_key);
+		if (metadata_factory->lpVtbl->QueryInterface(metadata_factory, &IID_IAgileObject, (void **)&agile) != S_OK ||
+			!agile)
+			return 212;
+		agile->lpVtbl->Release(agile);
+		agile = NULL;
+		/* the class has no parameterless constructor, so activation has nothing to run */
+		if (metadata_factory->lpVtbl->QueryInterface(metadata_factory, &IID_IActivationFactory,
+			(void **)&metadata_activation) != S_OK || !metadata_activation)
+			return 213;
+		if (metadata_activation->lpVtbl->ActivateInstance(metadata_activation, &agile) != E_NOTIMPL || agile)
+			return 214;
+		metadata_activation->lpVtbl->Release(metadata_activation);
+		metadata_activation = NULL;
+		if (!number)
+			return 215;
+		/* PropertyMetadata(Object): the fixed default round-trips by identity, no factory is carried */
+		if (metadata_factory->lpVtbl->CreateInstanceWithDefaultValue(metadata_factory, number, NULL, NULL, &meta) != S_OK ||
+			!meta)
+			return 216;
+		if (meta->lpVtbl->get_DefaultValue(meta, &read_default) != S_OK || read_default != number)
+			return 217;
+		read_default->lpVtbl->Release(read_default);
+		read_default = NULL;
+		if (meta->lpVtbl->get_CreateDefaultValueCallback(meta, &read_factory) != S_OK || read_factory)
+			return 218;
+		if (meta->lpVtbl->QueryInterface(meta, &IID_IAgileObject, (void **)&agile) != S_OK || !agile)
+			return 219;
+		agile->lpVtbl->Release(agile);
+		agile = NULL;
+		/* PropertyMetadata.Create statics: the NULL default is a legal fixed default */
+		if (metadata_factory->lpVtbl->QueryInterface(metadata_factory,
+			&IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics, (void **)&metadata_statics) != S_OK ||
+			!metadata_statics)
+			return 220;
+		if (metadata_statics->lpVtbl->CreateWithDefaultValue(metadata_statics, NULL, &meta2) != S_OK || !meta2)
+			return 221;
+		if (meta2->lpVtbl->get_DefaultValue(meta2, &read_default) != S_OK || read_default)
+			return 222;
+		/* the factory-backed form: only the create-default-value reading is set, and the engine's internal reader
+		 * invokes the delegate exactly then (the engine's registration store keeps one default per property, so the
+		 * real per-instance lazy default is the one documented approximation) */
+		callback = make_create_cb(number);
+		if (!callback)
+			return 223;
+		if (metadata_statics->lpVtbl->CreateWithFactory(metadata_statics,
+			(__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *)callback, &meta_factory_backed) != S_OK ||
+			!meta_factory_backed)
+			return 224;
+		if (meta_factory_backed->lpVtbl->get_DefaultValue(meta_factory_backed, &read_default) != S_OK || read_default)
+			return 225;
+		if (meta_factory_backed->lpVtbl->get_CreateDefaultValueCallback(meta_factory_backed, &read_factory) != S_OK ||
+			(struct fixture_create_cb *)read_factory != callback)
+			return 226;
+		read_factory->lpVtbl->Release(read_factory);
+		read_factory = NULL;
+		if (meta_factory_backed->lpVtbl->QueryInterface(meta_factory_backed, &raven_property_metadata_interop_iid,
+			(void **)&meta_interop) != S_OK || !meta_interop)
+			return 227;
+		if (meta_interop->lpVtbl->CreateDefaultValue(meta_interop, &read_default) != S_OK || read_default != number ||
+			callback->invoked != 1)
+			return 228;
+		read_default->lpVtbl->Release(read_default);
+		read_default = NULL;
+		meta_interop->lpVtbl->Release(meta_interop);
+		meta_interop = NULL;
+		/* the refusals: no factory to hold, a callback that is not the delegate, a base interface needing
+		 * aggregation — each out pointer is its own variable so the successful meta2 above stays referenced */
+		{
+			metadata_i *refused = (metadata_i *)1;
+			if (metadata_statics->lpVtbl->CreateWithFactory(metadata_statics, NULL, &refused) != E_INVALIDARG ||
+				refused)
+				return 229;
+			refused = (metadata_i *)1;
+			if (metadata_factory->lpVtbl->CreateInstanceWithDefaultValueAndCallback(metadata_factory, number,
+				(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *)number, NULL, NULL, &refused) != E_INVALIDARG ||
+				refused)
+				return 230;
+			refused = (metadata_i *)1;
+			if (metadata_factory->lpVtbl->CreateInstanceWithDefaultValue(metadata_factory, number, number, NULL,
+				&refused) != E_NOTIMPL || refused)
+				return 231;
+		}
+		/* the refcount ledger: the metadata objects drop to zero, the singleton keeps its base reference */
+		if (meta_factory_backed->lpVtbl->Release(meta_factory_backed) != 0)
+			return 232;
+		meta_factory_backed = NULL;
+		if (callback->lpVtbl->Release((__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *)callback) != 0)
+			return 233;
+		callback = NULL;
+		if (meta->lpVtbl->Release(meta) != 0)
+			return 234;
+		meta = NULL;
+		if (meta2->lpVtbl->Release(meta2) != 0)
+			return 235;
+		meta2 = NULL;
+		if (metadata_statics->lpVtbl->Release(metadata_statics) != 2)
+			return 236;
+		metadata_statics = NULL;
+		if (metadata_factory->lpVtbl->Release(metadata_factory) != 1)
+			return 237;
+		metadata_factory = NULL;
+		((IInspectable *)number)->lpVtbl->Release(number);
+		number = NULL;
+	}
 	/* The ControlTemplate stage: a Style setter named "Template" carries the ControlTemplate object itself, the button
 	 * routes it to the same store put_Template serves, and the applied template's root tree replaces the control's
 	 * rendered visuals — a template whose root is a red grid paints red where the unstyled button painted nothing. The

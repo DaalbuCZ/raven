@@ -20,6 +20,14 @@
  * Value property is real: put_Value takes the value as an IInspectable and get_Value hands it back, so a Setter created
  * through the factory already round-trips its value.
  *
+ * PropertyMetadata is implemented here too, because it is the metadata type Register takes: the real activatable class
+ * with both constructors (IPropertyMetadataFactory), the four PropertyMetadata.Create statics
+ * (IPropertyMetadataStatics), IPropertyMetadata's DefaultValue/CreateDefaultValueCallback readings, and the held
+ * property-changed callback — which, like the real class, has no public getter and is never invoked because the engine
+ * has no dependency-property change notification. Register reads a metadata default through the real get_DefaultValue
+ * and, for the engine's factory-backed metadata, through the internal create-default-value reader. A registration with a
+ * foreign IPropertyMetadata still reads only the real ABI.
+ *
  * What applies: an element's put_Style (xaml_elements.c) runs the style's setters against the element's OWN storage
  * through raven_style_apply below — the BasedOn chain's setters first, the style's own after, so the derived style's
  * value for a property the base also set lands last and wins. The walk guards a BasedOn cycle with a depth cap: a chain
@@ -330,6 +338,310 @@ static struct dp_object *dp_of(IInspectable *object)
 	return self;
 }
 
+/* The PropertyMetadata.
+ *
+ * Windows.UI.Xaml.PropertyMetadata is the activatable class DependencyProperty.Register takes its registration metadata
+ * from. Its ABI, validated against mingw's windows.ui.xaml.h and the Windows SDK IDL as recompiled by
+ * microsoft/win32metadata (generation/WinSDK/RecompiledIdlHeaders/winrt/windows.ui.xaml.idl):
+ *
+ *  - [composable(IPropertyMetadataFactory, public)] — IPropertyMetadataFactory (c1b81cc0-57cd-4f2f-b0a9-e1801b28f76b)
+ *    is both constructor forms: CreateInstanceWithDefaultValue(defaultValue, baseInterface, innerInterface, value) for
+ *    PropertyMetadata(Object) and CreateInstanceWithDefaultValueAndCallback(..., callback, ...) for
+ *    PropertyMetadata(Object, PropertyChangedCallback). This is the IID WinUI 2.8's DllGetActivationFactory asks
+ *    RoGetActivationFactory for, so the factory answers it.
+ *  - [static(IPropertyMetadataStatics)] — 3b01077a-6e06-45e9-8b5c-af243458c062, the four PropertyMetadata.Create forms:
+ *    two fixed-default and two create-default-value-factory.
+ *  - [default] interface IPropertyMetadata (814ef30d-8d18-448a-8644-f2cb51e70380): get_DefaultValue and
+ *    get_CreateDefaultValueCallback — exactly the two readings the class surface carries, so a metadata built one way
+ *    reports NULL through the other reading.
+ *  - [marshaling_behavior(agile)], [threading(both)]: the factory and every metadata answer IAgileObject. That is
+ *    load-bearing for WinUI 2.8, which QIs the factory it activates for the agile marker before it uses it.
+ *
+ * The property-changed callback (IPropertyChangedCallback, 5a9f8a25-d142-44a4-8231-fd676724f29b) is held, not invoked:
+ * only the dependency-property system invokes it, and the engine has no property-change notification for dependency
+ * properties yet (GetMetadata stays E_NOTIMPL for the same reason). Microsoft's own contract says a PropertyMetadata
+ * deliberately offers no getter for the callback, so the engine-internal interop part (xaml_styles.h) carries the
+ * reader the fixture uses; nothing on the real IPropertyMetadata surface is invented.
+ *
+ * The create-default-value callback (ICreateDefaultValueCallback, d6ecb12c-15b5-4ec8-b95c-cdd208f08153) is the lazy
+ * form: it is invoked whenever a default value is actually needed. The engine invokes it through the internal
+ * CreateDefaultValue reader, and at DependencyProperty.Register time it is invoked once because the engine's
+ * registration store keeps one default per property — the real property system would run the factory per instance.
+ * That is the one documented approximation: a factory-backed metadata registered on a property yields a shared default
+ * created at registration, not a fresh per-instance value.
+ *
+ * What is refused rather than faked: the composable base-interface form (a non-NULL baseInterface needs COM aggregation
+ * machinery the component does not have; E_NOTIMPL), a callback argument that does not answer the required delegate
+ * interface (E_INVALIDARG, the discipline Register applies to metadata), a NULL create-default-value factory in the
+ * factory overloads (E_INVALIDARG — there is no factory to hold), and ActivateInstance (the class has no parameterless
+ * constructor; E_NOTIMPL, as the statics-only DependencyProperty factory's activation answers). */
+static const WCHAR property_metadata_class[] = L"Windows.UI.Xaml.PropertyMetadata";
+
+struct metadata_object {
+	const __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataVtbl *lpVtbl;
+	struct { const struct raven_property_metadata_interop_vtbl *lpVtbl; } interop; /* the part the QI hands out */
+	LONG refs;
+	IInspectable *default_value; /* the fixed default; NULL for factory-backed metadata */
+	__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *default_factory; /* lazy default creator; NULL otherwise */
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *changed; /* held for the property system; never invoked */
+};
+
+static ULONG metadata_addref_any(struct metadata_object *self)
+{
+	return (ULONG)InterlockedIncrement(&self->refs);
+}
+
+static ULONG metadata_release_any(struct metadata_object *self)
+{
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->default_value)
+			self->default_value->lpVtbl->Release(self->default_value);
+		if (self->default_factory)
+			self->default_factory->lpVtbl->Release(self->default_factory);
+		if (self->changed)
+			self->changed->lpVtbl->Release(self->changed);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+/* IAgileObject is answered on the object identity: the class is agile, and both held delegates and the value are the
+ * caller's own agile objects. */
+static HRESULT metadata_query_any(struct metadata_object *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IAgileObject) ||
+		equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata))
+		*out = self;
+	else if (equal_iid(iid, &raven_property_metadata_interop_iid))
+		*out = &self->interop;
+	else
+		return E_NOINTERFACE;
+	metadata_addref_any(self);
+	return S_OK;
+}
+
+static HRESULT WINAPI metadata_interop_query(struct raven_property_metadata_interop *This, REFIID iid, void **out)
+{
+	return metadata_query_any((struct metadata_object *)((char *)This - offsetof(struct metadata_object, interop)),
+		iid, out);
+}
+
+static ULONG WINAPI metadata_interop_addref(struct raven_property_metadata_interop *This)
+{
+	return metadata_addref_any((struct metadata_object *)((char *)This - offsetof(struct metadata_object, interop)));
+}
+
+static ULONG WINAPI metadata_interop_release(struct raven_property_metadata_interop *This)
+{
+	return metadata_release_any((struct metadata_object *)((char *)This - offsetof(struct metadata_object, interop)));
+}
+
+static HRESULT WINAPI metadata_query(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This, REFIID iid, void **out)
+{
+	return metadata_query_any((struct metadata_object *)This, iid, out);
+}
+
+static ULONG WINAPI metadata_addref(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This)
+{
+	return metadata_addref_any((struct metadata_object *)This);
+}
+
+static ULONG WINAPI metadata_release(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This)
+{
+	return metadata_release_any((struct metadata_object *)This);
+}
+
+/* GetIids answers the one WinRT interface the class implements, the list resources.c answers for its classes: the
+ * agile marker is a COM marker, not a WinRT interface, so it is not in the list. */
+static HRESULT WINAPI metadata_iids(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This, ULONG *count, IID **iids)
+{
+	IID *list;
+	(void)This;
+	if (!count || !iids)
+		return E_POINTER;
+	*count = 0;
+	*iids = NULL;
+	list = (IID *)HeapAlloc(GetProcessHeap(), 0, sizeof *list);
+	if (!list)
+		return E_OUTOFMEMORY;
+	list[0] = IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata;
+	*count = 1;
+	*iids = list;
+	return S_OK;
+}
+
+static HRESULT WINAPI metadata_name(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This, HSTRING *name)
+{
+	(void)This;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(property_metadata_class, (UINT32)lstrlenW(property_metadata_class), name);
+}
+
+static HRESULT WINAPI metadata_trust(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This, TrustLevel *level)
+{
+	(void)This;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI metadata_get_default(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This, IInspectable **value)
+{
+	struct metadata_object *self = (struct metadata_object *)This;
+	if (!value)
+		return E_POINTER;
+	*value = self->default_value;
+	if (*value)
+		(*value)->lpVtbl->AddRef(*value);
+	return S_OK;
+}
+
+/* The real reading: a value-backed metadata answers NULL here, a factory-backed one answers the delegate it holds. */
+static HRESULT WINAPI metadata_get_factory(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This,
+	__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback **value)
+{
+	struct metadata_object *self = (struct metadata_object *)This;
+	if (!value)
+		return E_POINTER;
+	*value = self->default_factory;
+	if (*value)
+		(*value)->lpVtbl->AddRef(*value);
+	return S_OK;
+}
+
+static const __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataVtbl metadata_table = {
+	.QueryInterface = metadata_query,
+	.AddRef = metadata_addref,
+	.Release = metadata_release,
+	.GetIids = metadata_iids,
+	.GetRuntimeClassName = metadata_name,
+	.GetTrustLevel = metadata_trust,
+	.get_DefaultValue = metadata_get_default,
+	.get_CreateDefaultValueCallback = metadata_get_factory,
+};
+
+static HRESULT WINAPI metadata_interop_changed(struct raven_property_metadata_interop *This,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback **value)
+{
+	struct metadata_object *self = (struct metadata_object *)((char *)This - offsetof(struct metadata_object, interop));
+	if (!value)
+		return E_POINTER;
+	*value = self->changed;
+	if (*value)
+		(*value)->lpVtbl->AddRef(*value);
+	return S_OK;
+}
+
+/* What the real property system does with the metadata: hand back the fixed default, or ask the held factory for a
+ * value. A metadata with neither answers a null value, the way DefaultValue does. */
+static HRESULT WINAPI metadata_interop_create_default(struct raven_property_metadata_interop *This, IInspectable **value)
+{
+	struct metadata_object *self = (struct metadata_object *)((char *)This - offsetof(struct metadata_object, interop));
+	if (!value)
+		return E_POINTER;
+	*value = NULL;
+	if (self->default_value) {
+		self->default_value->lpVtbl->AddRef(self->default_value);
+		*value = self->default_value;
+		return S_OK;
+	}
+	if (self->default_factory)
+		return self->default_factory->lpVtbl->Invoke(self->default_factory, value);
+	return S_OK;
+}
+
+static const struct raven_property_metadata_interop_vtbl metadata_interop_table = {
+	metadata_interop_query, metadata_interop_addref, metadata_interop_release,
+	metadata_interop_changed, metadata_interop_create_default,
+};
+
+/* The one construction path: the two factory constructors and the four statics all land here, so the validation and the
+ * ownership rules have a single statement. A non-NULL callback is taken only when it answers its real delegate
+ * interface — anything else is refused E_INVALIDARG, the same way Register refuses a metadata that is not
+ * IPropertyMetadata. The QI's own reference becomes the object's stored reference, so each held delegate is owned
+ * exactly once and released exactly once. */
+static HRESULT metadata_create(IInspectable *default_value,
+	__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *default_factory,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *changed_callback,
+	IInspectable *base_interface, IInspectable **inner_interface,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **out)
+{
+	__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *factory = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *changed = NULL;
+	struct metadata_object *self;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (inner_interface)
+		*inner_interface = NULL;
+	/* The composable base form needs COM aggregation the component does not implement; refusing it is honest, while
+	 * ignoring the argument would silently drop the caller's base object. */
+	if (base_interface)
+		return E_NOTIMPL;
+	if (default_factory) {
+		if (default_factory->lpVtbl->QueryInterface(default_factory,
+			&IID___x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback, (void **)&factory) != S_OK || !factory)
+			return E_INVALIDARG;
+	}
+	if (changed_callback) {
+		if (changed_callback->lpVtbl->QueryInterface(changed_callback,
+			&IID___x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback, (void **)&changed) != S_OK || !changed) {
+			if (factory)
+				factory->lpVtbl->Release(factory);
+			return E_INVALIDARG;
+		}
+	}
+	self = ALLOC(sizeof *self);
+	if (!self) {
+		if (factory)
+			factory->lpVtbl->Release(factory);
+		if (changed)
+			changed->lpVtbl->Release(changed);
+		return E_OUTOFMEMORY;
+	}
+	self->lpVtbl = &metadata_table;
+	self->interop.lpVtbl = &metadata_interop_table;
+	self->refs = 1;
+	if (default_value) {
+		default_value->lpVtbl->AddRef(default_value);
+		self->default_value = default_value;
+	}
+	self->default_factory = factory;
+	self->changed = changed;
+	InterlockedIncrement(&raven_xaml_objects);
+	*out = (__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *)self;
+	return S_OK;
+}
+
+/* The default a DependencyProperty registration stores. The metadata's real DefaultValue is the fixed value; the
+ * engine's own factory-backed metadata carries none there, so the engine asks its internal CreateDefaultValue reader,
+ * which invokes the create-default-value callback. Foreign metadata is read through the real ABI only: an
+ * implementation that reports a null DefaultValue contributes no default, because the engine cannot know what its
+ * factory would return. The caller owns the returned reference. */
+static HRESULT metadata_registration_default(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *metadata, IInspectable **out)
+{
+	IInspectable *value = NULL;
+	HRESULT result = metadata->lpVtbl->get_DefaultValue(metadata, &value);
+	if (FAILED(result))
+		return result;
+	if (!value) {
+		raven_property_metadata_interop *interop = NULL;
+		if (metadata->lpVtbl->QueryInterface(metadata, &raven_property_metadata_interop_iid,
+			(void **)&interop) == S_OK && interop) {
+			result = interop->lpVtbl->CreateDefaultValue(interop, &value);
+			interop->lpVtbl->Release(interop);
+			if (FAILED(result))
+				return result;
+		}
+	}
+	*out = value;
+	return S_OK;
+}
+
 /* The registration store: the (owner, name) pairs registered in this process, for the duplicate contract. The objects
  * live for the component's lifetime — a registered property is engine state the way the authored defaults are — so the
  * store holds each DP's own reference and nothing tears it down. */
@@ -388,14 +700,15 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 			CompareStringOrdinal(text, (int)length, owner_text, (int)owner_length, FALSE) == CSTR_EQUAL)
 			return E_INVALIDARG; /* the real (owner, name) duplicate contract */
 	}
-	/* The default value comes from the metadata's real DefaultValue; metadata that does not answer IPropertyMetadata is
-	 * not PropertyMetadata and is refused rather than silently defaulted. */
+	/* The default value comes from the metadata's real DefaultValue, or — for the engine's own factory-backed
+	 * PropertyMetadata — from its create-default-value callback (see metadata_registration_default); metadata that does
+	 * not answer IPropertyMetadata is not PropertyMetadata and is refused rather than silently defaulted. */
 	IInspectable *default_value = NULL;
 	if (metadata) {
 		if (metadata->lpVtbl->QueryInterface(metadata, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata,
 			(void **)&metadata) != S_OK)
 			return E_INVALIDARG;
-		HRESULT result = metadata->lpVtbl->get_DefaultValue(metadata, &default_value);
+		HRESULT result = metadata_registration_default(metadata, &default_value);
 		metadata->lpVtbl->Release(metadata);
 		if (FAILED(result)) {
 			if (default_value)
@@ -621,6 +934,187 @@ __declspec(dllexport) HRESULT raven_xaml_dependency_statics(
 		return E_POINTER;
 	*out = (__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics *)&dp_factory_instance.statics;
 	dp_statics_addref(*out);
+	return S_OK;
+}
+
+/* The PropertyMetadata factory singleton: one COM identity carrying the IActivationFactory part the activation plumbing
+ * demands, the composable factory interface the constructors live on, and the statics interface. The agile marker is
+ * answered on the same identity — the class is agile, and WinUI 2.8 QIs the factory it activates for IAgileObject
+ * before it uses it. */
+struct metadata_factory {
+	struct { const IActivationFactoryVtbl *lpVtbl; } activation;
+	struct { const __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactoryVtbl *lpVtbl; } factory;
+	struct { const __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStaticsVtbl *lpVtbl; } statics;
+	LONG refs;
+};
+
+static HRESULT metadata_factory_query_any(struct metadata_factory *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory) ||
+		equal_iid(iid, &IID_IAgileObject))
+		*out = &self->activation;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory))
+		*out = &self->factory;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics))
+		*out = &self->statics;
+	else
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	return S_OK;
+}
+
+/* The same one-COM-object rule as the DependencyProperty and Setter factories: the owner comes from the part's own
+ * offset, only the activation part sits at the struct's front. */
+#define METADATA_FACTORY_PART(part, iface, prefix) \
+	static HRESULT WINAPI prefix##_query(iface *This, REFIID iid, void **out) \
+	{ return metadata_factory_query_any((struct metadata_factory *)((char *)This - \
+		offsetof(struct metadata_factory, part)), iid, out); } \
+	static ULONG WINAPI prefix##_addref(iface *This) \
+	{ return (ULONG)InterlockedIncrement(&((struct metadata_factory *)((char *)This - \
+		offsetof(struct metadata_factory, part)))->refs); } \
+	static ULONG WINAPI prefix##_release(iface *This) \
+	{ return (ULONG)InterlockedDecrement(&((struct metadata_factory *)((char *)This - \
+		offsetof(struct metadata_factory, part)))->refs); } \
+	static HRESULT WINAPI prefix##_iids(iface *This, ULONG *count, IID **iids) \
+	{ (void)This; return inspectable_iids(count, iids); } \
+	static HRESULT WINAPI prefix##_name(iface *This, HSTRING *name) \
+	{ (void)This; if (!name) return E_POINTER; \
+	  return WindowsCreateString(property_metadata_class, (UINT32)lstrlenW(property_metadata_class), name); } \
+	static HRESULT WINAPI prefix##_trust(iface *This, TrustLevel *level) \
+	{ (void)This; return inspectable_trust(level); }
+
+METADATA_FACTORY_PART(activation, IActivationFactory, metadata_activation)
+METADATA_FACTORY_PART(factory, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory, metadata_pf)
+METADATA_FACTORY_PART(statics, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics, metadata_ps)
+
+/* The class has no parameterless constructor — its two constructors are the factory methods below — so
+ * ActivateInstance has nothing to run, the DependencyProperty statics factory's answer. */
+static HRESULT WINAPI metadata_activation_activate(IActivationFactory *This, IInspectable **out)
+{
+	(void)This;
+	if (out)
+		*out = NULL;
+	return E_NOTIMPL;
+}
+
+static const IActivationFactoryVtbl metadata_activation_table = {
+	.QueryInterface = metadata_activation_query,
+	.AddRef = metadata_activation_addref,
+	.Release = metadata_activation_release,
+	.GetIids = metadata_activation_iids,
+	.GetRuntimeClassName = metadata_activation_name,
+	.GetTrustLevel = metadata_activation_trust,
+	.ActivateInstance = metadata_activation_activate,
+};
+
+/* PropertyMetadata(Object). */
+static HRESULT WINAPI metadata_factory_default(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This,
+	IInspectable *default_value, IInspectable *base_interface, IInspectable **inner_interface,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **value)
+{
+	(void)This;
+	return metadata_create(default_value, NULL, NULL, base_interface, inner_interface, value);
+}
+
+/* PropertyMetadata(Object, PropertyChangedCallback). */
+static HRESULT WINAPI metadata_factory_default_callback(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This,
+	IInspectable *default_value, __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *property_changed_callback,
+	IInspectable *base_interface, IInspectable **inner_interface,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **value)
+{
+	(void)This;
+	return metadata_create(default_value, NULL, property_changed_callback, base_interface, inner_interface, value);
+}
+
+static const __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactoryVtbl metadata_factory_table = {
+	.QueryInterface = metadata_pf_query,
+	.AddRef = metadata_pf_addref,
+	.Release = metadata_pf_release,
+	.GetIids = metadata_pf_iids,
+	.GetRuntimeClassName = metadata_pf_name,
+	.GetTrustLevel = metadata_pf_trust,
+	.CreateInstanceWithDefaultValue = metadata_factory_default,
+	.CreateInstanceWithDefaultValueAndCallback = metadata_factory_default_callback,
+};
+
+/* The statics: PropertyMetadata.Create(Object), Create(Object, PropertyChangedCallback),
+ * Create(CreateDefaultValueCallback) and Create(CreateDefaultValueCallback, PropertyChangedCallback). A factory form
+ * without a factory has nothing to hold and is refused; a callback that is not the real delegate is refused by
+ * metadata_create. */
+static HRESULT WINAPI metadata_statics_default(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+	IInspectable *default_value, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result)
+{
+	(void)This;
+	return metadata_create(default_value, NULL, NULL, NULL, NULL, result);
+}
+
+static HRESULT WINAPI metadata_statics_default_callback(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+	IInspectable *default_value, __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *property_changed_callback,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result)
+{
+	(void)This;
+	return metadata_create(default_value, NULL, property_changed_callback, NULL, NULL, result);
+}
+
+static HRESULT WINAPI metadata_statics_factory(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+	__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *create_default_value_callback,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result)
+{
+	(void)This;
+	if (!result)
+		return E_POINTER;
+	*result = NULL;
+	if (!create_default_value_callback)
+		return E_INVALIDARG;
+	return metadata_create(NULL, create_default_value_callback, NULL, NULL, NULL, result);
+}
+
+static HRESULT WINAPI metadata_statics_factory_callback(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+	__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *create_default_value_callback,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *property_changed_callback,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result)
+{
+	(void)This;
+	if (!result)
+		return E_POINTER;
+	*result = NULL;
+	if (!create_default_value_callback)
+		return E_INVALIDARG;
+	return metadata_create(NULL, create_default_value_callback, property_changed_callback, NULL, NULL, result);
+}
+
+static const __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStaticsVtbl metadata_statics_table = {
+	.QueryInterface = metadata_ps_query,
+	.AddRef = metadata_ps_addref,
+	.Release = metadata_ps_release,
+	.GetIids = metadata_ps_iids,
+	.GetRuntimeClassName = metadata_ps_name,
+	.GetTrustLevel = metadata_ps_trust,
+	.CreateWithDefaultValue = metadata_statics_default,
+	.CreateWithDefaultValueAndCallback = metadata_statics_default_callback,
+	.CreateWithFactory = metadata_statics_factory,
+	.CreateWithFactoryAndCallback = metadata_statics_factory_callback,
+};
+
+static struct metadata_factory metadata_factory_instance = {
+	{&metadata_activation_table}, {&metadata_factory_table}, {&metadata_statics_table}, 1,
+};
+
+HRESULT raven_property_metadata_factory(HSTRING name, IActivationFactory **out)
+{
+	UINT32 length = 0;
+	const WCHAR *text;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	text = WindowsGetStringRawBuffer(name, &length);
+	if (!same_text(text, length, property_metadata_class))
+		return CLASS_E_CLASSNOTAVAILABLE;
+	InterlockedIncrement(&metadata_factory_instance.refs);
+	*out = (IActivationFactory *)&metadata_factory_instance.activation;
 	return S_OK;
 }
 

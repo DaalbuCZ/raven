@@ -22,6 +22,7 @@
  * UnsetValue, Register and RegisterAttached. IPropertyMetadata (814ef30d-8d18-448a-8644-f2cb51e70380) is the metadata
  * Register takes its default value from. The TypeName slots use the real struct mingw declares, the way the style
  * header's TargetType slots do. */
+typedef struct __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback;
 typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata;
 typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataVtbl {
 	BEGIN_INTERFACE
@@ -35,7 +36,7 @@ typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataVtbl {
 	HRESULT (STDMETHODCALLTYPE *get_DefaultValue)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This,
 		IInspectable **value);
 	HRESULT (STDMETHODCALLTYPE *get_CreateDefaultValueCallback)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *This,
-		void **value);
+		__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback **value);
 	END_INTERFACE
 } __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataVtbl;
 
@@ -103,6 +104,158 @@ interface __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics {
 DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics, 0x49e5f28f, 0x8259, 0x4d5c, 0xaa, 0xe0, 0x83,
 	0xd5, 0x6d, 0xbb, 0x68, 0xd9);
 
+/* The PropertyMetadata activation surface, declared beside the DependencyProperty one for the same reason — the engine
+ * builds against hand headers and mingw's windows.ui.xaml.h does not ship as a component include. The declarations and
+ * IIDs were validated against two sources:
+ *
+ *  - mingw's windows.ui.xaml.h (the header the DependencyProperty section above cites), which carries IPropertyMetadata,
+ *    IPropertyMetadataFactory, IPropertyMetadataStatics and the two delegates with the UUIDs below;
+ *  - the Windows SDK IDL as recompiled by microsoft/win32metadata
+ *    (generation/WinSDK/RecompiledIdlHeaders/winrt/windows.ui.xaml.idl), where
+ *    `runtimeclass PropertyMetadata` is `[composable(Windows.UI.Xaml.IPropertyMetadataFactory, public, ...)]` with
+ *    `[static(Windows.UI.Xaml.IPropertyMetadataStatics, ...)]`, `[marshaling_behavior(agile)]`, `[threading(both)]` and
+ *    `[default] interface Windows.UI.Xaml.IPropertyMetadata`. The advertised factory IID c1b81cc0-… is therefore
+ *    IPropertyMetadataFactory's, which is what WinUI 2.8's DllGetActivationFactory asks RoGetActivationFactory for.
+ *
+ * The two callbacks are delegates, so their ABI objects are IUnknown-derived (not IInspectable): the vtable is QI/AddRef/
+ * Release plus the one Invoke slot. Their parameter types are only ever pointers here; the objects belong to the guest. */
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIDependencyObject __x_ABI_CWindows_CUI_CXaml_CIDependencyObject;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyChangedEventArgs
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyChangedEventArgs;
+
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallbackVtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *This, REFIID riid,
+		void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *This);
+	ULONG (STDMETHODCALLTYPE *Release)(__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *This);
+	HRESULT (STDMETHODCALLTYPE *Invoke)(__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *This,
+		IInspectable **result);
+	END_INTERFACE
+} __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallbackVtbl;
+
+interface __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback {
+	CONST_VTBL __x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallbackVtbl *lpVtbl;
+};
+
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback, 0xd6ecb12c, 0x15b5, 0x4ec8, 0xb9, 0x5c, 0xcd,
+	0xd2, 0x08, 0xf0, 0x81, 0x53);
+
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallbackVtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *This, REFIID riid,
+		void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *This);
+	ULONG (STDMETHODCALLTYPE *Release)(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *This);
+	HRESULT (STDMETHODCALLTYPE *Invoke)(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *This,
+		__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *obj,
+		__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyChangedEventArgs *args);
+	END_INTERFACE
+} __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallbackVtbl;
+
+interface __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback {
+	CONST_VTBL __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallbackVtbl *lpVtbl;
+};
+
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback, 0x5a9f8a25, 0xd142, 0x44a4, 0x82, 0x31, 0xfd,
+	0x67, 0x67, 0x24, 0xf2, 0x9b);
+
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactoryVtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This, REFIID riid,
+		void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This);
+	ULONG (STDMETHODCALLTYPE *Release)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This, ULONG *count,
+		IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This,
+		HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This,
+		TrustLevel *level);
+	/* PropertyMetadata(Object): the composable factory signature carries the base and inner slots even though the
+	 * engine's PropertyMetadata has no composition; the constructors the projection exposes are the no-base form. */
+	HRESULT (STDMETHODCALLTYPE *CreateInstanceWithDefaultValue)(
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This, IInspectable *default_value,
+		IInspectable *base_interface, IInspectable **inner_interface,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **value);
+	/* PropertyMetadata(Object, PropertyChangedCallback) */
+	HRESULT (STDMETHODCALLTYPE *CreateInstanceWithDefaultValueAndCallback)(
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory *This, IInspectable *default_value,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *property_changed_callback,
+		IInspectable *base_interface, IInspectable **inner_interface,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **value);
+	END_INTERFACE
+} __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactoryVtbl;
+
+interface __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory {
+	CONST_VTBL __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactoryVtbl *lpVtbl;
+};
+
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactory, 0xc1b81cc0, 0x57cd, 0x4f2f, 0xb0, 0xa9, 0xe1,
+	0x80, 0x1b, 0x28, 0xf7, 0x6b);
+
+/* IPropertyMetadataStatics is the [static] interface the projection maps to PropertyMetadata.Create's four overloads:
+ * two fixed-default forms and two create-default-value-factory forms. */
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStaticsVtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This, REFIID riid,
+		void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This);
+	ULONG (STDMETHODCALLTYPE *Release)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This, ULONG *count,
+		IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+		HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+		TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *CreateWithDefaultValue)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+		IInspectable *default_value, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result);
+	HRESULT (STDMETHODCALLTYPE *CreateWithDefaultValueAndCallback)(
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This, IInspectable *default_value,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *property_changed_callback,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result);
+	HRESULT (STDMETHODCALLTYPE *CreateWithFactory)(__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+		__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *create_default_value_callback,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result);
+	HRESULT (STDMETHODCALLTYPE *CreateWithFactoryAndCallback)(
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *This,
+		__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *create_default_value_callback,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *property_changed_callback,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata **result);
+	END_INTERFACE
+} __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStaticsVtbl;
+
+interface __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics {
+	CONST_VTBL __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStaticsVtbl *lpVtbl;
+};
+
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics, 0x3b01077a, 0x6e06, 0x45e9, 0x8b, 0x5c, 0xaf,
+	0x24, 0x34, 0x58, 0xc0, 0x62);
+
+/* The engine-internal readers of the engine's own PropertyMetadata objects. The real IPropertyMetadata surface exposes
+ * only DefaultValue and CreateDefaultValueCallback — Microsoft's own remarks say a PropertyMetadata deliberately has no
+ * way to find its property-changed callback, because the dependency-property system is the only caller. The engine has no
+ * property-change notification for dependency properties yet, so the callback is held and never invoked; this internal
+ * part is how the engine (and the style fixture) can still verify the held delegate. CreateDefaultValue is the engine's
+ * counterpart of what that property system does with the metadata: it hands back the fixed default, or invokes the
+ * create-default-value factory and returns what it produced. The real ABI carries no such member, which is why it lives
+ * here rather than on IPropertyMetadata. */
+static const IID raven_property_metadata_interop_iid = {0x6f42d1a8, 0x3b57, 0x4c1e, {0xa8, 0x93, 0x2d, 0x5c, 0x71,
+	0x0b, 0x64, 0xd9}};
+typedef struct raven_property_metadata_interop raven_property_metadata_interop;
+struct raven_property_metadata_interop_vtbl {
+	HRESULT (WINAPI *QueryInterface)(raven_property_metadata_interop *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(raven_property_metadata_interop *);
+	ULONG (WINAPI *Release)(raven_property_metadata_interop *);
+	HRESULT (WINAPI *get_PropertyChangedCallback)(raven_property_metadata_interop *,
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback **);
+	HRESULT (WINAPI *CreateDefaultValue)(raven_property_metadata_interop *, IInspectable **);
+};
+struct raven_property_metadata_interop { const struct raven_property_metadata_interop_vtbl *lpVtbl; };
+
 /* The engine-internal metadata readers of the engine's own DependencyProperty objects, the way corewindow_interop.h is the
  * internal readers of the engine's CoreWindow. The real class surface has no such getters (the ABI carries GetMetadata
  * only), so these are the engine's own interface and its own GUID; the object answers it next to the real
@@ -159,6 +312,13 @@ HRESULT raven_xaml_element_get_style(IInspectable *element, IInspectable **style
  * IDependencyPropertyStatics through its QI and ActivateInstance only faults. Answers ONLY the DependencyProperty name;
  * the Style and Setter names stay with raven_style_factory. */
 HRESULT raven_dependency_factory(HSTRING name, IActivationFactory **out);
+
+/* The activation entry the chain reaches for "Windows.UI.Xaml.PropertyMetadata": an activatable class, so the factory
+ * object answers IPropertyMetadataFactory (the composable factory interface, which is the IID WinUI 2.8 asks
+ * RoGetActivationFactory for), IPropertyMetadataStatics and the IAgileObject marker. ActivateInstance faults because the
+ * class has no parameterless constructor — the two constructors are the factory's methods. Answers ONLY the
+ * PropertyMetadata name. */
+HRESULT raven_property_metadata_factory(HSTRING name, IActivationFactory **out);
 
 /* The statics through the engine-internal export: the runtime catalog does not list the DependencyProperty class yet (the
  * registry entry is added separately), so RoGetActivationFactory cannot reach the statics until then; the style fixture

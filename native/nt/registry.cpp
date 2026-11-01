@@ -193,6 +193,7 @@ void NativeRegistry::register_runtime_classes()
 		{u"Windows.UI.Core.CoreWindow", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Application", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.DependencyProperty", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.PropertyMetadata", u"raven-xaml.dll"},
 		{u"Windows.Foundation.Collections.PropertySet", u"raven-xaml.dll"},
 		{u"Windows.Foundation.PropertyValue", u"raven-xaml.dll"},
 		{u"Windows.Foundation.Uri", u"raven-xaml.dll"},
