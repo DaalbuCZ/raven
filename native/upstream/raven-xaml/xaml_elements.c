@@ -767,6 +767,7 @@ struct grid {
 	/* The Style the element was given (an owned reference); put_Style applied its setters into the fields above at the
 	 * put, so the reference records what was applied rather than overriding the own state at read time. */
 	IInspectable *style;
+	IInspectable *resources;
 	float width, height;
 	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
 	 * sit beside them in the same order the store selector uses; a child without a span reads back one track. */
@@ -832,6 +833,8 @@ static ULONG grid_release(struct grid *self)
 			self->background->lpVtbl->Release(self->background);
 		if (self->style)
 			self->style->lpVtbl->Release(self->style);
+		if (self->resources)
+			self->resources->lpVtbl->Release(self->resources);
 		element_ui_release(&self->ui);
 		FREE(self);
 		InterlockedDecrement(&raven_xaml_objects);
@@ -987,6 +990,7 @@ struct textblock {
 	/* The Style the element was given (an owned reference); put_Style applied its setters into the fields above at the
 	 * put, so the reference records what was applied rather than overriding the own state at read time. */
 	IInspectable *style;
+	IInspectable *resources;
 	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
 	 * sit beside them in the same order the store selector uses; a child without a span reads back one track. */
 	UINT32 row, column;
@@ -1037,6 +1041,8 @@ static ULONG WINAPI textblock_release(textblock1 *iface)
 			self->foreground_brush->lpVtbl->Release(self->foreground_brush);
 		if (self->style)
 			self->style->lpVtbl->Release(self->style);
+		if (self->resources)
+			self->resources->lpVtbl->Release(self->resources);
 		element_ui_release(&self->ui);
 		FREE(self);
 		InterlockedDecrement(&raven_xaml_objects);
@@ -1287,6 +1293,7 @@ struct button {
 	 * setter carried sits in the fields below it — the control chrome does not render yet, so the colour waits for that
 	 * stage the way the reference itself waited for the style stage. */
 	IInspectable *style;
+	IInspectable *resources;
 	COLORREF color;
 	BYTE alpha;
 	/* The attached Grid.Row and Grid.Column this element was given; children without them lay out at cell (0, 0). The spans
@@ -1359,6 +1366,8 @@ static ULONG button_release(struct button *self)
 			IInspectable_Release(self->command_parameter);
 		if (self->style)
 			IInspectable_Release(self->style);
+		if (self->resources)
+			IInspectable_Release(self->resources);
 		raven_event_close(&self->click);
 		DeleteCriticalSection(&self->click.lock);
 		element_ui_release(&self->ui);
@@ -2586,6 +2595,74 @@ HRESULT raven_xaml_elements_set_text(IInspectable *object, const WCHAR *name, UI
  * the export's own dispatch — the skip convention every property the engine does not store follows. */
 HRESULT raven_xaml_element_put_template(IInspectable *object, IInspectable *template_object);
 
+/* The Resources slot of the element classes that carry one, looked up the way the Style slots are: the grid, the text block
+ * and the button. The QI reference is released once the slot address is known, which the caller's own reference keeps
+ * valid. A class outside the three answers null, which the caller reads as the skip convention. */
+static IInspectable **element_resources_slot(IInspectable *object)
+{
+	IInspectable **slot = NULL;
+	grid1 *grid = NULL;
+	textblock1 *textblock = NULL;
+	button1 *button = NULL;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
+		if (grid->lpVtbl == &grid1_table)
+			slot = &((struct grid1_part *)grid)->owner->resources;
+		grid->lpVtbl->Release(grid);
+	} else if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+		(void **)&textblock)) && textblock) {
+		if (textblock->lpVtbl == &textblock_table)
+			slot = &((struct textblock *)textblock)->resources;
+		textblock->lpVtbl->Release(textblock);
+	} else if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+		(void **)&button)) && button) {
+		if (button->lpVtbl == &button1_table)
+			slot = &((struct button1_part *)button)->owner->resources;
+		button->lpVtbl->Release(button);
+	}
+	return slot;
+}
+
+/* FrameworkElement.Resources: the dictionary a compiled page fills with SetValue before adding its keys, and reads back
+ * through the property. The element keeps an owned reference; a second assignment replaces the first. Resource lookup does
+ * not consult the dictionary yet, so nothing consumes the stored reference. */
+HRESULT __declspec(dllexport) raven_xaml_element_put_resources(IInspectable *object, IInspectable *dictionary)
+{
+	IInspectable **slot;
+	if (!object)
+		return E_POINTER;
+	slot = element_resources_slot(object);
+	if (!slot)
+		return S_FALSE;
+	if (dictionary)
+		IInspectable_AddRef(dictionary);
+	if (*slot)
+		IInspectable_Release(*slot);
+	*slot = dictionary;
+	return S_OK;
+}
+
+HRESULT __declspec(dllexport) raven_xaml_element_get_resources(IInspectable *object, IInspectable **out)
+{
+	IInspectable **slot;
+	if (!object || !out)
+		return E_POINTER;
+	*out = NULL;
+	slot = element_resources_slot(object);
+	if (!slot)
+		return S_FALSE;
+	if (!*slot) {
+		/* Created on first read, so an element that never uses Resources carries no dictionary. */
+		IInspectable *created = NULL;
+		const HRESULT made = raven_xaml_create_stable(371, &created);
+		if (FAILED(made) || !created)
+			return FAILED(made) ? made : E_OUTOFMEMORY;
+		*slot = created;
+	}
+	IInspectable_AddRef(*slot);
+	*out = *slot;
+	return S_OK;
+}
+
 HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value)
 {
 	panel1 *panel = NULL;
@@ -2642,6 +2719,8 @@ HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, 
 		 * for any other element — the skip convention. */
 		return presenter_store_content_template(object, value);
 	}
+	if (same_text(name, length, L"Resources"))
+		return raven_xaml_element_put_resources(object, value);
 	return S_FALSE;
 }
 

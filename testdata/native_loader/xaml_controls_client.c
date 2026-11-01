@@ -10,6 +10,7 @@
 #include "windows_ui_xaml_elements.h"
 #include "windows_ui_xaml_markup.h"
 #include "windows_ui_xaml_style.h"
+#include "windows_ui_xaml_dictionary.h"
 #include "windows_ui_xaml_application.h"
 #include "windows_ui_xaml_window.h"
 
@@ -35,6 +36,8 @@ typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProviderVtbl markup_pro
 typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType markup_type;
 typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlTypeVtbl markup_typeVtbl;
 typedef __x_ABI_CWindows_CUI_CXaml_CIApplicationFactory application_factory1;
+typedef HRESULT (*resources_put_function)(IInspectable *, IInspectable *);
+typedef HRESULT (*resources_get_function)(IInspectable *, IInspectable **);
 
 /* The real IControlTemplate and IControl IIDs (Windows.UI.Xaml.winmd, the WDK IDL): the engine's ControlTemplate answers
  * the first, the engine's button answers the second. The vtables here carry the exact member order — TargetType get/put on
@@ -314,6 +317,49 @@ static size_t build_style_document(unsigned char *doc)
 	doc[175] = (unsigned char)((540 >> 8) | 0x80);
 	doc[176] = 0x21; /* EndInitPopScope */
 	return 177;
+}
+
+/* A Grid whose FrameworkElement.Resources (404) arrives the way a compiled page carries it: a SetValue naming the property
+ * and a ResourceDictionary (371) scope that follows it without being applied as a child. The dictionary holds one entry
+ * ("Title" = "Hello") so the fixture can tell the compiled dictionary from an empty one. */
+static size_t build_resources_document(unsigned char *doc)
+{
+	for (size_t index = 0; index < 211; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 8, 55); /* the substream table (12 bytes) and the 43 node bytes */
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	put32(doc, 164, 43);
+	doc[168] = 0x14; /* create Grid (442) */
+	doc[169] = (unsigned char)(442 & 0xff);
+	doc[170] = (unsigned char)((442 >> 8) | 0x80);
+	doc[171] = 0x07; /* SetValue FrameworkElement.Resources (404) */
+	doc[172] = (unsigned char)(404 & 0xff);
+	doc[173] = (unsigned char)((404 >> 8) | 0x80);
+	doc[174] = 0x14; /* create ResourceDictionary (371) */
+	doc[175] = (unsigned char)(371 & 0xff);
+	doc[176] = (unsigned char)((371 >> 8) | 0x80);
+	doc[177] = 0x04; /* PushConstant "Hello", the value the keyed insertion consumes */
+	doc[178] = 0x09;
+	put32(doc, 179, 5);
+	doc[183] = 'H'; doc[185] = 'e'; doc[187] = 'l'; doc[189] = 'l'; doc[191] = 'o';
+	doc[193] = 0x0a; /* AddToDictionaryWithKey "Title" */
+	doc[194] = 0x09;
+	put32(doc, 195, 5);
+	doc[199] = 'T'; doc[201] = 'i'; doc[203] = 't'; doc[205] = 'l'; doc[207] = 'e';
+	doc[209] = 0x21; /* close the dictionary scope */
+	doc[210] = 0x21; /* close the grid scope */
+	return 211;
 }
 
 /* A page that hosts a tree the element classes build: the stable property indices name Page.Content (999), Panel.Children (648)
@@ -1159,6 +1205,33 @@ int raven_entry(void)
 		WindowsDeleteString(target.Name);
 		loaded_style->lpVtbl->Release(loaded_style);
 		style_root->lpVtbl->Release(style_root);
+	}
+	/* FrameworkElement.Resources: a SetValue naming the property and the dictionary scope that follows it put the compiled
+	 * dictionary on the element, entry and all; clearing the property makes the next read create an empty dictionary. */
+	{
+		unsigned char resources_fixture[211];
+		IInspectable *resources_root = NULL, *compiled = NULL, *created = NULL;
+		resources_put_function put_resources = (resources_put_function)GetProcAddress(component,
+			"raven_xaml_element_put_resources");
+		resources_get_function get_resources = (resources_get_function)GetProcAddress(component,
+			"raven_xaml_element_get_resources");
+		__FIMap_2_IInspectable_IInspectable *map = NULL;
+		UINT32 size = 0;
+		if (!put_resources || !get_resources) return 712;
+		if (load(resources_fixture, (uint32_t)build_resources_document(resources_fixture), &resources_root) != S_OK ||
+			!resources_root) return 713;
+		if (get_resources(resources_root, &compiled) != S_OK || !compiled) return 714;
+		if (compiled->lpVtbl->QueryInterface(compiled, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK ||
+			!map || map->lpVtbl->get_Size(map, &size) != S_OK || size != 1) return 715;
+		map->lpVtbl->Release(map);
+		if (put_resources(resources_root, NULL) != S_OK) return 716;
+		if (get_resources(resources_root, &created) != S_OK || !created || created == compiled) return 717;
+		if (created->lpVtbl->QueryInterface(created, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK ||
+			!map || map->lpVtbl->get_Size(map, &size) != S_OK || size) return 718;
+		map->lpVtbl->Release(map);
+		created->lpVtbl->Release(created);
+		compiled->lpVtbl->Release(compiled);
+		resources_root->lpVtbl->Release(resources_root);
 	}
 
 	unsigned char property_fixture[194];

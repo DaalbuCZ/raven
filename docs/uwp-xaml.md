@@ -1443,6 +1443,25 @@ the same day — see the two entries below. Evidence:
   check the stored `TypeName` name and kind (checks 708–711). Shapr3D's
   `App.xbf` uses this form for its `ToggleSwitch` styles; the document is
   still not reachable because the app stops at WinUI activation.
+- Element resources (2026-11-01, stage 3): `FrameworkElement.Resources` (stable
+  property 404) is a real slot on the Grid, TextBlock and Button elements and
+  `raven_xaml_elements_set_object` dispatches the name to it, so a compiled
+  page's `SetValue FrameworkElement_Resources` followed by the
+  ResourceDictionary scope that carries the page's entries now stores that
+  dictionary on the element instead of being skipped. The slot holds an owned
+  reference, replaces on reassignment, and is released with the element; a
+  null assignment clears it, and `raven_xaml_element_get_resources` creates an
+  empty dictionary on first read so an element that never uses resources
+  carries none until asked. `raven_xaml_element_put_resources` is the setter
+  the loader calls. The x64/x86 `native_xaml_controls` fixtures load a
+  document whose Grid resources hold one entry and check the dictionary
+  identity, the entry count and the empty-dictionary case after clearing
+  (checks 712–718). Resource lookup does not consume these dictionaries yet.
+  The earlier x86-only fault was a fixture bug, not the component: a probe
+  that typed the exported function as `WINAPI` (`__stdcall`) while the export
+  is `__cdecl` popped the arguments twice and corrupted the 32-bit stack; the
+  engine-internal exports are all `__cdecl`, and guest declarations of them
+  must omit `WINAPI`.
 - Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
   fresh trace and the current component the first wall is still
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`

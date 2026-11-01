@@ -33,6 +33,7 @@ struct stable_property_entry {
  * Foreground the text properties a TextBlock draws with. */
 static const struct stable_property_entry properties[] = {
 	{73, L"Resources"},
+	{404, L"Resources"}, /* FrameworkElement.Resources */
 	{687, L"MergedDictionaries"},
 	{688, L"Source"},
 	{689, L"ThemeDictionaries"},
