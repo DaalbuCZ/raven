@@ -9,6 +9,7 @@
 #include "windows_ui_xaml_controls.h"
 #include "windows_ui_xaml_elements.h"
 #include "windows_ui_xaml_markup.h"
+#include "windows_ui_xaml_style.h"
 #include "windows_ui_xaml_application.h"
 #include "windows_ui_xaml_window.h"
 
@@ -28,6 +29,7 @@ typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl content_control1;
 typedef __x_ABI_CWindows_CUI_CXaml_CIWindow window1;
 typedef __x_ABI_CWindows_CUI_CXaml_CIWindowStatics window_statics;
 typedef __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName xaml_type_name;
+typedef __x_ABI_CWindows_CUI_CXaml_CIStyle style_i;
 typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider markup_provider;
 typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProviderVtbl markup_providerVtbl;
 typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType markup_type;
@@ -279,6 +281,39 @@ static size_t build_frame_properties(unsigned char *doc)
 	put32(doc, 189, 5);
 	doc[193] = 0x02;
 	return 194;
+}
+
+/* A Style whose TargetType arrives as a compiled type: one SetValueTypeConvertedResolvedType node (29) naming
+ * Style.TargetType (247) and Button (540) by stable index. The empty metadata tables force both references through the
+ * stable table, the way a compiled Style does when the type is a standard control. */
+static size_t build_style_document(unsigned char *doc)
+{
+	for (size_t index = 0; index < 177; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 8, 21); /* the substream table (12 bytes) and the nine node bytes */
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	put32(doc, 164, 9);
+	doc[168] = 0x14; /* PushScopeCreateTypeBeginInit Style (114) */
+	doc[169] = (unsigned char)(114 & 0xff);
+	doc[170] = (unsigned char)((114 >> 8) | 0x80);
+	doc[171] = 0x1d; /* SetValueTypeConvertedResolvedType */
+	doc[172] = (unsigned char)(247 & 0xff); /* Style_TargetType */
+	doc[173] = (unsigned char)((247 >> 8) | 0x80);
+	doc[174] = (unsigned char)(540 & 0xff); /* Button */
+	doc[175] = (unsigned char)((540 >> 8) | 0x80);
+	doc[176] = 0x21; /* EndInitPopScope */
+	return 177;
 }
 
 /* A page that hosts a tree the element classes build: the stable property indices name Page.Content (999), Panel.Children (648)
@@ -1106,6 +1141,25 @@ int raven_entry(void)
 		!loaded_page) return 24;
 	loaded_page->lpVtbl->Release(loaded_page);
 	loaded->lpVtbl->Release(loaded);
+	/* A compiled type reference fills the Style's TargetType with the authored short name. */
+	{
+		unsigned char style_fixture[177];
+		IInspectable *style_root = NULL;
+		style_i *loaded_style = NULL;
+		xaml_type_name target = {NULL, TypeKind_Metadata};
+		UINT32 target_length = 0;
+		const WCHAR *target_text;
+		if (load(style_fixture, (uint32_t)build_style_document(style_fixture), &style_root) != S_OK || !style_root) return 708;
+		if (style_root->lpVtbl->QueryInterface(style_root, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&loaded_style) != S_OK ||
+			!loaded_style) return 709;
+		if (loaded_style->lpVtbl->get_TargetType(loaded_style, &target) != S_OK || !target.Name ||
+			target.Kind != TypeKind_Metadata) return 710;
+		target_text = WindowsGetStringRawBuffer(target.Name, &target_length);
+		if (target_length != 6 || CompareStringOrdinal(target_text, 6, L"Button", -1, FALSE) != CSTR_EQUAL) return 711;
+		WindowsDeleteString(target.Name);
+		loaded_style->lpVtbl->Release(loaded_style);
+		style_root->lpVtbl->Release(style_root);
+	}
 
 	unsigned char property_fixture[194];
 	IInspectable *property_root = NULL;

@@ -1428,6 +1428,34 @@ the same day — see the two entries below. Evidence:
   load and lookup, missing/looping/`http` refusals, unchanged state after a
   failure, and a theme dictionary reached through `Source`. Resource lookup
   and theme precedence stay unimplemented; nothing yet consumes these maps.
+- Compiled type references (2026-11-01, stage 3): `SetValueTypeConvertedResolvedType`
+  (node 29) no longer refuses when a target is present. Its property reference
+  resolves through the stable property table (the new `Style_TargetType`
+  entry) and its type reference through either the stable class table or the
+  document's own type table; the type resolves to the authored short name
+  (`Button`, not the namespace-qualified runtime class), which is what a
+  XAML type property carries. The value reaches `Style.TargetType` through
+  the style setter, and a property whose value is not a type name still
+  refuses rather than storing the name in the wrong slot. `Style` itself is
+  now named by stable index in the metadata table (it was already in the
+  runtime catalog) so a document can declare one inline. The x64/x86
+  `native_xaml_controls` fixtures build a Style document with node 29 and
+  check the stored `TypeName` name and kind (checks 708–711). Shapr3D's
+  `App.xbf` uses this form for its `ToggleSwitch` styles; the document is
+  still not reachable because the app stops at WinUI activation.
+- Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
+  fresh trace and the current component the first wall is still
+  `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`
+  asks `RoGetActivationFactory` for it, the catalog has no entry, and the
+  managed runtime fail-fasts with `0x80040154` ("Class not registered",
+  `launch-stage7i.log`). The trace also showed a stale `raven-xaml.dll`
+  installed beside `Shapr3D.exe` shadowing the prefix's `System32` copy: the
+  loader collapses an absolute `System32` path to the bare module name, so an
+  application-local file wins where Windows would load the named path. The
+  stale copy (an older build with a different node diagnostic) was removed
+  from the test prefix; it had made earlier traces look as if the current
+  component was running. `RAVEN_TRACE_STRINGS=1` now renders created
+  HSTRINGs in the API trace, which is how the failing class name was read.
 
 ## Performance rules
 

@@ -1754,6 +1754,34 @@ static HRESULT WINAPI style_put_target_type(__x_ABI_CWindows_CUI_CXaml_CIStyle *
 	return S_OK;
 }
 
+/* The loader's compiled type reference: SetValueTypeConvertedResolvedType carries a type instead of a constant, and the
+ * one property the engine has that takes a type is the Style's TargetType. The compiled type resolves to the authored
+ * short name, so a Style built from XAML carries the same TargetType a hand-written one does. Any other property answers
+ * S_FALSE and the loader refuses the document rather than dropping the value. */
+HRESULT raven_xaml_element_set_type(IInspectable *object, const WCHAR *name, UINT32 length, const WCHAR *type_name,
+	UINT32 type_length)
+{
+	static const WCHAR target_type_property[] = L"TargetType";
+	__x_ABI_CWindows_CUI_CXaml_CIStyle *style = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName type;
+	if (!object)
+		return E_POINTER;
+	if (length != ARRAYSIZE(target_type_property) - 1 ||
+		CompareStringOrdinal(name, (int)length, target_type_property, -1, FALSE) != CSTR_EQUAL)
+		return S_FALSE;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style)) || !style)
+		return S_FALSE;
+	type.Name = NULL;
+	type.Kind = TypeKind_Metadata;
+	if (type_name && type_length)
+		WindowsCreateString(type_name, type_length, &type.Name);
+	const HRESULT result = style->lpVtbl->put_TargetType(style, type);
+	if (type.Name)
+		WindowsDeleteString(type.Name);
+	style->lpVtbl->Release(style);
+	return result;
+}
+
 static HRESULT WINAPI style_get_based_on(__x_ABI_CWindows_CUI_CXaml_CIStyle *iface, uint64_t out)
 {
 	struct style_object *self = (struct style_object *)iface;

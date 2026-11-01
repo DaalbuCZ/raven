@@ -67,6 +67,11 @@ void raven_xaml_page_set_frame(IInspectable *page, IInspectable *frame);
 HRESULT raven_xaml_element_set_name(IInspectable *object, const WCHAR *text, UINT32 length);
 HRESULT raven_xaml_element_set_integer(IInspectable *object, const WCHAR *name, UINT32 length, int64_t value);
 HRESULT raven_xaml_element_set_text(IInspectable *object, const WCHAR *name, UINT32 length, const WCHAR *text, UINT32 text_length);
+/* A compiled type reference applied to a property whose value is a type name (SetValueTypeConvertedResolvedType). The
+ * engine's only such property is Style.TargetType, which stores the authored short name; other properties answer S_FALSE
+ * so the loader refuses the form instead of applying a guess. */
+HRESULT raven_xaml_element_set_type(IInspectable *object, const WCHAR *name, UINT32 length, const WCHAR *type_name,
+	UINT32 type_length);
 HRESULT raven_xaml_element_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
 HRESULT raven_xaml_window_set_name(IInspectable *object, const WCHAR *text, UINT32 length);
 BOOL raven_xaml_window_notify(DWORD reason, void *reserved);

@@ -283,6 +283,39 @@ static HRESULT metadata_type_name(const struct metadata *m, uint32_t id, WCHAR *
 	return S_OK;
 }
 
+/* The authored short name of a type record, the form a XAML type property carries ("Button", not
+ * "Windows.UI.Xaml.Controls.Button"): the record's name field alone, without its namespace. */
+static HRESULT metadata_type_short_name(const struct metadata *m, uint32_t id, const WCHAR **name, UINT32 *length)
+{
+	size_t position;
+	uint32_t name_id;
+	if (id >= m->type_count)
+		return E_INVALIDARG;
+	position = m->types + 4 + (size_t)id * 12;
+	name_id = read_u32(m->data + position + 8);
+	return metadata_string(m, name_id, name, length);
+}
+
+/* A compiled type reference in either form: a stable index into the class table or an index into the document's own type
+ * table. The stable table names the full runtime class, so the short name is what follows its last dot. */
+static HRESULT type_reference_name(const struct metadata *m, uint16_t reference, const WCHAR **name, UINT32 *length)
+{
+	if (reference & 0x8000) {
+		const WCHAR *class_name = raven_xaml_class_by_stable(reference & 0x7FFF);
+		const WCHAR *short_name;
+		if (!class_name)
+			return CLASS_E_CLASSNOTAVAILABLE;
+		short_name = class_name;
+		for (const WCHAR *at = class_name; *at; ++at)
+			if (*at == L'.')
+				short_name = at + 1;
+		*name = short_name;
+		*length = (UINT32)lstrlenW(short_name);
+		return S_OK;
+	}
+	return metadata_type_short_name(m, reference, name, length);
+}
+
 static HRESULT metadata_property_name(const struct metadata *m, uint32_t id, const WCHAR **name, UINT32 *length)
 {
 	size_t position;
@@ -955,7 +988,22 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			} else if (target) { status = E_NOTIMPL; goto done; }
 			break;
 		}
-		case 28: case 29: case 31: case 38:
+		case 29: {
+			/* SetValueTypeConvertedResolvedType: a property and a compiled type, the form a Style's TargetType arrives
+			 * in. The type resolves to the authored short name; a property whose value is not a type name is refused. */
+			const uint16_t reference = next_u16(&r);
+			const uint16_t type_reference = next_u16(&r);
+			const WCHAR *name = NULL, *type_name = NULL;
+			UINT32 length = 0, type_length = 0;
+			if (r.invalid) { status = E_INVALIDARG; goto done; }
+			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length)) &&
+				SUCCEEDED(type_reference_name(m, type_reference, &type_name, &type_length))) {
+				HRESULT applied = raven_xaml_element_set_type(stack[depth - 1].object, name, length, type_name, type_length);
+				if (target && applied != S_OK) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+			} else if (target) { status = E_NOTIMPL; goto done; }
+			break;
+		}
+		case 28: case 31: case 38:
 			next_u16(&r);
 			next_u16(&r);
 			if (target) { status = r.invalid ? E_INVALIDARG : E_NOTIMPL; goto done; }

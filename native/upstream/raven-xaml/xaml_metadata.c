@@ -73,6 +73,9 @@ static const struct stable_property_entry properties[] = {
 	{859, L"ColumnSpan"},
 	{861, L"RowDefinitions"},
 	{858, L"ColumnDefinitions"},
+	/* Style.TargetType: the one property whose value is a compiled type rather than a constant
+	 * (SetValueTypeConvertedResolvedType). The loader applies it through the style setter, which stores the short name. */
+	{247, L"TargetType"},
 };
 
 static const struct metadata_entry entries[] = {
@@ -84,6 +87,8 @@ static const struct metadata_entry entries[] = {
 	{442, L"Grid", L"Windows.UI.Xaml.Controls.Grid"},
 	{396, L"TextBlock", L"Windows.UI.Xaml.Controls.TextBlock"},
 	{540, L"Button", L"Windows.UI.Xaml.Controls.Button"},
+	/* A compiled document declares its styles inline, so the Style class is named by stable index like the controls. */
+	{114, L"Style", L"Windows.UI.Xaml.Style"},
 	{106, L"RowDefinition", L"Windows.UI.Xaml.Controls.RowDefinition"},
 	{44, L"ColumnDefinition", L"Windows.UI.Xaml.Controls.ColumnDefinition"},
 	/* The template classes a real app XBF names by stable index: the property Control.Template (560) above and these two
