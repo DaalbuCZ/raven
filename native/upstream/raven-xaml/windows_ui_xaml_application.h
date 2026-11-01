@@ -1,4 +1,4 @@
-/* Generated from Windows.UI.Xaml.winmd (SHA-256 c55875b03b9829c2e6ed6ad8b2d1ba33bd80c31208ba3bcda1a12ac46eddc41d) by scripts/generate-winrt-header.py. Do not edit. */
+/* Generated from Windows.UI.Xaml.winmd (SHA-256 c55875b03b9829c2e6ed6ad8b2d1ba33bd80c31208ba3bcda1a12ac46eddc41d) by scripts/generate-winrt-header.py. RequestedTheme and LoadComponent parameter types adapted to the WinRT ABI. */
 #pragma once
 
 #include <windows.h>
@@ -24,8 +24,8 @@ typedef struct __x_ABI_CWindows_CUI_CXaml_CIApplicationVtbl {
 	HRESULT (STDMETHODCALLTYPE *get_Resources)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
 	HRESULT (STDMETHODCALLTYPE *put_Resources)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
 	HRESULT (STDMETHODCALLTYPE *get_DebugSettings)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *get_RequestedTheme)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *put_RequestedTheme)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
+	HRESULT (STDMETHODCALLTYPE *get_RequestedTheme)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, INT32 *a1);
+	HRESULT (STDMETHODCALLTYPE *put_RequestedTheme)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, INT32 a1);
 	HRESULT (STDMETHODCALLTYPE *add_UnhandledException)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1, uint64_t a2);
 	HRESULT (STDMETHODCALLTYPE *remove_UnhandledException)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1);
 	HRESULT (STDMETHODCALLTYPE *add_Suspending)(__x_ABI_CWindows_CUI_CXaml_CIApplication *This, uint64_t a1, uint64_t a2);
@@ -114,8 +114,8 @@ typedef struct __x_ABI_CWindows_CUI_CXaml_CIApplicationStaticsVtbl {
 
 	HRESULT (STDMETHODCALLTYPE *get_Current)(__x_ABI_CWindows_CUI_CXaml_CIApplicationStatics *This, uint64_t a1);
 	HRESULT (STDMETHODCALLTYPE *Start)(__x_ABI_CWindows_CUI_CXaml_CIApplicationStatics *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *LoadComponent)(__x_ABI_CWindows_CUI_CXaml_CIApplicationStatics *This, uint64_t a1, uint64_t a2);
-	HRESULT (STDMETHODCALLTYPE *LoadComponent2)(__x_ABI_CWindows_CUI_CXaml_CIApplicationStatics *This, uint64_t a1, uint64_t a2, uint64_t a3);
+	HRESULT (STDMETHODCALLTYPE *LoadComponent)(__x_ABI_CWindows_CUI_CXaml_CIApplicationStatics *This, IInspectable *a1, IInspectable *a2);
+	HRESULT (STDMETHODCALLTYPE *LoadComponent2)(__x_ABI_CWindows_CUI_CXaml_CIApplicationStatics *This, IInspectable *a1, IInspectable *a2, INT32 a3);
 	END_INTERFACE
 } __x_ABI_CWindows_CUI_CXaml_CIApplicationStaticsVtbl;
 

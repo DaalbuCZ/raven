@@ -83,6 +83,10 @@ HRESULT raven_xaml_elements_set_name(IInspectable *object, const WCHAR *text, UI
 HRESULT raven_xaml_elements_set_text(IInspectable *object, const WCHAR *name, UINT32 length, const WCHAR *text, UINT32 text_length);
 HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
 HRESULT raven_xaml_application_current(IInspectable **out);
+HRESULT raven_xaml_window_current(IInspectable **out);
+HRESULT raven_launch_arguments_create(IInspectable **out);
+HRESULT raven_xaml_load_into(const void *data, uint32_t size, IInspectable *target);
+HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length);
 HRESULT raven_dispatcher_queue_current(__x_ABI_CWindows_CSystem_CIDispatcherQueue **out);
 HRESULT raven_window_post(__x_ABI_CWindows_CUI_CCore_CICoreWindow *window,
 	__x_ABI_CWindows_CUI_CCore_CIDispatchedHandler *callback, LONG priority, boolean *accepted);

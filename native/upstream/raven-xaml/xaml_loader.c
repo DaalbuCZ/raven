@@ -26,6 +26,7 @@
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
+#include "windows_ui_xaml_application.h"
 #include <stdint.h>
 #include <winstring.h>
 
@@ -180,22 +181,22 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 		!metadata_bounds(m, m->properties + 4, m->property_count, 12) ||
 		!metadata_bounds(m, m->xmlns + 4, m->xmlns_count, 4))
 		return E_INVALIDARG;
-	/* Walk the string table once to learn whether every entry carries a null terminator, as older metadata does. */
+	/* Test both encodings independently: a bad plain-string interpretation must not reject a terminated table. */
 	for (int terminated = 0; terminated < 2; ++terminated) {
+		BOOL valid = TRUE;
 		position = m->strings + 4;
 		for (uint32_t index = 0; index < m->string_count; ++index) {
 			int32_t length;
-			if (position > size || size - position < 4)
-				return E_INVALIDARG;
+			if (position > m->assemblies || m->assemblies - position < 4) { valid = FALSE; break; }
 			length = (int32_t)read_u32(data + position);
-			if (length < 0 || (size_t)length > (size - position - 4) / 2)
-				return E_INVALIDARG;
+			if (length < 0 || (size_t)length > (m->assemblies - position - 4) / 2) { valid = FALSE; break; }
 			position += 4 + (size_t)length * 2;
-			if (terminated && size - position < 2)
-				return E_INVALIDARG;
-			position += terminated ? 2 : 0;
+			if (terminated) {
+				if (m->assemblies - position < 2 || read_u16(data + position) != 0) { valid = FALSE; break; }
+				position += 2;
+			}
 		}
-		if (position == m->assemblies) {
+		if (valid && position == m->assemblies) {
 			m->null_terminated = terminated;
 			return S_OK;
 		}
@@ -424,6 +425,41 @@ static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 lengt
 	}
 }
 
+static HRESULT use_target(const struct metadata *m, uint16_t reference, IInspectable *target, IInspectable **out)
+{
+	WCHAR buffer[MAX_NAME];
+	const WCHAR *expected;
+	UINT32 length;
+	HSTRING actual = NULL;
+	HRESULT result;
+	if (reference == (0x8000 | 31)) {
+		IInspectable *application = NULL;
+		result = IInspectable_QueryInterface(target, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&application);
+		if (application) IInspectable_Release(application);
+		if (FAILED(result)) return result;
+	} else {
+		if (reference & 0x8000) {
+			expected = raven_xaml_class_by_stable(reference & 0x7fff);
+			if (!expected) return E_NOTIMPL;
+			length = (UINT32)lstrlenW(expected);
+		} else {
+			result = metadata_type_name(m, reference, buffer, ARRAYSIZE(buffer), &length);
+			if (FAILED(result)) return result;
+			expected = buffer;
+		}
+		result = IInspectable_GetRuntimeClassName(target, &actual);
+		if (FAILED(result)) return result;
+		UINT32 actual_length = 0;
+		const WCHAR *actual_text = WindowsGetStringRawBuffer(actual, &actual_length);
+		BOOL matches = actual_length == length && CompareStringOrdinal(actual_text, (int)actual_length, expected, (int)length, FALSE) == CSTR_EQUAL;
+		WindowsDeleteString(actual);
+		if (!matches) return E_INVALIDARG;
+	}
+	IInspectable_AddRef(target);
+	*out = target;
+	return S_OK;
+}
+
 #define LOADER_DEPTH 64
 
 /* One open scope. kind 0 is an element scope; 1 a ControlTemplate whose root element has not arrived; 2 a
@@ -439,7 +475,8 @@ struct scope {
 	UINT32 deferred_length;
 };
 
-static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root)
+static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root,
+	IInspectable *target, BOOL *target_used)
 {
 	struct reader r = {m->data, begin, end, 0};
 	struct scope stack[LOADER_DEPTH];
@@ -496,7 +533,11 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				if (FAILED(status))
 					goto done;
 			}
-			status = create_reference(m, reference, &object);
+			if (target && !*target_used) {
+				status = use_target(m, reference, target, &object);
+				if (FAILED(status)) goto done;
+				*target_used = TRUE;
+			} else status = create_reference(m, reference, &object);
 			if (object) {
 				if (raven_xaml_object_is_control_template(object)) {
 					/* The template scope opens; the pending property name rides the scope as the deferred
@@ -589,7 +630,16 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				if (FAILED(status))
 					goto done;
 			}
-			if (SUCCEEDED(create_reference(m, reference, &object)) && object) {
+			if (target && !*target_used) {
+				status = use_target(m, reference, target, &object);
+				if (FAILED(status)) goto done;
+				*target_used = TRUE;
+				if (depth && !stack[depth - 1].object) {
+					stack[depth - 1].object = object;
+					IInspectable_AddRef(object);
+				}
+			} else (void)create_reference(m, reference, &object);
+			if (object) {
 				if (depth && stack[depth - 1].kind == 1) {
 					/* A non-scoped object under a template scope is the root the same way a scoped one is. */
 					if (raven_xaml_control_template_put_root(stack[depth - 1].object, object) == S_OK)
@@ -675,9 +725,16 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			next_u16(&r);
 			next_u16(&r);
 			break;
-		default:
+		default: {
+			char message[] = "raven-xaml: unsupported XBF node 000\n";
+			const size_t digits = sizeof message - 5;
+			message[digits] = (char)('0' + kind / 100);
+			message[digits + 1] = (char)('0' + (kind / 10) % 10);
+			message[digits + 2] = (char)('0' + kind % 10);
+			OutputDebugStringA(message);
 			status = E_NOTIMPL;
 			goto done;
+		}
 		}
 		if (r.invalid) {
 			status = E_INVALIDARG;
@@ -695,13 +752,14 @@ done:
 	return status;
 }
 
-__declspec(dllexport) HRESULT WINAPI RavenXamlLoad(const void *data, uint32_t size, IInspectable **root)
+static HRESULT load_document(const void *data, uint32_t size, IInspectable **root, IInspectable *target)
 {
 	const uint8_t *bytes = (const uint8_t *)data;
 	uint32_t metadata_size, node_size, count;
 	size_t table, node_end, substreams;
 	struct metadata metadata;
 	HRESULT status;
+	BOOL target_used = FALSE;
 	if (!root)
 		return E_POINTER;
 	*root = NULL;
@@ -729,11 +787,11 @@ __declspec(dllexport) HRESULT WINAPI RavenXamlLoad(const void *data, uint32_t si
 		if (node_offset > line_offset || line_offset > node_end - substreams)
 			return E_INVALIDARG;
 	}
-	for (uint32_t index = 0; index < count; ++index) {
+	for (uint32_t index = 0; index < count && (!target || index == 0); ++index) {
 		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
 		const uint32_t line_offset = read_u32(bytes + table + 4 + (size_t)index * 8 + 4);
 		const size_t begin = substreams + node_offset, end = substreams + line_offset;
-		status = load_nodes(&metadata, begin, end, root);
+		status = load_nodes(&metadata, begin, end, root, target, &target_used);
 		if (FAILED(status)) {
 			if (*root) {
 				IInspectable_Release(*root);
@@ -742,5 +800,19 @@ __declspec(dllexport) HRESULT WINAPI RavenXamlLoad(const void *data, uint32_t si
 			return status;
 		}
 	}
-	return S_OK;
+	return target && !target_used ? E_INVALIDARG : S_OK;
+}
+
+__declspec(dllexport) HRESULT WINAPI RavenXamlLoad(const void *data, uint32_t size, IInspectable **root)
+{
+	return load_document(data, size, root, NULL);
+}
+
+HRESULT raven_xaml_load_into(const void *data, uint32_t size, IInspectable *target)
+{
+	IInspectable *root = NULL;
+	if (!target) return E_POINTER;
+	HRESULT result = load_document(data, size, &root, target);
+	if (root) IInspectable_Release(root);
+	return result;
 }

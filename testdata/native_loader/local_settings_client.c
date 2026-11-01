@@ -481,7 +481,9 @@ int raven_entry(void)
 		if (map->lpVtbl->Remove(map, int_key) != S_OK) return 11;
 	} else if (!lstrcmpW(mode, L"verify")) {
 		IInspectable *missing = (void *)1;
-		if (map->lpVtbl->Lookup(map, int_key, &missing) != S_OK || missing || !check_string(map, text_key)) return 12;
+		boolean found = TRUE;
+		if (map->lpVtbl->Lookup(map, int_key, &missing) != S_OK || missing ||
+			map->lpVtbl->HasKey(map, int_key, &found) != S_OK || found || !check_string(map, text_key)) return 12;
 		if (map->lpVtbl->Remove(map, text_key) != S_OK) return 13;
 	} else return 14;
 	if (text) WindowsDeleteString(text);

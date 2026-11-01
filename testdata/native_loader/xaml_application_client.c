@@ -6,6 +6,8 @@
 #include <winstring.h>
 #include <activation.h>
 #include "windows_ui_xaml_application.h"
+#include "windows_ui_xaml_application_overrides.h"
+#include "windows_ui_xaml_window_created.h"
 #include "windows_ui_xaml_controls.h"
 #include "windows_ui_xaml_elements.h"
 
@@ -277,6 +279,71 @@ static size_t build_stable_flow_document(unsigned char *doc)
 /* The Application class of the Windows Runtime: activation, the factory and statics, a created object with the three application
  * interfaces, Application.Start giving its callback initialization parameters, and Application.Current returning the application
  * the runtime created. */
+typedef __x_ABI_CWindows_CUI_CXaml_CIApplicationOverrides fixture_overrides_i;
+typedef __x_ABI_CWindows_CUI_CXaml_CIWindowCreatedEventArgs fixture_window_args_i;
+struct fixture_application {
+	fixture_overrides_i iface;
+	LONG refs;
+	IInspectable *inner;
+	application1 *application;
+	unsigned stages;
+};
+static HRESULT WINAPI fixture_app_query(fixture_overrides_i *iface, REFIID iid, void **out)
+{
+	struct fixture_application *self = (void *)iface;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) ||
+		IsEqualIID(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIApplicationOverrides)) {
+		*out = iface;
+		InterlockedIncrement(&self->refs);
+		return S_OK;
+	}
+	return self->inner ? IInspectable_QueryInterface(self->inner, iid, out) : E_NOINTERFACE;
+}
+static ULONG WINAPI fixture_app_addref(fixture_overrides_i *iface)
+{ return InterlockedIncrement(&((struct fixture_application *)iface)->refs); }
+static ULONG WINAPI fixture_app_release(fixture_overrides_i *iface)
+{ return InterlockedDecrement(&((struct fixture_application *)iface)->refs); }
+static HRESULT WINAPI fixture_app_iids(fixture_overrides_i *iface, ULONG *count, IID **iids)
+{ if (!count || !iids) return E_POINTER; *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI fixture_app_name(fixture_overrides_i *iface, HSTRING *name)
+{ if (!name) return E_POINTER; *name = NULL; return S_OK; }
+static HRESULT WINAPI fixture_app_trust(fixture_overrides_i *iface, TrustLevel *level)
+{ if (!level) return E_POINTER; *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI fixture_app_event(fixture_overrides_i *iface, uintptr_t args) { return S_OK; }
+static HRESULT WINAPI fixture_app_window(fixture_overrides_i *iface, uintptr_t value)
+{
+	struct fixture_application *self = (void *)iface;
+	fixture_window_args_i *args = (void *)value;
+	IInspectable *window = NULL;
+	if (self->stages || !args || args->lpVtbl->get_Window(args, (uintptr_t)&window) != S_OK || !window) return E_FAIL;
+	IInspectable_Release(window);
+	self->stages = 1;
+	return S_OK;
+}
+static HRESULT WINAPI fixture_app_launch(fixture_overrides_i *iface, uintptr_t value)
+{
+	struct fixture_application *self = (void *)iface;
+	static const IID prelaunch = {0x0c44717b,0x19f7,0x48d6,{0xb0,0x46,0xcf,0x22,0x82,0x6e,0xaa,0x74}};
+	IUnknown *part = NULL;
+	boolean flag = TRUE;
+	IInspectable *args = (void *)value;
+	if (self->stages != 1 || !args || IInspectable_QueryInterface(args, &prelaunch, (void **)&part) != S_OK || !part) return E_FAIL;
+	void **slots = *(void ***)part;
+	HRESULT (WINAPI *get_prelaunch)(void *, boolean *) = (void *)slots[6];
+	HRESULT result = get_prelaunch(part, &flag);
+	IUnknown_Release(part);
+	if (result != S_OK || flag) return E_FAIL;
+	self->stages = 2;
+	return self->application->lpVtbl->Exit(self->application);
+}
+static const __x_ABI_CWindows_CUI_CXaml_CIApplicationOverridesVtbl fixture_app_table = {
+	fixture_app_query, fixture_app_addref, fixture_app_release, fixture_app_iids, fixture_app_name, fixture_app_trust,
+	fixture_app_event, fixture_app_launch, fixture_app_event, fixture_app_event, fixture_app_event,
+	fixture_app_event, fixture_app_event, fixture_app_event, fixture_app_window
+};
+
 int raven_entry(void)
 {
 	static const WCHAR name[] = L"Windows.UI.Xaml.Application";
@@ -307,7 +374,10 @@ int raven_entry(void)
 	{
 		INT32 theme = -1;
 		if (application->lpVtbl->get_RequestedTheme(application, 0) != E_POINTER ||
-			application->lpVtbl->get_RequestedTheme(application, (uint64_t)(uintptr_t)&theme) != S_OK || theme != 0) return 105;
+			application->lpVtbl->get_RequestedTheme(application, &theme) != S_OK || theme != 0 ||
+			application->lpVtbl->put_RequestedTheme(application, 1) != S_OK ||
+			application->lpVtbl->get_RequestedTheme(application, &theme) != S_OK || theme != 1 ||
+			application->lpVtbl->put_RequestedTheme(application, 2) != E_INVALIDARG) return 105;
 	}
 	if (application->lpVtbl->GetRuntimeClassName(application, &runtime_name) != S_OK) return 7;
 	const WCHAR *text = WindowsGetStringRawBuffer(runtime_name, &length);
@@ -347,6 +417,19 @@ int raven_entry(void)
 	IInspectable *replacement = NULL;
 	if (activation->lpVtbl->ActivateInstance(activation, &replacement) != S_OK || !replacement || lifecycle.refs != 1) return 106;
 	replacement->lpVtbl->Release(replacement);
+	{
+		struct fixture_application derived = {{(void *)&fixture_app_table}, 1, NULL, NULL, 0};
+		IInspectable *base = NULL, *next = NULL;
+		if (factory->lpVtbl->CreateInstance(factory, (uint64_t)(uintptr_t)&derived.iface,
+			(uint64_t)(uintptr_t)&derived.inner, (uint64_t)(uintptr_t)&base) != S_OK || !base || !derived.inner) return 107;
+		derived.application = (application1 *)base;
+		if (statics->lpVtbl->Start(statics, (uint64_t)(uintptr_t)&init) != S_OK || derived.stages != 2) return 108;
+		IInspectable_Release(base);
+		if (activation->lpVtbl->ActivateInstance(activation, &next) != S_OK || !next) return 109;
+		IInspectable_Release(next);
+		IInspectable_Release(derived.inner);
+		if (derived.refs != 1) return 110;
+	}
 	factory->lpVtbl->Release(factory);
 	statics->lpVtbl->Release(statics);
 	activation->lpVtbl->Release(activation);

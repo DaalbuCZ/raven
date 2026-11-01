@@ -407,6 +407,11 @@ static HRESULT WINAPI statics_current(xaml_window_statics *iface, uint64_t out)
 	return S_OK;
 }
 
+HRESULT raven_xaml_window_current(IInspectable **out)
+{
+	return statics_current(NULL, (uint64_t)(uintptr_t)out);
+}
+
 struct window_factory;
 
 struct factory_activation { const IActivationFactoryVtbl *lpVtbl; struct window_factory *owner; };

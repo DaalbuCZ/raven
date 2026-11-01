@@ -12,7 +12,8 @@
  * that reference: a schema entry's name offset counts 4-byte units and is doubled into a character index, and a data
  * item string's length counts bytes while its offset counts UTF-16 units. The parse is fail-closed: a file that is
  * absent, truncated or shaped differently leaves an empty index whose lookups answer the miss, never a crash. The
- * extended [def_hnames schema form (ASCII name storage) is not modeled; a file using it reads as empty.
+ * extended [def_hnamesx] schema form stores ASCII names separately; they are expanded to UTF-16 for lookup.
+ * Compiled resources can also be resolved as bounded binary blobs for the XAML loader.
  *
  * The classes: the statics hand out the per-process ResourceManager singleton, whose MainResourceMap is the root of the
  * schema; ResourceMap.GetValue answers a NamedResource, whose Resolve answers the item's first string candidate and
@@ -163,7 +164,7 @@ static const IID qualifier_view_iid =
 #define PRI_MAX_SECTIONS 4096
 #define PRI_MAX_LIST 1024
 #define PRI_MAX_TABLE (1u << 20)
-#define PRI_MAX_DATA_SECTIONS 32
+#define PRI_MAX_DATA_SECTIONS 1024
 #define PRI_MAX_NAME_UNITS 1024
 #define PRI_MAX_PATH_UNITS 1024
 #define PRI_MAX_VALUE_UNITS 65536
@@ -179,8 +180,8 @@ struct pri_schema_entry {
 };
 
 struct pri_data_section {
-	UINT32 string_count;
-	const BYTE *table; /* string_count (u16 units offset, u16 bytes length) pairs */
+	UINT32 string_count, blob_count;
+	const BYTE *table, *blob_table; /* string_count (u16 units offset, u16 bytes length) pairs */
 	const BYTE *data; /* the stored strings */
 	UINT32 data_bytes;
 };
@@ -192,6 +193,8 @@ struct pri_state {
 	struct pri_schema_entry *entries;
 	const WCHAR *block;
 	UINT32 block_units;
+	WCHAR *ascii_block;
+	UINT32 ascii_units;
 	UINT32 iteminfo_count; /* (u16 decision, u16 first candidate) per item */
 	const BYTE *iteminfo;
 	UINT32 decision_count; /* (u16 first set, u16 set count) per decision */
@@ -313,7 +316,9 @@ static BOOL parse_data_section(UINT32 index, struct pri_section_body *body)
 		return FALSE;
 	section = &state->data[state->data_count];
 	section->string_count = string_count;
+	section->blob_count = blob_count;
 	section->table = cursor.data + 12;
+	section->blob_table = section->table + string_count * 4;
 	section->data = cursor.data + stored;
 	section->data_bytes = cursor.length - stored;
 	state->data_section_index[state->data_count] = (UINT16)index;
@@ -334,7 +339,8 @@ static BOOL parse_index(BYTE *data, UINT32 length)
 	UINT32 iteminfo_count, candidate_count, extension_length;
 	UINT32 iteminfo_at, candidates_at;
 	UINT32 entry_count, scope_count, item_count, unicode_units;
-	UINT32 unique_length, name_length, unknown;
+	UINT32 unique_length, name_length, unknown, ascii_units = 0;
+	BOOL extended = FALSE, ascii_names = FALSE;
 
 	if (length < 32 || memcmp(data, "mrm_pri2", 8) != 0)
 		return FALSE;
@@ -345,9 +351,10 @@ static BOOL parse_index(BYTE *data, UINT32 length)
 	state->file = data;
 	state->file_length = length;
 
-	/* the PRI descriptor: the counts of the index lists and the primary resource map's directory index */
-	if (!section_body(0, &body) || !body_matches(&body, "[mrm_pridescex]"))
-		return FALSE;
+	/* The descriptor can appear anywhere in the section directory. */
+	for (i = 0; i < count; ++i)
+		if (section_body(i, &body) && body_matches(&body, "[mrm_pridescex]")) break;
+	if (i == count) return FALSE;
 	cursor.data = data + body.start + 32;
 	cursor.length = body.length - 40;
 	cursor.at = 0;
@@ -445,7 +452,7 @@ static BOOL parse_index(BYTE *data, UINT32 length)
 		state->decision_count = decision_count;
 	}
 
-	/* the hierarchical schema, in the non-extended form only: names in the unicode block after the entry tables */
+	/* The extended schema can carry both UTF-16 and compact ASCII names. */
 	if (!section_body(schema_index, &body))
 		return FALSE;
 	cursor.data = data + body.start + 32;
@@ -454,8 +461,11 @@ static BOOL parse_index(BYTE *data, UINT32 length)
 	if (!take_u16(&cursor, &unknown) || !take_u16(&cursor, &unique_length) ||
 		!take_u16(&cursor, &name_length) || !take_u16(&cursor, &unknown))
 		return FALSE;
-	if (cursor.length >= 11 && !memcmp(cursor.data + 8, "[def_hnames", 11))
-		return FALSE; /* the extended ASCII-name form is not modeled: the index reads as empty */
+	if (cursor.length >= 24 && !memcmp(cursor.data + 8, "[def_hnames", 11)) {
+		extended = TRUE;
+		ascii_names = !memcmp(cursor.data + 8, "[def_hnamesx]", 13);
+		if (!skip_bytes(&cursor, 16)) return FALSE;
+	}
 	if (!skip_bytes(&cursor, 20)) /* the schema version info, unread */
 		return FALSE;
 	if (unique_length > (cursor.length - cursor.at) / 2 || name_length > (cursor.length - cursor.at) / 2)
@@ -465,6 +475,8 @@ static BOOL parse_index(BYTE *data, UINT32 length)
 	if (!take_u32(&cursor, &entry_count) || !take_u32(&cursor, &scope_count) || !take_u32(&cursor, &item_count) ||
 		!take_u32(&cursor, &unicode_units) || !take_u32(&cursor, &unknown))
 		return FALSE;
+	if (extended && ascii_names && !take_u32(&cursor, &ascii_units)) return FALSE;
+	if (ascii_units > (1u << 24)) return FALSE;
 	if (entry_count > PRI_MAX_TABLE ||
 		entry_count > (cursor.length - cursor.at) / 12 ||
 		scope_count > (cursor.length - cursor.at - entry_count * 12) / 8 ||
@@ -493,6 +505,16 @@ static BOOL parse_index(BYTE *data, UINT32 length)
 		return FALSE;
 	state->block = (const WCHAR *)(cursor.data + cursor.at);
 	state->block_units = unicode_units;
+	if (!skip_bytes(&cursor, unicode_units * 2) || ascii_units > cursor.length - cursor.at) return FALSE;
+	if (ascii_units) {
+		state->ascii_block = ALLOC(sizeof(WCHAR) * (SIZE_T)ascii_units);
+		if (!state->ascii_block) return FALSE;
+		for (i = 0; i < ascii_units; ++i) {
+			if (cursor.data[cursor.at + i] > 0x7f) return FALSE;
+			state->ascii_block[i] = cursor.data[cursor.at + i];
+		}
+		state->ascii_units = ascii_units;
+	}
 	state->entry_count = entry_count;
 	return TRUE;
 }
@@ -590,8 +612,12 @@ static void ensure_pri(void)
 		BYTE *data = NULL;
 		UINT32 length = 0;
 		if (find_pri(path) && read_file(path, &data, &length)) {
-			if (!parse_index(data, length))
-				FREE(data); /* a file that does not parse is dropped; the state stays empty */
+			if (!parse_index(data, length)) {
+				FREE(pri_state.entries);
+				FREE(pri_state.ascii_block);
+				memset(&pri_state, 0, sizeof pri_state);
+				FREE(data);
+			}
 		}
 		InterlockedExchange(&state, 2);
 	} else {
@@ -607,13 +633,21 @@ static const WCHAR *entry_name(UINT32 index, UINT32 *length)
 	struct pri_state *state = &pri_state;
 	const WCHAR *name;
 	UINT32 start, limit, units;
-	if (index >= state->entry_count || !state->block)
+	if (index >= state->entry_count)
 		return NULL;
-	start = (UINT32)state->entries[index].offset * 2;
-	if (start >= state->block_units)
-		return NULL;
-	name = state->block + start;
-	limit = state->block_units - start;
+	if (state->entries[index].flags & 0x20) {
+		start = state->entries[index].offset;
+		if (!state->ascii_block || start >= state->ascii_units) return NULL;
+		name = state->ascii_block + start;
+		limit = state->ascii_units - start;
+	} else {
+		start = (UINT32)state->entries[index].offset * 2;
+		if (!state->block_units && index == 0 && !state->entries[index].name_len &&
+			state->entries[index].parent == 0) { *length = 0; return L""; }
+		if (!state->block || start >= state->block_units) return NULL;
+		name = state->block + start;
+		limit = state->block_units - start;
+	}
 	units = state->entries[index].name_len ? state->entries[index].name_len : limit;
 	if (units > limit)
 		units = limit;
@@ -718,6 +752,35 @@ static BOOL candidate_range(UINT32 index, UINT32 *first, UINT32 *count)
 	*first = first_candidate;
 	*count = set_count;
 	return TRUE;
+}
+
+/* Resolve a package resource to a bounded blob in the process-lifetime PRI buffer. */
+HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length)
+{
+	WCHAR path[PRI_MAX_PATH_UNITS];
+	UINT32 path_length, first, count;
+	if (!name || !data || !length) return E_POINTER;
+	*data = NULL; *length = 0;
+	ensure_pri();
+	for (UINT32 i = 0; i < pri_state.entry_count; ++i) {
+		if ((pri_state.entries[i].flags & 0x10) || !entry_path(i, path, ARRAYSIZE(path), &path_length)) continue;
+		if (CompareStringOrdinal(name, (int)name_length, path, (int)path_length, TRUE) != CSTR_EQUAL) continue;
+		if (!candidate_range(i, &first, &count) || !count) return E_BOUNDS;
+		const BYTE *candidate = pri_state.candidates + first * 8;
+		if (candidate[0] != 1) return E_NOTIMPL;
+		UINT32 item = read_u16(candidate, 4), section = read_u16(candidate, 6), index;
+		for (index = 0; index < pri_state.data_count; ++index)
+			if (pri_state.data_section_index[index] == section) break;
+		if (index == pri_state.data_count) return E_BOUNDS;
+		struct pri_data_section *items = &pri_state.data[index];
+		if (item < items->string_count || item - items->string_count >= items->blob_count) return E_INVALIDARG;
+		item -= items->string_count;
+		UINT32 offset = read_u32(items->blob_table, item * 8), bytes = read_u32(items->blob_table, item * 8 + 4);
+		if (offset > items->data_bytes || bytes > items->data_bytes - offset) return E_INVALIDARG;
+		*data = items->data + offset; *length = bytes;
+		return S_OK;
+	}
+	return E_BOUNDS;
 }
 
 /* The ResourceCandidate: the string value is copied out of the index so the object owns its answer; the fixture

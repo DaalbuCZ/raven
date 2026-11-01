@@ -62,38 +62,23 @@ def descriptor(resmap_index, schema_index, decision_index, data_index):
     return body
 
 
-def schema(resources):
+def schema(resources, extended=False):
     """The hierarchical schema, in the non-extended form: one name table per
     entry, scopes flagged, items carrying their item info index. The scope and
     item tables behind the entries are unread by the reference parser and
     zeroed."""
-    entries = [{"name": "", "flags": SCOPE_FLAG, "parent": 0, "index": 0, "depth": 0}]
+    entries = [{"name": "", "flags": SCOPE_FLAG, "parent": 0, "index": 0, "depth": 0, "path": ""}]
+    paths = {"": 0}
     for name in resources:
         parts = name.split("/")
         for depth, part in enumerate(parts, start=1):
-            path = "/".join(parts[:depth])
-            scope = SCOPE_FLAG if depth < len(parts) else 0
-            if not any(entry["name"] == part and entry["depth"] == depth
-                       for entry in entries if "depth" in entry):
-                entries.append({"name": part, "flags": scope, "depth": depth,
-                                "parent": 0, "index": 0})
-    # parents: each entry's parent is the entry holding its path prefix
-    for entry in entries[1:]:
-        prefix_depth = entry["depth"] - 1
-        entry["parent"] = next(i for i, other in enumerate(entries)
-                               if other["depth"] == prefix_depth)
-    # full paths, for the path length field the reference parser skips
-    for entry in entries:
-        parts = []
-        current = entry
-        for _ in range(64):
-            parts.append(current["name"])
-            current = entries[current["parent"]]
-            if current is entries[0]:
-                if current is not entry:
-                    parts.append(current["name"])
-                break
-        entry["path"] = "/".join(reversed(parts))
+            path = "/" + "/".join(parts[:depth])
+            if path in paths:
+                continue
+            parent_path = "/" + "/".join(parts[:depth - 1]) if depth > 1 else ""
+            entries.append({"name": part, "flags": SCOPE_FLAG if depth < len(parts) else 0,
+                            "depth": depth, "parent": paths[parent_path], "index": 0, "path": path})
+            paths[path] = len(entries) - 1
     # items get their item info index in resource order
     for position, name in enumerate(resources):
         entry = next(e for e in entries if "depth" in e and e["path"] == "/" + name)
@@ -107,6 +92,13 @@ def schema(resources):
         block += entry["name"] + "\0"
         if len(block) % 2:
             block += "\0"
+    ascii_block = b""
+    if extended:
+        for entry in entries[1:]:
+            entry["flags"] |= 0x20
+            entry["offset"] = len(ascii_block)
+            ascii_block += entry["name"].encode("ascii") + b"\0"
+        block = ""  # the empty root needs no UTF-16 name storage
     longest = max(len(entry["path"]) for entry in entries)
 
     body = struct.pack("<HHHH",
@@ -114,6 +106,8 @@ def schema(resources):
                        len(SCHEMA_UNIQUE),           # unique resource id length
                        0,                            # schema name length
                        0)                            # unread
+    if extended:
+        body += struct.pack("<16s", b"[def_hnamesx]")
     body += struct.pack("<20s", b"")                 # HSCHEMA_VERSION_INFO; the extended
                                                      # [def_hnames identifier would share
                                                      # these bytes and is not written
@@ -125,6 +119,8 @@ def schema(resources):
                         sum(1 for e in entries if not e["flags"] & SCOPE_FLAG),
                         len(block),                  # unicode name units
                         len(block) + len(SCHEMA_UNIQUE))
+    if extended:
+        body += struct.pack("<I", len(ascii_block))
     for entry in entries:
         body += struct.pack("<HHHBBHH",
                             entry["parent"],
@@ -136,7 +132,7 @@ def schema(resources):
                             entry["index"])
     body += struct.pack("<8s", b"") * sum(1 for e in entries if e["flags"] & SCOPE_FLAG)
     body += struct.pack("<2s", b"") * sum(1 for e in entries if not e["flags"] & SCOPE_FLAG)
-    body += block.encode("utf-16le")
+    body += block.encode("utf-16le") + ascii_block
     return body
 
 
@@ -178,13 +174,17 @@ def resource_map(resources, schema_index, decision_index, data_index):
                        0)             # extension length
     for index in range(count):
         body += struct.pack("<HH", index, index)  # decision, first candidate
-    for index in range(count):
-        body += struct.pack("<BBHHH",
-                            CANDIDATE_SECTIONED,
-                            4,                    # value type, unread by the reference parser
-                            0,                    # referenced file source
-                            index,                # data item string index
-                            data_index)           # data item section (table of contents index)
+    values = list(resources.values())
+    strings = [value for value in values if isinstance(value, str)]
+    string_index = blob_index = 0
+    for value in values:
+        if isinstance(value, str):
+            item = string_index
+            string_index += 1
+        else:
+            item = len(strings) + blob_index
+            blob_index += 1
+        body += struct.pack("<BBHHH", CANDIDATE_SECTIONED, 4 if isinstance(value, str) else 2, 0, item, data_index)
     return body
 
 
@@ -193,34 +193,56 @@ def data_items(resources):
     offset counts UTF-16 units, the reference parser doubles it, while the
     length already counts bytes — then the string data. No blob storage; the
     strings are nul-terminated with the terminator outside the counted length."""
-    strings = list(resources.values())
-    body = struct.pack("<IHHI", 0, len(strings), 0,
-                       sum(len(value) + 1 for value in strings))
-    offset = 0
+    values = list(resources.values())
+    strings = [value for value in values if isinstance(value, str)]
+    blobs = [value for value in values if isinstance(value, bytes)]
+    payload = b""
+    string_table = b""
     for value in strings:
-        body += struct.pack("<HH", offset, len(value) * 2)
-        offset += len(value) + 1
-    for value in strings:
-        body += (value + "\0").encode("utf-16le")
-    return body
+        encoded = value.encode("utf-16le")
+        string_table += struct.pack("<HH", len(payload) // 2, len(encoded))
+        payload += encoded + b"\0\0"
+    blob_table = b""
+    for value in blobs:
+        blob_table += struct.pack("<II", len(payload), len(value))
+        payload += value
+    return struct.pack("<IHHI", 0, len(strings), len(blobs), len(payload)) + string_table + blob_table + payload
 
 
-def build(resources):
+def textblock_xbf():
+    """A TextBlock plus a two-entry null-terminated metadata string table."""
+    nodes = b"\x14\x8c\x81\x1a\x20\x83\x09" + struct.pack("<I", 6) + "Loaded".encode("utf-16le") + b"\x02"
+    document = bytearray(184)
+    document[:4] = b"XBF\0"
+    struct.pack_into("<IIII", document, 4, 160, 12 + len(nodes), 2, 1)
+    for index, offset in enumerate((0x78, 0x8c, 0x90, 0x94, 0x98, 0x9c)):
+        struct.pack_into("<Q", document, 20 + index * 8, offset)
+    struct.pack_into("<I", document, 132, 2)
+    struct.pack_into("<IHHIHH", document, 136, 1, ord("A"), 0, 1, ord("B"), 0)
+    struct.pack_into("<III", document, 172, 1, 0, len(nodes))
+    return bytes(document) + nodes
+
+
+
+def build(resources, extended=False):
     """The whole file: header, table of contents, then the sections packed
     back to back. Section offsets are relative to where the section data
     starts."""
     bodies = [
         ("[mrm_pridescex]", None),
-        ("[mrm_hschema0]", schema(resources)),
+        ("[mrm_hschema0]", schema(resources, extended)),
         ("[mrm_decinfo0]", decisions(resources)),
         ("[mrm_resmap0]", None),
         ("[mrm_data0]", data_items(resources)),
     ]
-    schema_index = 1
-    decision_index = 2
+    if extended:
+        bodies[0], bodies[1], bodies[2] = bodies[2], bodies[0], bodies[1]
+    descriptor_index = 1 if extended else 0
+    schema_index = 2 if extended else 1
+    decision_index = 0 if extended else 2
     resmap_index = 3
     data_index = 4
-    bodies[0] = (bodies[0][0],
+    bodies[descriptor_index] = (bodies[descriptor_index][0],
                  descriptor(resmap_index, schema_index, decision_index, data_index))
     bodies[3] = (bodies[3][0],
                  resource_map(resources, schema_index, decision_index, data_index))
@@ -248,9 +270,17 @@ def build(resources):
 def main():
     parser = argparse.ArgumentParser(description="Emit a minimal real resources.pri")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--extended", action="store_true", help="use extended ASCII-name schema")
+    parser.add_argument("--with-xbf", action="store_true", help="add a compiled TextBlock resource")
     args = parser.parse_args()
-    args.out.write_bytes(build(RESOURCES))
-    print(f"{args.out}: {len(RESOURCES)} string resources")
+    resources = dict(RESOURCES)
+    if args.with_xbf:
+        resources["Files/Fixture/Message.xbf"] = textblock_xbf()
+        malformed = bytearray(textblock_xbf())
+        malformed[142] = 1  # the first string's required terminator
+        resources["Files/Fixture/Invalid.xbf"] = bytes(malformed)
+    args.out.write_bytes(build(resources, args.extended))
+    print(f"{args.out}: {len(resources)} resources")
 
 
 if __name__ == "__main__":

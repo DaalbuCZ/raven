@@ -160,10 +160,24 @@ struct launch_vtable {
 	HRESULT (WINAPI *get_TileId)(struct launch_interface *, HSTRING *);
 };
 struct launch_interface { const struct launch_vtable *lpVtbl; };
+static const IID prelaunch_iid = {0x0c44717b, 0x19f7, 0x48d6, {0xb0,0x46,0xcf,0x22,0x82,0x6e,0xaa,0x74}};
+struct prelaunch_interface;
+struct prelaunch_vtable {
+	HRESULT (WINAPI *QueryInterface)(struct prelaunch_interface *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(struct prelaunch_interface *);
+	ULONG (WINAPI *Release)(struct prelaunch_interface *);
+	HRESULT (WINAPI *GetIids)(struct prelaunch_interface *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(struct prelaunch_interface *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(struct prelaunch_interface *, TrustLevel *);
+	HRESULT (WINAPI *get_PrelaunchActivated)(struct prelaunch_interface *, boolean *);
+};
+struct prelaunch_interface { const struct prelaunch_vtable *lpVtbl; };
 struct launch_args {
 	IActivatedEventArgs iface;
 	LONG refs;
 	struct launch_interface launch;
+	struct prelaunch_interface prelaunch;
+	struct raven_weak_source weak;
 };
 static HRESULT WINAPI args_query(IActivatedEventArgs *iface, REFIID iid, void **out)
 {
@@ -173,6 +187,10 @@ static HRESULT WINAPI args_query(IActivatedEventArgs *iface, REFIID iid, void **
 		*out = iface;
 	else if (IsEqualIID(iid, &launch_iid))
 		*out = &((struct launch_args *)iface)->launch;
+	else if (IsEqualIID(iid, &prelaunch_iid))
+		*out = &((struct launch_args *)iface)->prelaunch;
+	else if (IsEqualIID(iid, &IID_IWeakReferenceSource))
+		*out = &((struct launch_args *)iface)->weak;
 	else return E_NOINTERFACE;
 	InterlockedIncrement(&((struct launch_args *)iface)->refs);
 	return S_OK;
@@ -183,6 +201,7 @@ static ULONG WINAPI args_release(IActivatedEventArgs *iface)
 	struct launch_args *self = (void *)iface;
 	LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		raven_weak_source_disconnect(&self->weak);
 		FREE(self);
 		InterlockedDecrement(&raven_xaml_objects);
 	}
@@ -231,6 +250,38 @@ static const struct launch_vtable launch_table = {
 	launch_query, launch_addref, launch_release, launch_iids, launch_class, launch_trust, launch_arguments, launch_tile
 };
 
+static struct launch_args *prelaunch_owner(struct prelaunch_interface *iface)
+{ return CONTAINING_RECORD(iface, struct launch_args, prelaunch); }
+static HRESULT WINAPI prelaunch_query(struct prelaunch_interface *iface, REFIID iid, void **out)
+{ return args_query(&prelaunch_owner(iface)->iface, iid, out); }
+static ULONG WINAPI prelaunch_addref(struct prelaunch_interface *iface) { return args_addref(&prelaunch_owner(iface)->iface); }
+static ULONG WINAPI prelaunch_release(struct prelaunch_interface *iface) { return args_release(&prelaunch_owner(iface)->iface); }
+static HRESULT WINAPI prelaunch_iids(struct prelaunch_interface *iface, ULONG *count, IID **iids) { return no_iids(count, iids); }
+static HRESULT WINAPI prelaunch_class(struct prelaunch_interface *iface, HSTRING *out) { return class_string(launch_name, out); }
+static HRESULT WINAPI prelaunch_trust(struct prelaunch_interface *iface, TrustLevel *out) { return base_trust(out); }
+static HRESULT WINAPI prelaunch_get(struct prelaunch_interface *iface, boolean *out)
+{ if (!out) return E_POINTER; *out = FALSE; return S_OK; }
+static const struct prelaunch_vtable prelaunch_table = {
+	prelaunch_query, prelaunch_addref, prelaunch_release, prelaunch_iids, prelaunch_class, prelaunch_trust, prelaunch_get
+};
+
+HRESULT raven_launch_arguments_create(IInspectable **out)
+{
+	struct launch_args *args;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	args = ALLOC(sizeof *args);
+	if (!args) return E_OUTOFMEMORY;
+	args->iface.lpVtbl = &args_table;
+	args->refs = 1;
+	args->launch.lpVtbl = &launch_table;
+	args->prelaunch.lpVtbl = &prelaunch_table;
+	raven_weak_source_init(&args->weak, args, &args->refs, (raven_weak_query_fn)args_query);
+	InterlockedIncrement(&raven_xaml_objects);
+	*out = (IInspectable *)&args->launch;
+	return S_OK;
+}
+
 struct launch_dispatch {
 	IDispatchedHandler iface;
 	LONG refs;
@@ -270,6 +321,8 @@ static HRESULT WINAPI dispatch_invoke(IDispatchedHandler *iface)
 		args->iface.lpVtbl = &args_table;
 		args->refs = 1;
 		args->launch.lpVtbl = &launch_table;
+		args->prelaunch.lpVtbl = &prelaunch_table;
+		raven_weak_source_init(&args->weak, args, &args->refs, (raven_weak_query_fn)args_query);
 		InterlockedIncrement(&raven_xaml_objects);
 	}
 	for (ULONG i = 0; i < count; ++i) {

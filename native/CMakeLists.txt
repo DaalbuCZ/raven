@@ -2819,12 +2819,12 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/raven-xaml.dll ${CMAKE_CURRENT_BINARY_DIR}/x86/raven-xaml.dll
                     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/x86
                     COMMAND ${RAVEN_MINGW64} ${accprop_flags} -Wl,--entry,DllMain,--no-insert-timestamp -o ${CMAKE_CURRENT_BINARY_DIR}/raven-xaml.dll
-                        ${xaml_source}/xaml.c ${xaml_source}/application.c ${xaml_source}/desktop_window.c ${xaml_source}/events.c ${xaml_source}/pointer.c ${xaml_source}/dispatcher_queue.c ${xaml_source}/xaml_application.c ${xaml_source}/resources.c ${xaml_source}/memory_manager.c ${xaml_source}/package.c ${xaml_source}/xaml_window.c ${xaml_source}/xaml_metadata.c ${xaml_source}/xaml_controls.c ${xaml_source}/xaml_elements.c ${xaml_source}/xaml_composition.c ${xaml_source}/xaml_render.c ${xaml_source}/xaml_input.c ${xaml_source}/xaml_dictionary.c ${xaml_source}/mrt_manager.c ${xaml_source}/xaml_styles.c ${xaml_source}/automation_peer.c ${xaml_source}/storage.c ${xaml_source}/property_value.c ${xaml_source}/xaml_loader.c ${PROJECT_SOURCE_DIR}/native/upstream/raven-dwrite/crt.c -lruntimeobject -luser32 -lkernel32 -lgdi32 -lgcc
+                        ${xaml_source}/xaml.c ${xaml_source}/application.c ${xaml_source}/desktop_window.c ${xaml_source}/events.c ${xaml_source}/pointer.c ${xaml_source}/dispatcher_queue.c ${xaml_source}/xaml_application.c ${xaml_source}/resources.c ${xaml_source}/memory_manager.c ${xaml_source}/package.c ${xaml_source}/xaml_window.c ${xaml_source}/xaml_metadata.c ${xaml_source}/xaml_controls.c ${xaml_source}/xaml_elements.c ${xaml_source}/xaml_composition.c ${xaml_source}/xaml_render.c ${xaml_source}/xaml_input.c ${xaml_source}/xaml_dictionary.c ${xaml_source}/mrt_manager.c ${xaml_source}/xaml_styles.c ${xaml_source}/automation_peer.c ${xaml_source}/storage.c ${xaml_source}/property_value.c ${xaml_source}/uri.c ${xaml_source}/xaml_loader.c ${PROJECT_SOURCE_DIR}/native/upstream/raven-dwrite/crt.c -lruntimeobject -luser32 -lkernel32 -lgdi32 -lgcc
                     COMMAND ${RAVEN_MINGW32} ${accprop_flags} -Wl,--entry,_DllMain@12,--kill-at,--no-insert-timestamp -o ${CMAKE_CURRENT_BINARY_DIR}/x86/raven-xaml.dll
-                        ${xaml_source}/xaml.c ${xaml_source}/application.c ${xaml_source}/desktop_window.c ${xaml_source}/events.c ${xaml_source}/pointer.c ${xaml_source}/dispatcher_queue.c ${xaml_source}/xaml_application.c ${xaml_source}/resources.c ${xaml_source}/memory_manager.c ${xaml_source}/package.c ${xaml_source}/xaml_window.c ${xaml_source}/xaml_metadata.c ${xaml_source}/xaml_controls.c ${xaml_source}/xaml_elements.c ${xaml_source}/xaml_composition.c ${xaml_source}/xaml_render.c ${xaml_source}/xaml_input.c ${xaml_source}/xaml_dictionary.c ${xaml_source}/mrt_manager.c ${xaml_source}/xaml_styles.c ${xaml_source}/automation_peer.c ${xaml_source}/storage.c ${xaml_source}/property_value.c ${xaml_source}/xaml_loader.c ${PROJECT_SOURCE_DIR}/native/upstream/raven-dwrite/crt.c -lruntimeobject -luser32 -lkernel32 -lgdi32 -lgcc
+                        ${xaml_source}/xaml.c ${xaml_source}/application.c ${xaml_source}/desktop_window.c ${xaml_source}/events.c ${xaml_source}/pointer.c ${xaml_source}/dispatcher_queue.c ${xaml_source}/xaml_application.c ${xaml_source}/resources.c ${xaml_source}/memory_manager.c ${xaml_source}/package.c ${xaml_source}/xaml_window.c ${xaml_source}/xaml_metadata.c ${xaml_source}/xaml_controls.c ${xaml_source}/xaml_elements.c ${xaml_source}/xaml_composition.c ${xaml_source}/xaml_render.c ${xaml_source}/xaml_input.c ${xaml_source}/xaml_dictionary.c ${xaml_source}/mrt_manager.c ${xaml_source}/xaml_styles.c ${xaml_source}/automation_peer.c ${xaml_source}/storage.c ${xaml_source}/property_value.c ${xaml_source}/uri.c ${xaml_source}/xaml_loader.c ${PROJECT_SOURCE_DIR}/native/upstream/raven-dwrite/crt.c -lruntimeobject -luser32 -lkernel32 -lgdi32 -lgcc
                     DEPENDS ${xaml_source}/dispatcher_queue.c ${xaml_source}/dispatcher_queue.h ${xaml_source}/pointer.c ${xaml_source}/pointer.h ${xaml_source}/xaml.c ${xaml_source}/application.c ${xaml_source}/desktop_window.c ${xaml_source}/events.c
-                        ${xaml_source}/xaml_application.c ${xaml_source}/resources.c ${xaml_source}/memory_manager.c ${xaml_source}/xaml_window.c ${xaml_source}/xaml_metadata.c ${xaml_source}/xaml_controls.c ${xaml_source}/xaml_elements.c ${xaml_source}/xaml_composition.c ${xaml_source}/xaml_render.c ${xaml_source}/xaml_input.c ${xaml_source}/xaml_dictionary.c ${xaml_source}/mrt_manager.c ${xaml_source}/xaml_styles.c ${xaml_source}/automation_peer.c ${xaml_source}/storage.c ${xaml_source}/property_value.c ${xaml_source}/xaml_loader.c
-                        ${xaml_source}/storage_settings.inc ${xaml_source}/xaml_internal.h ${xaml_source}/events.h ${xaml_source}/desktop_window.h ${xaml_source}/corewindow_interop.h ${xaml_source}/windows_ui_xaml_application.h ${xaml_source}/windows_applicationmodel_resources.h ${xaml_source}/windows_system_memorymanager.h ${xaml_source}/windows_ui_xaml_window.h ${xaml_source}/windows_ui_xaml_controls.h ${xaml_source}/windows_ui_xaml_elements.h ${xaml_source}/windows_ui_xaml_layout.h ${xaml_source}/windows_ui_xaml_markup.h ${xaml_source}/windows_ui_xaml_uielement.h ${xaml_source}/windows_ui_xaml_buttonbase.h ${xaml_source}/xaml_input.h ${xaml_source}/swapchain_panel.h VERBATIM)
+                        ${xaml_source}/xaml_application.c ${xaml_source}/resources.c ${xaml_source}/memory_manager.c ${xaml_source}/xaml_window.c ${xaml_source}/xaml_metadata.c ${xaml_source}/xaml_controls.c ${xaml_source}/xaml_elements.c ${xaml_source}/xaml_composition.c ${xaml_source}/xaml_render.c ${xaml_source}/xaml_input.c ${xaml_source}/xaml_dictionary.c ${xaml_source}/mrt_manager.c ${xaml_source}/xaml_styles.c ${xaml_source}/automation_peer.c ${xaml_source}/storage.c ${xaml_source}/property_value.c ${xaml_source}/uri.c ${xaml_source}/xaml_loader.c
+                        ${xaml_source}/storage_settings.inc ${xaml_source}/xaml_internal.h ${xaml_source}/events.h ${xaml_source}/desktop_window.h ${xaml_source}/corewindow_interop.h ${xaml_source}/windows_ui_xaml_application.h ${xaml_source}/windows_ui_xaml_application_overrides.h ${xaml_source}/windows_ui_xaml_window_created.h ${xaml_source}/windows_applicationmodel_resources.h ${xaml_source}/windows_system_memorymanager.h ${xaml_source}/windows_ui_xaml_window.h ${xaml_source}/windows_ui_xaml_controls.h ${xaml_source}/windows_ui_xaml_elements.h ${xaml_source}/windows_ui_xaml_layout.h ${xaml_source}/windows_ui_xaml_markup.h ${xaml_source}/windows_ui_xaml_uielement.h ${xaml_source}/windows_ui_xaml_buttonbase.h ${xaml_source}/xaml_input.h ${xaml_source}/swapchain_panel.h VERBATIM)
                 add_custom_target(xaml_component ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/raven-xaml.dll ${CMAKE_CURRENT_BINARY_DIR}/x86/raven-xaml.dll)
                 add_executable(core_window_desktop_test desktop/core_window_test.cpp)
                 target_link_libraries(core_window_desktop_test PRIVATE raven_cpu)
@@ -2848,7 +2848,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                         COMMAND ${xaml_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector -Wl,--entry,${xaml_entry},--no-insert-timestamp
                             -I${xaml_source} -o ${xaml_application_client} ${LOADER_SOURCES}/xaml_application_client.c
                             ${PROJECT_SOURCE_DIR}/native/upstream/raven-dwrite/crt.c -lruntimeobject -lkernel32 -lgcc
-                        DEPENDS ${LOADER_SOURCES}/xaml_application_client.c ${xaml_source}/windows_ui_xaml_application.h VERBATIM)
+                        DEPENDS ${LOADER_SOURCES}/xaml_application_client.c ${xaml_source}/windows_ui_xaml_application.h ${xaml_source}/windows_ui_xaml_application_overrides.h ${xaml_source}/windows_ui_xaml_window_created.h VERBATIM)
                     add_custom_target(xaml_application_fixture${width} ALL DEPENDS ${xaml_application_client} xaml_component)
                     add_test(NAME native_xaml_application_x${width} COMMAND raven --run-process --execution=native ${xaml_application_client})
                     set_tests_properties(native_xaml_application_x${width} PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
@@ -2974,6 +2974,29 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     add_custom_target(mrt_manager_fixture${width} ALL DEPENDS ${mrt_manager_client} xaml_component)
                     add_test(NAME native_mrt_manager_x${width} COMMAND raven --run-process --execution=native ${mrt_manager_client})
                     set_tests_properties(native_mrt_manager_x${width} PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                    set(mrt_extended_dir ${CMAKE_CURRENT_BINARY_DIR}/mrt-extended-client${width})
+                    set(mrt_extended_client ${mrt_extended_dir}/mrt-extended-client.exe)
+                    add_custom_command(OUTPUT ${mrt_extended_client} ${mrt_extended_dir}/resources.pri
+                        COMMAND ${CMAKE_COMMAND} -E make_directory ${mrt_extended_dir}
+                        COMMAND ${CMAKE_COMMAND} -E copy ${mrt_manager_client} ${mrt_extended_client}
+                        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/make_test_pri.py --extended --out ${mrt_extended_dir}/resources.pri
+                        DEPENDS ${mrt_manager_client} ${PROJECT_SOURCE_DIR}/scripts/make_test_pri.py VERBATIM)
+                    add_custom_target(mrt_extended_fixture${width} ALL DEPENDS ${mrt_extended_client} ${mrt_extended_dir}/resources.pri xaml_component)
+                    add_test(NAME native_mrt_extended_x${width} COMMAND raven --run-process --execution=native ${mrt_extended_client})
+                    set_tests_properties(native_mrt_extended_x${width} PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                    set(load_component_dir ${CMAKE_CURRENT_BINARY_DIR}/load-component-client${width})
+                    set(load_component_client ${load_component_dir}/load-component-client.exe)
+                    add_custom_command(OUTPUT ${load_component_client} ${load_component_dir}/resources.pri
+                        COMMAND ${CMAKE_COMMAND} -E make_directory ${load_component_dir}
+                        COMMAND ${xaml_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector -Wl,--entry,${xaml_entry},--no-insert-timestamp
+                            -I${xaml_source} -o ${load_component_client} ${LOADER_SOURCES}/load_component_client.c
+                            ${PROJECT_SOURCE_DIR}/native/upstream/raven-dwrite/crt.c -lruntimeobject -luser32 -lkernel32 -lgcc
+                        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/make_test_pri.py --extended --with-xbf --out ${load_component_dir}/resources.pri
+                        DEPENDS ${LOADER_SOURCES}/load_component_client.c ${PROJECT_SOURCE_DIR}/scripts/make_test_pri.py
+                            ${xaml_source}/windows_ui_xaml_application.h ${xaml_source}/windows_ui_xaml_elements.h VERBATIM)
+                    add_custom_target(load_component_fixture${width} ALL DEPENDS ${load_component_client} ${load_component_dir}/resources.pri xaml_component)
+                    add_test(NAME native_load_component_x${width} COMMAND raven --run-process --execution=native ${load_component_client})
+                    set_tests_properties(native_load_component_x${width} PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
                     set(style_client ${CMAKE_CURRENT_BINARY_DIR}/style-client${width}.exe)
                     add_custom_command(OUTPUT ${style_client}
                         COMMAND ${xaml_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector -Wl,--entry,${xaml_entry},--no-insert-timestamp
@@ -3014,6 +3037,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     add_custom_target(property_value_fixture${width} ALL DEPENDS ${property_value_client} xaml_component)
                     add_test(NAME native_property_value_x${width} COMMAND raven --run-process --execution=native ${property_value_client})
                     set_tests_properties(native_property_value_x${width} PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+                    set(uri_client ${CMAKE_CURRENT_BINARY_DIR}/uri-client${width}.exe)
+                    add_custom_command(OUTPUT ${uri_client}
+                        COMMAND ${xaml_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector -Wl,--entry,${xaml_entry},--no-insert-timestamp
+                            -I${xaml_source} -o ${uri_client} ${LOADER_SOURCES}/uri_client.c
+                            ${PROJECT_SOURCE_DIR}/native/upstream/raven-dwrite/crt.c -lruntimeobject -luser32 -lkernel32 -lgcc
+                        DEPENDS ${LOADER_SOURCES}/uri_client.c VERBATIM)
+                    add_custom_target(uri_fixture${width} ALL DEPENDS ${uri_client} xaml_component)
+                    add_test(NAME native_uri_x${width} COMMAND raven --run-process --execution=native ${uri_client})
+                    set_tests_properties(native_uri_x${width} PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
                     set(local_settings_client ${CMAKE_CURRENT_BINARY_DIR}/local-settings-client${width}.exe)
                     add_custom_command(OUTPUT ${local_settings_client}
                         COMMAND ${xaml_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector -Wl,--entry,${xaml_entry},--no-insert-timestamp

@@ -1886,6 +1886,7 @@ HRESULT raven_property_set_factory(HSTRING name, IActivationFactory **out);
 
 /* PropertyValue lives in property_value.c; declared here so the manifest-driven activation chain can route to it. */
 HRESULT raven_property_value_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_uri_factory(HSTRING name, IActivationFactory **out);
 
 /* Manifest-driven activation: a packaged app's manifest names an Applications/Application@EntryPoint runtime class — the
  * guest application's own XAML Application subclass (e.g. "Shapr3D.App"), derived from the class an app's
@@ -1939,6 +1940,8 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 			result = raven_property_set_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_property_value_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_uri_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_automation_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)

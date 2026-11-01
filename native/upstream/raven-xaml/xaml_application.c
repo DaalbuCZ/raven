@@ -11,13 +11,19 @@
  *
  * The object is not a rendering surface: composition and the engine stages plug into the same factory later. */
 #define INITGUID
+#define CONST_VTABLE
+#define WIDL_using_Windows_UI_Core
 #define CINTERFACE
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include "windows_ui_xaml_application.h"
+#include "windows_ui_xaml_application_overrides.h"
+#include "windows_ui_xaml_window_created.h"
 #include "events.h"
+#include <windows.foundation.h>
 
+#define E_ILLEGAL_METHOD_CALL ((HRESULT)0x8000000e)
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
 
@@ -30,6 +36,7 @@ typedef __x_ABI_CWindows_CUI_CXaml_CIApplicationFactory xaml_application_factory
 static const WCHAR class_name[] = L"Windows.UI.Xaml.Application";
 /* The application the runtime last created; Application.Current returns it. */
 static void *current_application;
+static DWORD startup_thread;
 
 static HRESULT inspectable_iids(ULONG *count, IID **iids)
 {
@@ -80,15 +87,18 @@ struct application1_part { const __x_ABI_CWindows_CUI_CXaml_CIApplicationVtbl *l
 struct application2_part { const __x_ABI_CWindows_CUI_CXaml_CIApplication2Vtbl *lpVtbl; struct application *owner; };
 struct application3_part { const __x_ABI_CWindows_CUI_CXaml_CIApplication3Vtbl *lpVtbl; struct application *owner; };
 struct application_inner_part { const IInspectableVtbl *lpVtbl; struct application *owner; };
+struct application_overrides_part { const __x_ABI_CWindows_CUI_CXaml_CIApplicationOverridesVtbl *lpVtbl; struct application *owner; };
 
 struct application {
 	struct application1_part first;
 	struct application2_part second;
 	struct application3_part third;
 	struct application_inner_part inner;
+	struct application_overrides_part overrides;
 	LONG refs;
 	IInspectable *outer;
 	LONG exited;
+	INT32 requested_theme;
 	struct raven_event_list suspending, resuming;
 	/* The ResourceDictionary the application assigns through put_Resources; a reference the application object owns. */
 	IInspectable *resources;
@@ -139,15 +149,19 @@ static HRESULT WINAPI application1_put_Resources(xaml_application1 *iface, uint6
 	return S_OK;
 }
 STUB1(xaml_application1, application1_get_DebugSettings)
-static HRESULT WINAPI application1_get_RequestedTheme(xaml_application1 *iface, uint64_t out)
+static HRESULT WINAPI application1_get_RequestedTheme(xaml_application1 *iface, INT32 *out)
 {
-	(void)iface;
 	if (!out) return E_POINTER;
-	/* The current renderer uses the light theme; system theme integration is not implemented. */
-	*(INT32 *)(uintptr_t)out = 0;
+	*out = ((struct application1_part *)iface)->owner->requested_theme;
 	return S_OK;
 }
-STUB1(xaml_application1, application1_put_RequestedTheme)
+static HRESULT WINAPI application1_put_RequestedTheme(xaml_application1 *iface, INT32 value)
+{
+	if (value < 0 || value > 1) return E_INVALIDARG;
+	/* shortcut: resources do not yet select a theme or reject changes after startup; upgrade with theme rendering. */
+	((struct application1_part *)iface)->owner->requested_theme = (INT32)value;
+	return S_OK;
+}
 STUB2(xaml_application1, application1_add_UnhandledException)
 STUB1(xaml_application1, application1_remove_UnhandledException)
 #define APPLICATION_EVENT(NAME, FIELD) \
@@ -174,8 +188,56 @@ STUB2(xaml_application2, application2_add_EnteredBackground)
 STUB1(xaml_application2, application2_remove_EnteredBackground)
 STUB1(xaml_application3, application3_get_HighContrastAdjustment)
 STUB1(xaml_application3, application3_put_HighContrastAdjustment)
-STUB2(xaml_application_statics, statics_LoadComponent)
-STUB3(xaml_application_statics, statics_LoadComponent2)
+static HRESULT load_component(IInspectable *component, IInspectable *locator)
+{
+	typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClass uri_i;
+	static const WCHAR prefix[] = L"ms-appx:///";
+	static const WCHAR files[] = L"/Files";
+	WCHAR path[1024];
+	uri_i *uri = NULL;
+	HSTRING absolute = NULL;
+	const BYTE *blob = NULL;
+	UINT32 length = 0, path_length, bytes = 0;
+	HRESULT result;
+	if (!component || !locator) return E_POINTER;
+	result = IInspectable_QueryInterface(locator, &IID___x_ABI_CWindows_CFoundation_CIUriRuntimeClass, (void **)&uri);
+	if (FAILED(result)) return result;
+	result = uri->lpVtbl->get_AbsoluteUri(uri, &absolute);
+	uri->lpVtbl->Release(uri);
+	if (FAILED(result)) return result;
+	const WCHAR *text = WindowsGetStringRawBuffer(absolute, &length);
+	if (length < ARRAYSIZE(prefix) - 1 + 5 || length + ARRAYSIZE(files) >= ARRAYSIZE(path) ||
+		CompareStringOrdinal(text, ARRAYSIZE(prefix) - 1, prefix, -1, TRUE) != CSTR_EQUAL ||
+		CompareStringOrdinal(text + length - 5, 5, L".xaml", -1, TRUE) != CSTR_EQUAL) {
+		result = E_NOTIMPL;
+		goto done;
+	}
+	/* Shortcut: only local package XAML without escaping or URI qualifiers is resolved here. */
+	for (UINT32 i = ARRAYSIZE(prefix) - 1; i < length; ++i)
+		if (!text[i] || text[i] == L'?' || text[i] == L'#' || text[i] == L'%' || text[i] == L'\\') {
+			result = E_NOTIMPL;
+			goto done;
+		}
+	memcpy(path, files, (ARRAYSIZE(files) - 1) * sizeof(WCHAR));
+	path_length = ARRAYSIZE(files) - 1 + length - (ARRAYSIZE(prefix) - 2);
+	memcpy(path + ARRAYSIZE(files) - 1, text + ARRAYSIZE(prefix) - 2,
+		(length - (ARRAYSIZE(prefix) - 2) - 5) * sizeof(WCHAR));
+	path_length -= 1; /* .xaml becomes .xbf */
+	memcpy(path + path_length - 4, L".xbf", 4 * sizeof(WCHAR));
+	result = raven_pri_get_blob(path, path_length, &blob, &bytes);
+	if (SUCCEEDED(result)) result = raven_xaml_load_into(blob, bytes, component);
+done:
+	WindowsDeleteString(absolute);
+	return result;
+}
+static HRESULT WINAPI statics_LoadComponent(xaml_application_statics *iface, IInspectable *component, IInspectable *locator)
+{ return load_component(component, locator); }
+static HRESULT WINAPI statics_LoadComponent2(xaml_application_statics *iface, IInspectable *component,
+	IInspectable *locator, INT32 location)
+{
+	if (location != 0) return location == 1 ? E_NOTIMPL : E_INVALIDARG;
+	return load_component(component, locator);
+}
 
 /* The shared reference count and release of an application object, from any of its three interface sub-objects. */
 static ULONG application_addref(struct application *self)
@@ -214,6 +276,8 @@ static HRESULT application_inner_query(struct application *self, REFIID iid, voi
 		*out = &self->second;
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication3))
 		*out = &self->third;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIApplicationOverrides))
+		*out = &self->overrides;
 	else
 		return E_NOINTERFACE;
 	if (self->outer)
@@ -311,6 +375,8 @@ static HRESULT WINAPI application3_class_name(xaml_application3 *iface, HSTRING 
 static HRESULT WINAPI application1_exit(xaml_application1 *iface)
 {
 	InterlockedExchange(&((struct application1_part *)iface)->owner->exited, 1);
+	DWORD thread = (DWORD)InterlockedCompareExchange((LONG *)&startup_thread, 0, 0);
+	if (thread && !PostThreadMessageW(thread, WM_QUIT, 0, 0)) return HRESULT_FROM_WIN32(GetLastError());
 	return S_OK;
 }
 
@@ -377,6 +443,27 @@ static const IInspectableVtbl inner_table = {
 	.GetIids = inner_iids, .GetRuntimeClassName = inner_name, .GetTrustLevel = inner_trust,
 };
 
+typedef __x_ABI_CWindows_CUI_CXaml_CIApplicationOverrides overrides_i;
+static HRESULT WINAPI base_overrides_query(overrides_i *iface, REFIID iid, void **out)
+{ return application_query(((struct application_overrides_part *)iface)->owner, iid, out); }
+static ULONG WINAPI base_overrides_addref(overrides_i *iface)
+{ return application_interface_addref(((struct application_overrides_part *)iface)->owner); }
+static ULONG WINAPI base_overrides_release(overrides_i *iface)
+{ return application_interface_release(((struct application_overrides_part *)iface)->owner); }
+static HRESULT WINAPI base_overrides_iids(overrides_i *iface, ULONG *count, IID **iids)
+{ (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI base_overrides_name(overrides_i *iface, HSTRING *name)
+{ (void)iface; return runtime_class_name(name); }
+static HRESULT WINAPI base_overrides_trust(overrides_i *iface, TrustLevel *level)
+{ (void)iface; return inspectable_trust(level); }
+static HRESULT WINAPI base_overrides_event(overrides_i *iface, uintptr_t args)
+{ (void)iface; (void)args; return S_OK; }
+static const __x_ABI_CWindows_CUI_CXaml_CIApplicationOverridesVtbl base_overrides_table = {
+	base_overrides_query, base_overrides_addref, base_overrides_release, base_overrides_iids, base_overrides_name,
+	base_overrides_trust, base_overrides_event, base_overrides_event, base_overrides_event, base_overrides_event,
+	base_overrides_event, base_overrides_event, base_overrides_event, base_overrides_event, base_overrides_event
+};
+
 static struct application *create_application(IInspectable *outer)
 {
 	struct application *application = ALLOC(sizeof *application);
@@ -390,6 +477,8 @@ static struct application *create_application(IInspectable *outer)
 	application->third.owner = application;
 	application->inner.lpVtbl = &inner_table;
 	application->inner.owner = application;
+	application->overrides.lpVtbl = &base_overrides_table;
+	application->overrides.owner = application;
 	application->refs = 1;
 	application->outer = outer;
 	InitializeCriticalSection(&application->suspending.lock);
@@ -477,8 +566,104 @@ static struct params *create_params(void)
 
 typedef HRESULT (STDMETHODCALLTYPE *initialization_invoke)(void *self, IInspectable *parameters);
 
-/* Application.Start gives the callback the initialization parameters and lets it create the application. The XAML engine would
- * then run the view loop; here the callback's result is returned to the runtime. */
+typedef __x_ABI_CWindows_CUI_CXaml_CIWindowCreatedEventArgs window_created_i;
+typedef __x_ABI_CWindows_CUI_CXaml_CIApplicationOverrides application_overrides_i;
+struct window_created_args {
+	window_created_i iface;
+	LONG refs;
+	IInspectable *window;
+	struct raven_weak_source weak;
+};
+static HRESULT WINAPI window_args_query(window_created_i *iface, REFIID iid, void **out)
+{
+	struct window_created_args *self = (void *)iface;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IWeakReferenceSource)) *out = &self->weak;
+	else if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
+		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIWindowCreatedEventArgs)) *out = iface;
+	else return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	return S_OK;
+}
+static ULONG WINAPI window_args_addref(window_created_i *iface)
+{ return InterlockedIncrement(&((struct window_created_args *)iface)->refs); }
+static ULONG WINAPI window_args_release(window_created_i *iface)
+{
+	struct window_created_args *self = (void *)iface;
+	LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		raven_weak_source_disconnect(&self->weak);
+		IInspectable_Release(self->window);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return refs;
+}
+static HRESULT WINAPI window_args_iids(window_created_i *iface, ULONG *count, IID **iids)
+{ (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI window_args_name(window_created_i *iface, HSTRING *name)
+{
+	static const WCHAR text[] = L"Windows.UI.Xaml.WindowCreatedEventArgs";
+	(void)iface;
+	if (!name) return E_POINTER;
+	return WindowsCreateString(text, ARRAYSIZE(text) - 1, name);
+}
+static HRESULT WINAPI window_args_trust(window_created_i *iface, TrustLevel *level)
+{ (void)iface; return inspectable_trust(level); }
+static HRESULT WINAPI window_args_window(window_created_i *iface, uintptr_t out)
+{
+	struct window_created_args *self = (void *)iface;
+	if (!out) return E_POINTER;
+	IInspectable_AddRef(self->window);
+	*(IInspectable **)(uintptr_t)out = self->window;
+	return S_OK;
+}
+static const __x_ABI_CWindows_CUI_CXaml_CIWindowCreatedEventArgsVtbl window_args_table = {
+	window_args_query, window_args_addref, window_args_release, window_args_iids, window_args_name,
+	window_args_trust, window_args_window
+};
+
+static HRESULT start_application(void)
+{
+	IInspectable *application = NULL, *window = NULL, *launch = NULL;
+	application_overrides_i *overrides = NULL;
+	ICoreWindow *core = NULL;
+	ICoreDispatcher *dispatcher = NULL;
+	struct window_created_args *args = NULL;
+	HRESULT result = raven_xaml_application_current(&application);
+	if (FAILED(result) || !application) return result;
+	if (!((struct application1_part *)application)->owner->outer) { result = S_OK; goto done; }
+	result = IInspectable_QueryInterface(application, &IID__x_ABI_CWindows_CUI_CXaml_CIApplicationOverrides, (void **)&overrides);
+	if (FAILED(result)) goto done;
+	result = raven_xaml_window_current(&window);
+	if (FAILED(result)) goto done;
+	args = ALLOC(sizeof *args);
+	if (!args) { result = E_OUTOFMEMORY; goto done; }
+	args->iface.lpVtbl = &window_args_table;
+	args->refs = 1;
+	args->window = window;
+	IInspectable_AddRef(window);
+	raven_weak_source_init(&args->weak, args, &args->refs, (raven_weak_query_fn)window_args_query);
+	InterlockedIncrement(&raven_xaml_objects);
+	result = overrides->lpVtbl->OnWindowCreated(overrides, (uintptr_t)&args->iface);
+	if (SUCCEEDED(result)) result = raven_launch_arguments_create(&launch);
+	if (SUCCEEDED(result)) result = overrides->lpVtbl->OnLaunched(overrides, (uintptr_t)launch);
+	if (SUCCEEDED(result)) result = raven_current_window(&core);
+	if (SUCCEEDED(result)) result = ICoreWindow_get_Dispatcher(core, &dispatcher);
+	if (SUCCEEDED(result)) result = ICoreDispatcher_ProcessEvents(dispatcher, CoreProcessEventsOption_ProcessUntilQuit);
+done:
+	if (dispatcher) ICoreDispatcher_Release(dispatcher);
+	if (core) ICoreWindow_Release(core);
+	if (launch) IInspectable_Release(launch);
+	if (args) window_args_release(&args->iface);
+	if (window) IInspectable_Release(window);
+	if (overrides) overrides->lpVtbl->Release(overrides);
+	IInspectable_Release(application);
+	return result;
+}
+
+/* The callback creates the application before activation and the dispatcher loop. */
 static HRESULT WINAPI statics_Start(xaml_application_statics *iface, uint64_t callback)
 {
 	struct params *parameters;
@@ -494,8 +679,14 @@ static HRESULT WINAPI statics_Start(xaml_application_statics *iface, uint64_t ca
 	/* A delegate is an IUnknown whose fourth slot is Invoke: the object's first word is its vtable. */
 	vtable = *(void **)(uintptr_t)callback;
 	invoke = (initialization_invoke)((void **)vtable)[3];
+	if (InterlockedCompareExchange((LONG *)&startup_thread, (LONG)GetCurrentThreadId(), 0)) {
+		params_release((application_params *)parameters);
+		return E_ILLEGAL_METHOD_CALL;
+	}
 	result = invoke((void *)(uintptr_t)callback, (IInspectable *)parameters);
 	params_release((application_params *)parameters);
+	if (SUCCEEDED(result)) result = start_application();
+	InterlockedExchange((LONG *)&startup_thread, 0);
 	return result;
 }
 

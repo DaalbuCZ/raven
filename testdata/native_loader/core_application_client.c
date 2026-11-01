@@ -255,6 +255,16 @@ static HRESULT WINAPI activated_invoke(activated_handler *iface, ICoreApplicatio
 		WindowsDeleteString(text);
 	}
 	IUnknown_Release(launch_args);
+	{
+		static const IID prelaunch = {0x0c44717b,0x19f7,0x48d6,{0xb0,0x46,0xcf,0x22,0x82,0x6e,0xaa,0x74}};
+		IUnknown *part = NULL;
+		boolean value = TRUE;
+		REQUIRE(IActivatedEventArgs_QueryInterface(args, &prelaunch, (void **)&part) == S_OK && part);
+		void **methods = *(void ***)part;
+		HRESULT (WINAPI *get_prelaunch)(void *, boolean *) = (void *)methods[6];
+		REQUIRE(get_prelaunch(part, &value) == S_OK && !value);
+		IUnknown_Release(part);
+	}
 	self->args = args;
 	IActivatedEventArgs_AddRef(args);
 	REQUIRE(ICoreApplicationView_remove_Activated(sender, self->activation_token) == S_OK);
