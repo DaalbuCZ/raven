@@ -10,6 +10,7 @@
 #include <winstring.h>
 #include <roapi.h>
 #include <activation.h>
+#include <windows.foundation.h>
 #include "windows_ui_xaml_application.h"
 #include "windows_ui_xaml_dictionary.h"
 #include "windows_ui_xaml_elements.h"
@@ -20,6 +21,8 @@ typedef __FIMap_2_IInspectable_IInspectable map_i;
 typedef __FIMapView_2_IInspectable_IInspectable map_view_i;
 typedef __FIVector_1_Windows__CUI__CXaml__CResourceDictionary merged_i;
 typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIGrid grid_i;
+typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClass uri_i;
+typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClassFactory uri_factory_i;
 
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
@@ -259,6 +262,47 @@ static HRESULT activate(const WCHAR *name, IInspectable **out)
 	return result;
 }
 
+/* The Uri a ResourceDictionary.Source takes, through the public factory the way an application creates one. */
+static HRESULT make_uri(const WCHAR *text, uri_i **out)
+{
+	static const WCHAR uri_name[] = L"Windows.Foundation.Uri";
+	HSTRING name = NULL, value = NULL;
+	uri_factory_i *uris = NULL;
+	HRESULT result;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	result = WindowsCreateString(uri_name, ARRAYSIZE(uri_name) - 1, &name);
+	if (FAILED(result))
+		return result;
+	result = RoGetActivationFactory(name, &IID___x_ABI_CWindows_CFoundation_CIUriRuntimeClassFactory, (void **)&uris);
+	WindowsDeleteString(name);
+	if (FAILED(result))
+		return result;
+	result = WindowsCreateString(text, (UINT32)lstrlenW(text), &value);
+	if (SUCCEEDED(result)) {
+		result = uris->lpVtbl->CreateUri(uris, value, out);
+		WindowsDeleteString(value);
+	}
+	uris->lpVtbl->Release(uris);
+	return result;
+}
+
+/* A stored value is the boxed string the loader put there: the IReference<HSTRING> the map's key comparison also reads. */
+static int boxed_text_is(IInspectable *value, const WCHAR *expected)
+{
+	__FIReference_1_HSTRING *box = NULL;
+	HSTRING text = NULL;
+	int same = value &&
+		SUCCEEDED(value->lpVtbl->QueryInterface(value, &IID___FIReference_1_HSTRING, (void **)&box)) && box &&
+		SUCCEEDED(box->lpVtbl->get_Value(box, &text)) && text && same_text(text, expected);
+	if (text)
+		WindowsDeleteString(text);
+	if (box)
+		box->lpVtbl->Release(box);
+	return same;
+}
+
 /* One runtime object per check; the codes are unique so a failure names its step. The DllCanUnloadNow check runs after the
  * dictionary's references drop and before the Application activation, because Application.Current retains the application
  * object for the process's lifetime by design. */
@@ -422,6 +466,136 @@ int raven_entry(void)
 		return 44;
 	if (map->lpVtbl->HasKey(map, (IInspectable *)alpha, &flag) != S_OK || flag)
 		return 45;
+	/* ThemeDictionaries is a live map of its own: its entries never reach the dictionary's own map and its view reads the
+	 * theme storage */
+	{
+		map_i *themes = NULL;
+		map_view_i *theme_view = NULL;
+		IInspectable *theme_value = NULL, *theme_found = NULL;
+		struct fixture_key *theme_key = make_key(L"Default");
+		if (!theme_key)
+			return 100;
+		if (resource->lpVtbl->get_ThemeDictionaries(resource, (uint64_t)(uintptr_t)&themes) != S_OK || !themes)
+			return 101;
+		if (themes->lpVtbl->get_Size(themes, &size) != S_OK || size)
+			return 102;
+		if (same_unknown(themes, dictionary))
+			return 103;
+		if (activate(dictionary_name, &theme_value) != S_OK || !theme_value)
+			return 104;
+		if (themes->lpVtbl->Insert(themes, (IInspectable *)theme_key, theme_value, &flag) != S_OK || flag)
+			return 105;
+		if (themes->lpVtbl->get_Size(themes, &size) != S_OK || size != 1)
+			return 106;
+		if (themes->lpVtbl->Lookup(themes, (IInspectable *)theme_key, &theme_found) != S_OK || !theme_found ||
+			!same_unknown(theme_found, theme_value))
+			return 107;
+		theme_found->lpVtbl->Release(theme_found);
+		theme_found = NULL;
+		if (map->lpVtbl->Lookup(map, (IInspectable *)theme_key, &theme_found) != E_BOUNDS || theme_found)
+			return 108;
+		if (themes->lpVtbl->GetView(themes, &theme_view) != S_OK || !theme_view)
+			return 109;
+		if (theme_view->lpVtbl->get_Size(theme_view, &size) != S_OK || size != 1)
+			return 110;
+		theme_view->lpVtbl->Release(theme_view);
+		if (themes->lpVtbl->Remove(themes, (IInspectable *)theme_key) != S_OK)
+			return 111;
+		if (themes->lpVtbl->get_Size(themes, &size) != S_OK || size)
+			return 112;
+		themes->lpVtbl->Release(themes);
+		theme_value->lpVtbl->Release(theme_value);
+		fixture_key_release(theme_key);
+	}
+	/* Source loads a compiled dictionary document through the PRI and adopts its entries; the Uri rides back out unchanged
+	 * and a failed load leaves the dictionary as it was */
+	{
+		uri_i *source_uri = NULL, *missing_uri = NULL, *loop_uri = NULL, *remote_uri = NULL;
+		IInspectable *source_value = NULL;
+		struct fixture_key *greeting = make_key(L"Greeting");
+		struct fixture_key *farewell = make_key(L"Farewell");
+		struct fixture_key *accent = make_key(L"Accent");
+		struct fixture_key *theme = make_key(L"Default");
+		if (!greeting || !farewell || !accent || !theme)
+			return 120;
+		if (resource->lpVtbl->get_Source(resource, (uint64_t)(uintptr_t)&source_value) != S_OK || source_value)
+			return 121;
+		if (make_uri(L"ms-appx:///Fixture/Source.xaml", &source_uri) != S_OK || !source_uri)
+			return 122;
+		if (make_uri(L"ms-appx:///Fixture/Absent.xaml", &missing_uri) != S_OK || !missing_uri ||
+			make_uri(L"ms-appx:///Fixture/Loop.xaml", &loop_uri) != S_OK || !loop_uri ||
+			make_uri(L"http://example.com/Fixture/Source.xaml", &remote_uri) != S_OK || !remote_uri)
+			return 123;
+		if (resource->lpVtbl->put_Source(resource, (uint64_t)(uintptr_t)source_uri) != S_OK)
+			return 124;
+		if (resource->lpVtbl->get_Source(resource, (uint64_t)(uintptr_t)&source_value) != S_OK || !source_value ||
+			!same_unknown(source_value, (IInspectable *)source_uri))
+			return 125;
+		source_value->lpVtbl->Release(source_value);
+		source_value = NULL;
+		if (map->lpVtbl->get_Size(map, &size) != S_OK || size != 2)
+			return 126;
+		if (map->lpVtbl->Lookup(map, (IInspectable *)greeting, &found) != S_OK || !found ||
+			!boxed_text_is(found, L"Hello from Source"))
+			return 127;
+		found->lpVtbl->Release(found);
+		found = NULL;
+		if (map->lpVtbl->Lookup(map, (IInspectable *)farewell, &found) != S_OK || !found ||
+			!boxed_text_is(found, L"Goodbye"))
+			return 128;
+		found->lpVtbl->Release(found);
+		found = NULL;
+		/* an absent document, a self-referential one and a non-local scheme each fail without touching what loaded */
+		if (resource->lpVtbl->put_Source(resource, (uint64_t)(uintptr_t)missing_uri) != E_BOUNDS ||
+			resource->lpVtbl->put_Source(resource, (uint64_t)(uintptr_t)loop_uri) != E_INVALIDARG ||
+			resource->lpVtbl->put_Source(resource, (uint64_t)(uintptr_t)remote_uri) != E_NOTIMPL)
+			return 129;
+		if (map->lpVtbl->get_Size(map, &size) != S_OK || size != 2 ||
+			resource->lpVtbl->get_Source(resource, (uint64_t)(uintptr_t)&source_value) != S_OK || !source_value ||
+			!same_unknown(source_value, (IInspectable *)source_uri))
+			return 130;
+		source_value->lpVtbl->Release(source_value);
+		source_value = NULL;
+		/* a document with ThemeDictionaries fills the second map the loader names by property */
+		{
+			uri_i *theme_uri = NULL;
+			map_i *themes = NULL;
+			IInspectable *default_dictionary = NULL;
+			map_i *default_map = NULL;
+			if (make_uri(L"ms-appx:///Fixture/Theme.xaml", &theme_uri) != S_OK || !theme_uri)
+				return 131;
+			if (resource->lpVtbl->put_Source(resource, (uint64_t)(uintptr_t)theme_uri) != S_OK)
+				return 132;
+			if (map->lpVtbl->Lookup(map, (IInspectable *)greeting, &found) != E_BOUNDS || found)
+				return 133;
+			if (resource->lpVtbl->get_ThemeDictionaries(resource, (uint64_t)(uintptr_t)&themes) != S_OK || !themes)
+				return 134;
+			if (themes->lpVtbl->get_Size(themes, &size) != S_OK || size != 1)
+				return 135;
+			if (themes->lpVtbl->Lookup(themes, (IInspectable *)theme, &default_dictionary) != S_OK || !default_dictionary)
+				return 136;
+			if (default_dictionary->lpVtbl->QueryInterface(default_dictionary,
+				&IID___FIMap_2_IInspectable_IInspectable, (void **)&default_map) != S_OK || !default_map)
+				return 137;
+			if (default_map->lpVtbl->Lookup(default_map, (IInspectable *)accent, &found) != S_OK || !found ||
+				!boxed_text_is(found, L"red"))
+				return 138;
+			found->lpVtbl->Release(found);
+			found = NULL;
+			default_map->lpVtbl->Release(default_map);
+			default_dictionary->lpVtbl->Release(default_dictionary);
+			themes->lpVtbl->Release(themes);
+			theme_uri->lpVtbl->Release(theme_uri);
+		}
+		source_uri->lpVtbl->Release(source_uri);
+		missing_uri->lpVtbl->Release(missing_uri);
+		loop_uri->lpVtbl->Release(loop_uri);
+		remote_uri->lpVtbl->Release(remote_uri);
+		fixture_key_release(greeting);
+		fixture_key_release(farewell);
+		fixture_key_release(accent);
+		fixture_key_release(theme);
+	}
 	/* release everything and check the component unloads */
 	map->lpVtbl->Release(map);
 	resource->lpVtbl->Release(resource);

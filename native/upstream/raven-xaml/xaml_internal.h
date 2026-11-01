@@ -87,6 +87,12 @@ HRESULT raven_xaml_window_current(IInspectable **out);
 HRESULT raven_launch_arguments_create(IInspectable **out);
 HRESULT raven_xaml_load_into(const void *data, uint32_t size, IInspectable *target);
 HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length);
+/* The engine-internal Uri creation and boxed string the loader uses for the properties a compiled document sets directly
+ * (a ResourceDictionary's Source) and for the keys it inserts (a dictionary's keyed value): the same object the public
+ * factory and the style defaults hand out, without a RoGetActivationFactory round trip. Boxed strings come back with one
+ * reference; the caller releases through IInspectable. */
+HRESULT raven_xaml_uri_create(const WCHAR *text, UINT32 length, IInspectable **out);
+IInspectable *raven_xaml_boxed_string(const WCHAR *text, UINT32 length);
 HRESULT raven_dispatcher_queue_current(__x_ABI_CWindows_CSystem_CIDispatcherQueue **out);
 HRESULT raven_window_post(__x_ABI_CWindows_CUI_CCore_CICoreWindow *window,
 	__x_ABI_CWindows_CUI_CCore_CIDispatchedHandler *callback, LONG priority, boolean *accepted);

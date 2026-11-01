@@ -2467,7 +2467,7 @@ static const __FIReference_1_DOUBLEVtbl number_box_reference_table = {
 	number_box_value,
 };
 
-static struct boxed_string *create_boxed_string(const WCHAR *text)
+static struct boxed_string *create_boxed_string_length(const WCHAR *text, UINT32 length)
 {
 	struct boxed_string *box = ALLOC(sizeof *box);
 	if (!box)
@@ -2475,12 +2475,24 @@ static struct boxed_string *create_boxed_string(const WCHAR *text)
 	box->inspectable = &string_box_inspectable_table;
 	box->reference.lpVtbl = &string_box_reference_table;
 	box->refs = 1;
-	if (text && WindowsCreateString(text, (UINT32)lstrlenW(text), &box->value) != S_OK) {
+	if (WindowsCreateString(text, length, &box->value) != S_OK) {
 		FREE(box);
 		return NULL;
 	}
 	InterlockedIncrement(&raven_xaml_objects);
 	return box;
+}
+
+static struct boxed_string *create_boxed_string(const WCHAR *text)
+{
+	return create_boxed_string_length(text, (UINT32)lstrlenW(text));
+}
+
+/* The loader's dictionary key: the same box the style defaults carry, by length because a compiled key is a slice of the
+ * metadata string table rather than a terminated literal. */
+IInspectable *raven_xaml_boxed_string(const WCHAR *text, UINT32 length)
+{
+	return (IInspectable *)create_boxed_string_length(text, length);
 }
 
 static struct boxed_number *create_boxed_number(double value)

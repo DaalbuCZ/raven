@@ -435,10 +435,31 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 length, const struct value *value)
 {
 	static const WCHAR name_property[] = L"Name";
+	static const WCHAR source_property[] = L"Source";
+	__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
 	if (length == ARRAYSIZE(name_property) - 1 && CompareStringOrdinal(name, (int)length, name_property, -1, FALSE) == CSTR_EQUAL) {
 		if (value->kind == value_string)
 			return raven_xaml_element_set_name(object, value->text, value->length);
 		return S_FALSE;
+	}
+	/* A compiled ResourceDictionary carries its contents by reference: SetValueTypeConvertedConstant ResourceDictionary_Source
+	 * names the dictionary document to load, and the setter does the PRI resolution and the nested load. */
+	if (length == ARRAYSIZE(source_property) - 1 &&
+		CompareStringOrdinal(name, (int)length, source_property, -1, FALSE) == CSTR_EQUAL &&
+		SUCCEEDED(IInspectable_QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary))) {
+		IInspectable *uri = NULL;
+		HRESULT result;
+		if (value->kind != value_string) {
+			dictionary->lpVtbl->Release(dictionary);
+			return value->kind == value_none ? S_FALSE : E_NOTIMPL;
+		}
+		result = raven_xaml_uri_create(value->text, value->length, &uri);
+		if (SUCCEEDED(result)) {
+			result = dictionary->lpVtbl->put_Source(dictionary, (uint64_t)(uintptr_t)uri);
+			IInspectable_Release(uri);
+		}
+		dictionary->lpVtbl->Release(dictionary);
+		return result;
 	}
 	switch (value->kind) {
 	case value_string:
@@ -522,6 +543,17 @@ static HRESULT get_merged_dictionaries(IInspectable *object, IInspectable **out)
 	dictionary->lpVtbl->Release(dictionary);
 	return result;
 }
+static HRESULT get_theme_dictionaries(IInspectable *object, IInspectable **out)
+{
+	dictionary_i *dictionary = NULL;
+	if (!object || !out) return E_POINTER;
+	*out = NULL;
+	HRESULT result = IInspectable_QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary);
+	if (FAILED(result)) return result;
+	result = dictionary->lpVtbl->get_ThemeDictionaries(dictionary, (uint64_t)(uintptr_t)out);
+	dictionary->lpVtbl->Release(dictionary);
+	return result;
+}
 static HRESULT append_dictionary(IInspectable *collection, IInspectable *item)
 {
 	dictionary_vector_i *vector = NULL;
@@ -533,6 +565,53 @@ static HRESULT append_dictionary(IInspectable *collection, IInspectable *item)
 	if (SUCCEEDED(result)) result = vector->lpVtbl->Append(vector, dictionary);
 	if (dictionary) dictionary->lpVtbl->Release(dictionary);
 	if (vector) vector->lpVtbl->Release(vector);
+	return result;
+}
+
+/* A map scope is the ThemeDictionaries property or a dictionary document's own object: either way the node that closes a
+ * value scope hands the value to a keyed insertion instead of a collection append. */
+static BOOL is_map_object(IInspectable *object)
+{
+	__FIMap_2_IInspectable_IInspectable *map = NULL;
+	BOOL found;
+	if (!object) return FALSE;
+	found = SUCCEEDED(IInspectable_QueryInterface(object, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map)) && map;
+	if (map) map->lpVtbl->Release(map);
+	return found;
+}
+
+/* AddToDictionaryWithKey: the value is the object the just-closed scope attached, or the constant the PushConstant node before
+ * the key carried (the encoding for a primitive entry such as a string resource). The key is an XBF string, boxed so the
+ * dictionary's content comparison sees it exactly as the compiled markup's other string keys. Only string values have a box
+ * the loader can build today; the numeric and color constants arrive with the resource-value boxing of the style stage and
+ * are refused here rather than inserted as the wrong type. */
+static HRESULT add_to_dictionary(IInspectable *object, const struct value *key, IInspectable *value,
+	const struct value *constant)
+{
+	__FIMap_2_IInspectable_IInspectable *map = NULL;
+	IInspectable *key_object = NULL, *value_object = NULL;
+	boolean replaced = FALSE;
+	HRESULT result;
+	if (!object || !key || key->kind != value_string || !key->text)
+		return E_NOTIMPL;
+	result = IInspectable_QueryInterface(object, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map);
+	if (FAILED(result))
+		return result;
+	key_object = raven_xaml_boxed_string(key->text, key->length);
+	if (!key_object) { result = E_OUTOFMEMORY; goto done; }
+	if (value)
+		value_object = value;
+	else if (constant && constant->kind == value_string && constant->text)
+		value_object = raven_xaml_boxed_string(constant->text, constant->length);
+	if (!value_object) {
+		result = E_NOTIMPL;
+		goto done;
+	}
+	result = map->lpVtbl->Insert(map, key_object, value_object, &replaced);
+done:
+	if (value_object && value_object != value) IInspectable_Release(value_object);
+	if (key_object) IInspectable_Release(key_object);
+	if (map) map->lpVtbl->Release(map);
 	return result;
 }
 
@@ -559,10 +638,16 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
 	IInspectable *last_object = NULL;
+	struct value pending_value = {value_none, NULL, 0, 0, 0};
+	BOOL pending_value_valid = FALSE;
 	UINT32 pending_length = 0;
 	HRESULT status = S_OK;
 	while (r.at < r.end) {
 		const uint8_t kind = next_byte(&r);
+		/* A pushed constant is the value of the dictionary entry the next keyed insertion consumes; any other node in
+		 * between leaves it unused, the way an ignored PushConstant always behaved. */
+		if (kind != 4 && kind != 10)
+			pending_value_valid = FALSE;
 		switch (kind) {
 		case 1:
 			if (depth < LOADER_DEPTH) {
@@ -594,7 +679,9 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						goto done;
 					}
 				}
-				if (scope->object && depth && stack[depth - 1].kind == 3) {
+				if (scope->object && depth && (stack[depth - 1].kind == 3 ||
+					(scope->kind == 0 && is_map_object(stack[depth - 1].object)))) {
+					/* A value a collection or map scope receives: the append or the keyed insertion takes it. */
 					if (last_object) IInspectable_Release(last_object);
 					last_object = scope->object;
 				} else if (scope->object) IInspectable_Release(scope->object);
@@ -788,23 +875,51 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (FAILED(status)) { if (target) goto done; status = S_OK; break; }
 			if (kind == 19) {
 				IInspectable *collection = NULL;
-				if (!depth || depth == LOADER_DEPTH || length != 18 || memcmp(name, L"MergedDictionaries", 18 * sizeof(WCHAR))) {
+				if (!depth || depth == LOADER_DEPTH) {
 					status = E_NOTIMPL; goto done;
 				}
-				status = get_merged_dictionaries(stack[depth - 1].object, &collection);
-				if (FAILED(status)) goto done;
-				memset(&stack[depth], 0, sizeof stack[depth]);
-				stack[depth].object = collection; stack[depth].kind = 3; ++depth;
+				if (length == 18 && !memcmp(name, L"MergedDictionaries", 18 * sizeof(WCHAR))) {
+					status = get_merged_dictionaries(stack[depth - 1].object, &collection);
+					if (FAILED(status)) goto done;
+					memset(&stack[depth], 0, sizeof stack[depth]);
+					stack[depth].object = collection; stack[depth].kind = 3; ++depth;
+				} else if (length == 17 && !memcmp(name, L"ThemeDictionaries", 17 * sizeof(WCHAR))) {
+					status = get_theme_dictionaries(stack[depth - 1].object, &collection);
+					if (FAILED(status)) goto done;
+					memset(&stack[depth], 0, sizeof stack[depth]);
+					stack[depth].object = collection; stack[depth].kind = 5; ++depth;
+				} else {
+					status = E_NOTIMPL; goto done;
+				}
 			} else {
 				pending_name = name; pending_length = length;
 			}
 			break;
 		}
-		case 4: case 10: case 12: case 14: case 34: case 35: {
+		case 4: case 12: case 14: case 34: case 35: {
 			struct value value = {value_none, NULL, 0, 0, 0};
 			status = read_constant(&r, m, &value);
 			if (FAILED(status)) goto done;
+			if (kind == 4) {
+				/* PushConstant: the value a keyed insertion consumes. A document that pushes a constant for any other
+				 * purpose keeps the old shortcut, which ignored it. */
+				pending_value = value;
+				pending_value_valid = TRUE;
+				break;
+			}
 			if (target) { status = E_NOTIMPL; goto done; }
+			break;
+		}
+		case 10: {
+			struct value key = {value_none, NULL, 0, 0, 0};
+			status = read_constant(&r, m, &key);
+			if (FAILED(status)) goto done;
+			status = add_to_dictionary(depth ? stack[depth - 1].object : NULL, &key, last_object,
+				pending_value_valid ? &pending_value : NULL);
+			if (last_object) IInspectable_Release(last_object);
+			last_object = NULL;
+			pending_value_valid = FALSE;
+			if (FAILED(status)) goto done;
 			break;
 		}
 		case 11:

@@ -76,6 +76,18 @@ int raven_entry(void)
 			merged->lpVtbl->get_Size(merged, &count) != S_OK || count != 2 ||
 			merged->lpVtbl->GetAt(merged, 0, &first) != S_OK || !first ||
 			merged->lpVtbl->GetAt(merged, 1, &second) != S_OK || !second || first == second) return 11;
+		/* the second merged dictionary names its document through Source, and the loader filled it from the PRI */
+		{
+			__FIMap_2_IInspectable_IInspectable *second_map = NULL;
+			IInspectable *second_source = NULL;
+			UINT32 entries = 0;
+			if (IInspectable_QueryInterface((IInspectable *)second, &IID___FIMap_2_IInspectable_IInspectable,
+				(void **)&second_map) != S_OK || !second_map) return 12;
+			if (second_map->lpVtbl->get_Size(second_map, &entries) != S_OK || entries != 2) return 13;
+			if (second->lpVtbl->get_Source(second, (uint64_t)(uintptr_t)&second_source) != S_OK || !second_source) return 14;
+			IInspectable_Release(second_source);
+			second_map->lpVtbl->Release(second_map);
+		}
 		first->lpVtbl->Release(first); second->lpVtbl->Release(second); merged->lpVtbl->Release(merged);
 		dictionary->lpVtbl->Release(dictionary); IInspectable_Release(resources); app->lpVtbl->Release(app);
 	}

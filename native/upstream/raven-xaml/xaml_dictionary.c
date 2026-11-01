@@ -9,7 +9,8 @@
  * dictionary vector and the Source and ThemeDictionaries properties, and the parameterized interface
  * Windows.Foundation.Collections.IMap`2<IInspectable, IInspectable> it derives from — the interface the compiled markup and a
  * WinRT caller use to Insert and Lookup. The object is one COM identity: every part answers for the others, the way the
- * application and element classes do.
+ * application and element classes do; ThemeDictionaries is the one member that hands out a second object, because a map that
+ * is not the dictionary itself is what the property returns.
  *
  * The interface declarations come from Windows.UI.Xaml.winmd by scripts/generate-winrt-header.py; the parameterized
  * instantiations are the hand-derived declarations in windows_ui_xaml_dictionary.h, whose IIDs follow the signature rule and
@@ -21,18 +22,27 @@
  * IReference`1<HSTRING> compares by its string content (WindowsCompareStringOrdinal) and every other key compares by IUnknown
  * identity. Values are IInspectable references the dictionary owns; Insert replaces an existing key's value and reports the
  * replacement, Lookup and Remove of a missing key fail with E_BOUNDS per the IMap contract, and Clear empties the map.
- * Mutations do not re-render yet: nothing in the render pass reads resources until the style stage arrives. */
+ * Mutations do not re-render yet: nothing in the render pass reads resources until the style stage arrives.
+ *
+ * Source is the one member that loads contents the caller did not Insert: setting it resolves the Uri's local package path
+ * through the resource index (the same PRI path Application.LoadComponent uses), loads the compiled dictionary document into
+ * a fresh dictionary and adopts its entries. The load is atomic — a document that fails leaves this dictionary as it was —
+ * and a Source that resolves back into itself is refused at a bounded recursion depth instead of looping. The Windows
+ * behavior of clearing Source with NULL is not reproduced: the setter refuses NULL, because whether the contents clear with
+ * it cannot be verified here. */
 #define INITGUID
 #define CINTERFACE
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include "windows_ui_xaml_dictionary.h"
+#include <windows.foundation.h>
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
 
 typedef __x_ABI_CWindows_CUI_CXaml_CIResourceDictionary resource1;
+typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClass uri1;
 typedef __FIReference_1_HSTRING boxed_string;
 
 static const WCHAR class_name[] = L"Windows.UI.Xaml.ResourceDictionary";
@@ -80,13 +90,25 @@ static HRESULT make_name(const WCHAR *text, HSTRING *name)
 
 struct dictionary;
 struct merged_vector;
+struct dictionary_store;
 
 struct resource_part { const __x_ABI_CWindows_CUI_CXaml_CIResourceDictionaryVtbl *lpVtbl; struct dictionary *owner; };
-struct map_part { const __FIMap_2_IInspectable_IInspectableVtbl *lpVtbl; struct dictionary *owner; };
+struct map_part {
+	const __FIMap_2_IInspectable_IInspectableVtbl *lpVtbl;
+	struct dictionary *owner;
+	struct dictionary_store *store;
+};
 
 struct dictionary_entry {
 	IInspectable *key;
 	IInspectable *value;
+};
+
+/* One map's storage. The dictionary owns two: its own contents — the IMap it derives from — and ThemeDictionaries, whose
+ * keys ("Default", "Dark", "Light", "HighContrast") select the dictionary a theme stage reads. */
+struct dictionary_store {
+	struct dictionary_entry *entries;
+	UINT32 count, capacity;
 };
 
 /* The merged dictionaries: the vector IResourceDictionary.MergedDictionaries hands out, appended to by the compiled App.xaml
@@ -102,12 +124,15 @@ struct merged_vector {
 struct dictionary {
 	struct resource_part resource;
 	struct map_part map;
+	struct map_part theme;
 	LONG refs;
-	struct dictionary_entry *entries;
-	UINT32 count, capacity;
+	struct dictionary_store store;
+	struct dictionary_store themes;
+	IInspectable *source;
 	struct merged_vector *merged;
 };
 
+static struct dictionary *create_dictionary(void);
 static HRESULT dictionary_query_any(struct dictionary *self, REFIID iid, void **out);
 static ULONG dictionary_addref(struct dictionary *self);
 static ULONG dictionary_release(struct dictionary *self);
@@ -149,12 +174,37 @@ static int key_matches(IInspectable *stored, IInspectable *probe)
 	return matches;
 }
 
-static struct dictionary_entry *dictionary_find(struct dictionary *self, IInspectable *key)
+static struct dictionary_entry *store_find(struct dictionary_store *store, IInspectable *key)
 {
-	for (UINT32 index = 0; index < self->count; ++index)
-		if (key_matches(self->entries[index].key, key))
-			return &self->entries[index];
+	for (UINT32 index = 0; index < store->count; ++index)
+		if (key_matches(store->entries[index].key, key))
+			return &store->entries[index];
 	return NULL;
+}
+
+static void store_clear(struct dictionary_store *store)
+{
+	for (UINT32 index = 0; index < store->count; ++index) {
+		if (store->entries[index].key)
+			store->entries[index].key->lpVtbl->Release(store->entries[index].key);
+		if (store->entries[index].value)
+			store->entries[index].value->lpVtbl->Release(store->entries[index].value);
+	}
+	if (store->entries)
+		FREE(store->entries);
+	store->entries = NULL;
+	store->count = 0;
+	store->capacity = 0;
+}
+
+/* The entries of one store move into another: Source adoption and its rollback both need the transfer, never a copy. */
+static void store_adopt(struct dictionary_store *into, struct dictionary_store *from)
+{
+	store_clear(into);
+	*into = *from;
+	from->entries = NULL;
+	from->count = 0;
+	from->capacity = 0;
 }
 
 static ULONG dictionary_addref(struct dictionary *self)
@@ -166,14 +216,10 @@ static ULONG dictionary_release(struct dictionary *self)
 {
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
-		for (UINT32 index = 0; index < self->count; ++index) {
-			if (self->entries[index].key)
-				self->entries[index].key->lpVtbl->Release(self->entries[index].key);
-			if (self->entries[index].value)
-				self->entries[index].value->lpVtbl->Release(self->entries[index].value);
-		}
-		if (self->entries)
-			FREE(self->entries);
+		store_clear(&self->store);
+		store_clear(&self->themes);
+		if (self->source)
+			self->source->lpVtbl->Release(self->source);
 		if (self->merged)
 			merged_release(self->merged);
 		FREE(self);
@@ -217,20 +263,105 @@ static HRESULT WINAPI resource_trust(resource1 *iface, TrustLevel *level)
 	return inspectable_trust(level);
 }
 
-/* Source takes a Windows.Foundation.Uri, a class the engine does not implement yet. */
+/* The source document a WinRT caller sets: the Uri rides back out unchanged, and the entries arrive through a nested load
+ * of the compiled dictionary document. The nested load is bounded, because a document whose Source names itself would
+ * otherwise recurse without end; the Windows behavior of setting NULL is not reproduced (see the file comment). */
+#define SOURCE_DEPTH 16
+static LONG source_depth;
+
+static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
+{
+	static const WCHAR prefix[] = L"ms-appx:///";
+	static const WCHAR files[] = L"/Files";
+	static const WCHAR xaml_suffix[] = L".xaml";
+	WCHAR path[1024];
+	const WCHAR *text;
+	uri1 *uri = NULL;
+	HSTRING absolute = NULL;
+	const BYTE *blob = NULL;
+	UINT32 length = 0, path_length, bytes = 0;
+	struct dictionary *loaded = NULL;
+	HRESULT result;
+	if (!locator)
+		return E_INVALIDARG;
+	result = IInspectable_QueryInterface(locator, &IID___x_ABI_CWindows_CFoundation_CIUriRuntimeClass, (void **)&uri);
+	if (FAILED(result))
+		return result;
+	result = uri->lpVtbl->get_AbsoluteUri(uri, &absolute);
+	uri->lpVtbl->Release(uri);
+	if (FAILED(result))
+		return result;
+	text = WindowsGetStringRawBuffer(absolute, &length);
+	if (length < ARRAYSIZE(prefix) - 1 + ARRAYSIZE(xaml_suffix) - 1 ||
+		length + ARRAYSIZE(files) >= ARRAYSIZE(path) ||
+		CompareStringOrdinal(text, ARRAYSIZE(prefix) - 1, prefix, -1, TRUE) != CSTR_EQUAL ||
+		CompareStringOrdinal(text + length - (ARRAYSIZE(xaml_suffix) - 1), ARRAYSIZE(xaml_suffix) - 1, xaml_suffix, -1, TRUE) != CSTR_EQUAL) {
+		result = E_NOTIMPL;
+		goto done;
+	}
+	/* Shortcut: only local package XAML without escaping or URI qualifiers is resolved here; the query, fragment, escape
+	 * and backslash forms answer E_NOTIMPL the way Application.LoadComponent refuses them. */
+	for (UINT32 index = ARRAYSIZE(prefix) - 1; index < length; ++index)
+		if (!text[index] || text[index] == L'?' || text[index] == L'#' || text[index] == L'%' || text[index] == L'\\') {
+			result = E_NOTIMPL;
+			goto done;
+		}
+	memcpy(path, files, (ARRAYSIZE(files) - 1) * sizeof(WCHAR));
+	path_length = ARRAYSIZE(files) - 1 + length - (ARRAYSIZE(prefix) - 2);
+	memcpy(path + ARRAYSIZE(files) - 1, text + ARRAYSIZE(prefix) - 2,
+		(length - (ARRAYSIZE(prefix) - 2) - 5) * sizeof(WCHAR));
+	path_length -= 1; /* .xaml becomes .xbf */
+	memcpy(path + path_length - 4, L".xbf", 4 * sizeof(WCHAR));
+	result = raven_pri_get_blob(path, path_length, &blob, &bytes);
+	if (FAILED(result))
+		goto done;
+	if (!(loaded = create_dictionary())) {
+		result = E_OUTOFMEMORY;
+		goto done;
+	}
+	result = raven_xaml_load_into(blob, bytes, (IInspectable *)&loaded->resource);
+	if (FAILED(result))
+		goto done;
+	/* Adoption replaces the contents: the compiled markup sets Source on a fresh dictionary, and a WinRT caller that wants
+	 * to keep earlier entries can merge them in later. Both maps move — a document's ThemeDictionaries is as much part of it
+	 * as its own entries. The Uri becomes the Source only once the document landed. */
+	store_adopt(&self->store, &loaded->store);
+	store_adopt(&self->themes, &loaded->themes);
+	if (self->source)
+		self->source->lpVtbl->Release(self->source);
+	self->source = locator;
+	locator->lpVtbl->AddRef(locator);
+done:
+	if (loaded)
+		dictionary_release(loaded);
+	WindowsDeleteString(absolute);
+	return result;
+}
+
 static HRESULT WINAPI resource_get_source(resource1 *iface, uint64_t out)
 {
-	(void)iface;
-	if (out)
-		*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	struct dictionary *self = ((struct resource_part *)iface)->owner;
+	IInspectable **value = (IInspectable **)(uintptr_t)out;
+	if (!value)
+		return E_POINTER;
+	*value = self->source;
+	if (*value)
+		(*value)->lpVtbl->AddRef(*value);
+	return S_OK;
 }
 
 static HRESULT WINAPI resource_put_source(resource1 *iface, uint64_t value)
 {
-	(void)iface;
-	(void)value;
-	return E_NOTIMPL;
+	struct dictionary *self = ((struct resource_part *)iface)->owner;
+	HRESULT result;
+	if (InterlockedIncrement(&source_depth) > SOURCE_DEPTH) {
+		InterlockedDecrement(&source_depth);
+		/* A Source graph that names itself compiles to no usable dictionary; the document is refused, not followed. */
+		return E_INVALIDARG;
+	}
+	result = adopt_source(self, (IInspectable *)(uintptr_t)value);
+	InterlockedDecrement(&source_depth);
+	return result;
 }
 
 static HRESULT WINAPI resource_get_merged(resource1 *iface, void **out)
@@ -243,13 +374,17 @@ static HRESULT WINAPI resource_get_merged(resource1 *iface, void **out)
 	return S_OK;
 }
 
-/* ThemeDictionaries is a second map the theme stage fills; until that stage the slot answers E_NOTIMPL. */
+/* ThemeDictionaries is a map of its own: the property hands out the same live storage a WinRT caller fills, and the loader
+ * inserts into it when a compiled document names the property. */
 static HRESULT WINAPI resource_get_theme(resource1 *iface, uint64_t out)
 {
-	(void)iface;
-	if (out)
-		*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	struct dictionary *self = ((struct resource_part *)iface)->owner;
+	__FIMap_2_IInspectable_IInspectable **value = (__FIMap_2_IInspectable_IInspectable **)(uintptr_t)out;
+	if (!value)
+		return E_POINTER;
+	*value = (__FIMap_2_IInspectable_IInspectable *)&self->theme;
+	dictionary_addref(self);
+	return S_OK;
 }
 
 static const __x_ABI_CWindows_CUI_CXaml_CIResourceDictionaryVtbl resource_table = {
@@ -302,14 +437,14 @@ static HRESULT WINAPI map_trust(__FIMap_2_IInspectable_IInspectable *iface, Trus
 
 static HRESULT WINAPI map_lookup(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key, IInspectable **value)
 {
-	struct dictionary *self = ((struct map_part *)iface)->owner;
+	struct map_part *part = (struct map_part *)iface;
 	struct dictionary_entry *entry;
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
 	if (!key)
 		return E_POINTER;
-	entry = dictionary_find(self, key);
+	entry = store_find(part->store, key);
 	if (!entry)
 		return E_BOUNDS;
 	*value = entry->value;
@@ -322,19 +457,19 @@ static HRESULT WINAPI map_size(__FIMap_2_IInspectable_IInspectable *iface, UINT3
 {
 	if (!value)
 		return E_POINTER;
-	*value = ((struct map_part *)iface)->owner->count;
+	*value = ((struct map_part *)iface)->store->count;
 	return S_OK;
 }
 
 static HRESULT WINAPI map_has_key(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key, boolean *found)
 {
-	struct dictionary *self = ((struct map_part *)iface)->owner;
+	struct map_part *part = (struct map_part *)iface;
 	if (!found)
 		return E_POINTER;
 	*found = FALSE;
 	if (!key)
 		return E_POINTER;
-	*found = dictionary_find(self, key) ? TRUE : FALSE;
+	*found = store_find(part->store, key) ? TRUE : FALSE;
 	return S_OK;
 }
 
@@ -344,13 +479,14 @@ static HRESULT WINAPI map_get_view(__FIMap_2_IInspectable_IInspectable *iface,
 static HRESULT WINAPI map_insert(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key, IInspectable *value,
 	boolean *replaced)
 {
-	struct dictionary *self = ((struct map_part *)iface)->owner;
+	struct map_part *part = (struct map_part *)iface;
+	struct dictionary_store *store = part->store;
 	struct dictionary_entry *entry;
 	if (replaced)
 		*replaced = FALSE;
 	if (!key)
 		return E_POINTER;
-	entry = dictionary_find(self, key);
+	entry = store_find(store, key);
 	if (entry) {
 		if (replaced)
 			*replaced = TRUE;
@@ -361,43 +497,43 @@ static HRESULT WINAPI map_insert(__FIMap_2_IInspectable_IInspectable *iface, IIn
 		entry->value = value;
 		return S_OK;
 	}
-	if (self->count == self->capacity) {
-		const UINT32 capacity = self->capacity ? self->capacity * 2 : 4;
+	if (store->count == store->capacity) {
+		const UINT32 capacity = store->capacity ? store->capacity * 2 : 4;
 		struct dictionary_entry *entries =
 			HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)capacity * sizeof *entries);
 		if (!entries)
 			return E_OUTOFMEMORY;
-		if (self->entries) {
-			for (UINT32 index = 0; index < self->count; ++index)
-				entries[index] = self->entries[index];
-			FREE(self->entries);
+		if (store->entries) {
+			for (UINT32 index = 0; index < store->count; ++index)
+				entries[index] = store->entries[index];
+			FREE(store->entries);
 		}
-		self->entries = entries;
-		self->capacity = capacity;
+		store->entries = entries;
+		store->capacity = capacity;
 	}
-	self->entries[self->count].key = key;
-	self->entries[self->count].value = value;
+	store->entries[store->count].key = key;
+	store->entries[store->count].value = value;
 	key->lpVtbl->AddRef(key);
 	if (value)
 		value->lpVtbl->AddRef(value);
-	++self->count;
+	++store->count;
 	return S_OK;
 }
 
 static HRESULT WINAPI map_remove(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key)
 {
-	struct dictionary *self = ((struct map_part *)iface)->owner;
+	struct dictionary_store *store = ((struct map_part *)iface)->store;
 	if (!key)
 		return E_POINTER;
-	for (UINT32 index = 0; index < self->count; ++index) {
-		if (!key_matches(self->entries[index].key, key))
+	for (UINT32 index = 0; index < store->count; ++index) {
+		if (!key_matches(store->entries[index].key, key))
 			continue;
-		self->entries[index].key->lpVtbl->Release(self->entries[index].key);
-		if (self->entries[index].value)
-			self->entries[index].value->lpVtbl->Release(self->entries[index].value);
-		for (UINT32 rest = index; rest + 1 < self->count; ++rest)
-			self->entries[rest] = self->entries[rest + 1];
-		--self->count;
+		store->entries[index].key->lpVtbl->Release(store->entries[index].key);
+		if (store->entries[index].value)
+			store->entries[index].value->lpVtbl->Release(store->entries[index].value);
+		for (UINT32 rest = index; rest + 1 < store->count; ++rest)
+			store->entries[rest] = store->entries[rest + 1];
+		--store->count;
 		return S_OK;
 	}
 	return E_BOUNDS;
@@ -405,18 +541,51 @@ static HRESULT WINAPI map_remove(__FIMap_2_IInspectable_IInspectable *iface, IIn
 
 static HRESULT WINAPI map_clear(__FIMap_2_IInspectable_IInspectable *iface)
 {
-	struct dictionary *self = ((struct map_part *)iface)->owner;
-	for (UINT32 index = 0; index < self->count; ++index) {
-		self->entries[index].key->lpVtbl->Release(self->entries[index].key);
-		if (self->entries[index].value)
-			self->entries[index].value->lpVtbl->Release(self->entries[index].value);
+	struct dictionary_store *store = ((struct map_part *)iface)->store;
+	for (UINT32 index = 0; index < store->count; ++index) {
+		store->entries[index].key->lpVtbl->Release(store->entries[index].key);
+		if (store->entries[index].value)
+			store->entries[index].value->lpVtbl->Release(store->entries[index].value);
 	}
-	self->count = 0;
+	store->count = 0;
 	return S_OK;
 }
 
 static const __FIMap_2_IInspectable_IInspectableVtbl map_table = {
 	.QueryInterface = map_query,
+	.AddRef = map_addref,
+	.Release = map_release,
+	.GetIids = map_iids,
+	.GetRuntimeClassName = map_name,
+	.GetTrustLevel = map_trust,
+	.Lookup = map_lookup,
+	.get_Size = map_size,
+	.HasKey = map_has_key,
+	.GetView = map_get_view,
+	.Insert = map_insert,
+	.Remove = map_remove,
+	.Clear = map_clear,
+};
+
+/* The ThemeDictionaries map: its own COM identity, because it is not the dictionary. QI(IUnknown) on it answers the map,
+ * while the dictionary's own IMap part answers the dictionary; the reference count is still the dictionary's, since the
+ * storage the map reads lives and dies with it. */
+static HRESULT WINAPI theme_query(__FIMap_2_IInspectable_IInspectable *iface, REFIID iid, void **out)
+{
+	struct dictionary *self = ((struct map_part *)iface)->owner;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID___FIMap_2_IInspectable_IInspectable))
+		return E_NOINTERFACE;
+	dictionary_addref(self);
+	*out = iface;
+	return S_OK;
+}
+
+static const __FIMap_2_IInspectable_IInspectableVtbl theme_table = {
+	.QueryInterface = theme_query,
 	.AddRef = map_addref,
 	.Release = map_release,
 	.GetIids = map_iids,
@@ -437,6 +606,7 @@ static const __FIMap_2_IInspectable_IInspectableVtbl map_table = {
 struct map_view {
 	const __FIMapView_2_IInspectable_IInspectableVtbl *lpVtbl;
 	struct dictionary *owner;
+	struct dictionary_store *store;
 	LONG refs;
 };
 
@@ -490,14 +660,14 @@ static HRESULT WINAPI view_trust(__FIMapView_2_IInspectable_IInspectable *iface,
 
 static HRESULT WINAPI view_lookup(__FIMapView_2_IInspectable_IInspectable *iface, IInspectable *key, IInspectable **value)
 {
-	struct dictionary *self = ((struct map_view *)iface)->owner;
+	struct dictionary_store *store = ((struct map_view *)iface)->store;
 	struct dictionary_entry *entry;
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
 	if (!key)
 		return E_POINTER;
-	entry = dictionary_find(self, key);
+	entry = store_find(store, key);
 	if (!entry)
 		return E_BOUNDS;
 	*value = entry->value;
@@ -510,19 +680,19 @@ static HRESULT WINAPI view_size(__FIMapView_2_IInspectable_IInspectable *iface, 
 {
 	if (!value)
 		return E_POINTER;
-	*value = ((struct map_view *)iface)->owner->count;
+	*value = ((struct map_view *)iface)->store->count;
 	return S_OK;
 }
 
 static HRESULT WINAPI view_has_key(__FIMapView_2_IInspectable_IInspectable *iface, IInspectable *key, boolean *found)
 {
-	struct dictionary *self = ((struct map_view *)iface)->owner;
+	struct dictionary_store *store = ((struct map_view *)iface)->store;
 	if (!found)
 		return E_POINTER;
 	*found = FALSE;
 	if (!key)
 		return E_POINTER;
-	*found = dictionary_find(self, key) ? TRUE : FALSE;
+	*found = store_find(store, key) ? TRUE : FALSE;
 	return S_OK;
 }
 
@@ -553,7 +723,7 @@ static const __FIMapView_2_IInspectable_IInspectableVtbl map_view_table = {
 static HRESULT WINAPI map_get_view(__FIMap_2_IInspectable_IInspectable *iface,
 	__FIMapView_2_IInspectable_IInspectable **view)
 {
-	struct dictionary *self = ((struct map_part *)iface)->owner;
+	struct map_part *part = (struct map_part *)iface;
 	struct map_view *instance;
 	if (!view)
 		return E_POINTER;
@@ -561,9 +731,10 @@ static HRESULT WINAPI map_get_view(__FIMap_2_IInspectable_IInspectable *iface,
 	if (!(instance = ALLOC(sizeof *instance)))
 		return E_OUTOFMEMORY;
 	instance->lpVtbl = &map_view_table;
-	instance->owner = self;
+	instance->owner = part->owner;
+	instance->store = part->store;
 	instance->refs = 1;
-	dictionary_addref(self);
+	dictionary_addref(part->owner);
 	InterlockedIncrement(&raven_xaml_objects);
 	*view = (__FIMapView_2_IInspectable_IInspectable *)instance;
 	return S_OK;
@@ -832,6 +1003,10 @@ static struct dictionary *create_dictionary(void)
 	dictionary->resource.owner = dictionary;
 	dictionary->map.lpVtbl = &map_table;
 	dictionary->map.owner = dictionary;
+	dictionary->map.store = &dictionary->store;
+	dictionary->theme.lpVtbl = &theme_table;
+	dictionary->theme.owner = dictionary;
+	dictionary->theme.store = &dictionary->themes;
 	dictionary->refs = 1;
 	dictionary->merged = create_merged();
 	if (!dictionary->merged) {

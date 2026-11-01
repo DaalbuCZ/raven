@@ -182,6 +182,29 @@ static const __x_ABI_CWindows_CFoundation_CIUriRuntimeClassFactoryVtbl factory_t
 	factory_part_query, factory_addref, factory_release, factory_iids, factory_name, factory_trust, factory_create, factory_relative
 };
 static struct factory factory = {{&activation_table}, {&factory_table}, 1};
+
+/* The engine-internal creation a compiled document or a dictionary's Source uses: the factory's parser and object, reached
+ * without the catalog. */
+HRESULT raven_xaml_uri_create(const WCHAR *text, UINT32 length, IInspectable **out)
+{
+	HSTRING input = NULL;
+	uri_i *uri = NULL;
+	HRESULT result;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!text && length)
+		return E_POINTER;
+	result = WindowsCreateString(text, length, &input);
+	if (FAILED(result))
+		return result;
+	result = create_uri(input, &uri);
+	WindowsDeleteString(input);
+	if (SUCCEEDED(result))
+		*out = (IInspectable *)uri;
+	return result;
+}
+
 HRESULT raven_uri_factory(HSTRING name, IActivationFactory **out)
 {
 	UINT32 length = 0; const WCHAR *text = WindowsGetStringRawBuffer(name, &length);

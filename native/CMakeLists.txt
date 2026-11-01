@@ -2952,13 +2952,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
                     add_custom_target(dispatcher_idle_fixture${width} ALL DEPENDS ${dispatcher_idle_client} xaml_component)
                     add_test(NAME native_dispatcher_idle_x${width} COMMAND raven --run-process --execution=native ${dispatcher_idle_client})
                     set_tests_properties(native_dispatcher_idle_x${width} PROPERTIES TIMEOUT 30 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
-                    set(resource_client ${CMAKE_CURRENT_BINARY_DIR}/resource-client${width}.exe)
-                    add_custom_command(OUTPUT ${resource_client}
+                    set(resource_dir ${CMAKE_CURRENT_BINARY_DIR}/resource-client${width})
+                    set(resource_client ${resource_dir}/resource-client.exe)
+                    add_custom_command(OUTPUT ${resource_client} ${resource_dir}/resources.pri
+                        COMMAND ${CMAKE_COMMAND} -E make_directory ${resource_dir}
                         COMMAND ${xaml_compiler} -nostdlib -O1 -fno-builtin -fno-stack-protector -Wl,--entry,${xaml_entry},--no-insert-timestamp
                             -I${xaml_source} -o ${resource_client} ${LOADER_SOURCES}/resource_client.c
                             ${PROJECT_SOURCE_DIR}/native/upstream/raven-dwrite/crt.c -lruntimeobject -luser32 -lkernel32 -lgcc
-                        DEPENDS ${LOADER_SOURCES}/resource_client.c ${xaml_source}/windows_ui_xaml_application.h ${xaml_source}/windows_ui_xaml_dictionary.h VERBATIM)
-                    add_custom_target(resource_fixture${width} ALL DEPENDS ${resource_client} xaml_component)
+                        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/make_test_pri.py --extended --with-xbf --out ${resource_dir}/resources.pri
+                        DEPENDS ${LOADER_SOURCES}/resource_client.c ${PROJECT_SOURCE_DIR}/scripts/make_test_pri.py
+                            ${xaml_source}/windows_ui_xaml_application.h ${xaml_source}/windows_ui_xaml_dictionary.h VERBATIM)
+                    add_custom_target(resource_fixture${width} ALL DEPENDS ${resource_client} ${resource_dir}/resources.pri xaml_component)
                     add_test(NAME native_resource_dictionary_x${width} COMMAND raven --run-process --execution=native ${resource_client})
                     set_tests_properties(native_resource_dictionary_x${width} PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
                     set(mrt_manager_client ${CMAKE_CURRENT_BINARY_DIR}/mrt-manager-client${width}.exe)

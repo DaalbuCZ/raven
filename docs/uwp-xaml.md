@@ -1402,6 +1402,32 @@ the same day — see the two entries below. Evidence:
   operands and scope depth before returning a tree. Fixtures cover malformed
   documents and declare node sizes including their substream tables, as in
   the real `App.xbf`.
+- Theme dictionaries and `ResourceDictionary.Source` (2026-11-01, stage 3):
+  `ThemeDictionaries` is now a real map with its own COM identity, stored
+  beside the entries exactly as `MergedDictionaries` owns a separate vector,
+  so a theme map handed out by `get_ThemeDictionaries` stays live and is not
+  the entry map. Keys compare by content for boxed strings and by identity
+  for everything else. `put_Source` resolves an `ms-appx:///…xaml` locator to
+  `/Files/…xbf` through the PRI, decodes that document into a temporary
+  dictionary and moves both of its maps in only after the load succeeds, so a
+  failed load leaves the dictionary unchanged; a dispatchable locator naming
+  no resource is `E_BOUNDS`, one dispatchable load that fails is reported
+  with its own error, a non-`ms-appx` scheme is `E_NOTIMPL`, and
+  self-referential `Source` documents stop at a depth bound instead of
+  recursing. `get_Source` returns the stored `Uri`. A null assignment is
+  refused because Windows' clearing semantics could not be verified. The
+  loader grew dictionary documents: `PushConstant` before
+  `AddToDictionaryWithKey` inserts a string-keyed entry, dictionary scopes
+  keep the last object across the pop, and `PushScopeGetValue`
+  `ThemeDictionaries` (length 17) resolves to the theme map while
+  `MergedDictionaries` still resolves to the vector. `SetCustomRuntimeData`
+  and `ProvideStaticResourceValue`/`ProvideThemeResourceValue` still refuse
+  rather than guess. `scripts/make_test_pri.py` emits `Source.xbf`,
+  `Theme.xbf` and a self-referential `Loop.xbf`, and the x64/x86 fixtures
+  check theme-map identity, isolation, live views and removal, a `Source`
+  load and lookup, missing/looping/`http` refusals, unchanged state after a
+  failure, and a theme dictionary reached through `Source`. Resource lookup
+  and theme precedence stay unimplemented; nothing yet consumes these maps.
 
 ## Performance rules
 

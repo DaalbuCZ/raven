@@ -210,22 +210,89 @@ def data_items(resources):
 
 
 def application_dictionary_xbf(unknown_child=False):
-    """Application resources with two merged dictionaries, including a namespace scope."""
-    child = 0xffff if unknown_child else 0x8000 | 371
-    nodes = (b"\x12\x00\x00" + struct.pack("<I", 0) +
-             b"\x17\x1f\x80" + b"\x14\x73\x81" + b"\x13\xaf\x82" +
-             b"\x12\x00\x00" + struct.pack("<I", 0) + b"\x17" + struct.pack("<H", child) +
-             b"\x21\x08\x14\x73\x81\x21\x08\x02\x21\x02")
-    document = bytearray(188)
-    document[:4] = b"XBF\0"
-    struct.pack_into("<IIII", document, 4, 164, 12 + len(nodes), 2, 1)
-    for index, offset in enumerate((0x78, 0x8c, 0x90, 0x94, 0x98, 0x9c)):
-        struct.pack_into("<Q", document, 20 + index * 8, offset)
-    struct.pack_into("<I", document, 132, 2)
-    struct.pack_into("<IHHIHH", document, 136, 1, ord("A"), 0, 1, ord("B"), 0)
-    struct.pack_into("<II", document, 168, 1, 0)
-    struct.pack_into("<III", document, 176, 1, 0, len(nodes))
-    return bytes(document) + nodes
+    """Application resources with two merged dictionaries, the shape the compiled App.xaml carries: one plain and one that
+    loads its entries through Source. A document that names a missing type replaces the first child with an unresolved
+    reference."""
+    child = 0x7FFF if unknown_child else 371
+    nodes = (b"\x01"                                     # PushScope, the scope the Application object lands in
+             + b"\x17\x1f\x80"                           # CreateTypeBeginInit Application (stable 31)
+             + b"\x14\x73\x81"                           # PushScopeCreateTypeBeginInit ResourceDictionary (the Resources value)
+             + b"\x13\xaf\x82"                           # PushScopeGetValue MergedDictionaries (stable 687)
+             + b"\x14" + struct.pack("<H", 0x8000 | child) + b"\x21\x08"
+             + b"\x14\x73\x81"                           # the second child, whose Source loads a document
+             + b"\x1b\xb0\x82\x05" + struct.pack("<H", 0)  # SetValueTypeConvertedConstant ResourceDictionary_Source
+             + b"\x21\x08"
+             + b"\x02"                                   # PopScope (MergedDictionaries)
+             + b"\x21"                                   # EndInitPopScope (the Resources value)
+             + b"\x02")                                  # PopScope (the Application scope)
+    return compiled_document(["ms-appx:///Fixture/Source.xaml"], nodes)
+
+
+def compiled_document(strings, nodes):
+    """A compiled XBF document whose metadata carries only a string table.
+
+    Every type and property the fixtures name is a stable index, so the six metadata tables reduce to the string table and
+    five empty ones. The layout is the one the loader's parser validates: the version words, the six table offsets relative
+    to the metadata start, the null-terminated string table, then one substream holding `nodes`."""
+    entries = b""
+    for text in strings:
+        entries += struct.pack("<I", len(text)) + text.encode("utf-16le") + b"\x00\x00"
+    string_table = struct.pack("<I", len(strings)) + entries
+    offsets = [56]  # the string table itself, then the five empty tables
+    position = 56 + len(string_table)
+    for _ in range(5):
+        offsets.append(position)
+        position += 4
+    metadata = (struct.pack("<ii", 2, 1) + b"".join(struct.pack("<Q", offset) for offset in offsets)
+                + string_table + struct.pack("<5I", 0, 0, 0, 0, 0))
+    assert len(metadata) == position
+    return (b"XBF\x00" + struct.pack("<II", len(metadata), 12 + len(nodes)) + metadata
+            + struct.pack("<III", 1, 0, len(nodes)) + nodes)
+
+
+def push_string(index):
+    return b"\x04\x05" + struct.pack("<H", index)
+
+
+def dictionary_key(index):
+    return b"\x0a\x05" + struct.pack("<H", index)
+
+
+def resource_dictionary_xbf(entries, source=None):
+    """A standalone ResourceDictionary document: the root is the dictionary, and every entry is a string value under a
+    string key (PushConstant then AddToDictionaryWithKey). `source` names a document the root loads by reference, the
+    encoding the compiled App.xaml uses for its merged and theme dictionaries."""
+    strings = []
+    nodes = b"\x14\x73\x81"  # PushScopeCreateTypeBeginInit ResourceDictionary (stable 371)
+
+    def string_id(text):
+        strings.append(text)
+        return len(strings) - 1
+
+    for key, value in entries:
+        nodes += push_string(string_id(value))
+        nodes += dictionary_key(string_id(key))
+    if source:
+        # SetValueTypeConvertedConstant ResourceDictionary_Source (stable property 688)
+        nodes += b"\x1b\xb0\x82\x05" + struct.pack("<H", string_id(source))
+    nodes += b"\x21"  # EndInitPopScope
+    return compiled_document(strings, nodes)
+
+
+def theme_dictionary_xbf():
+    """A ResourceDictionary whose ThemeDictionaries holds a Default dictionary, the shape a themed App.xaml carries: one
+    entry on the root map and one under the theme key."""
+    strings = ["Caption", "Theme root", "Accent", "red", "Default"]
+    nodes = (b"\x14\x73\x81"                                   # root ResourceDictionary
+             + push_string(1) + dictionary_key(0)              # "Caption" -> "Theme root"
+             + b"\x13\xb1\x82"                                 # PushScopeGetValue ThemeDictionaries (stable 689)
+             + b"\x14\x73\x81"                                 # the Default dictionary
+             + push_string(3) + dictionary_key(2)              # "Accent" -> "red"
+             + b"\x21"                                         # EndInitPopScope (the Default dictionary)
+             + dictionary_key(4)                               # AddToDictionaryWithKey "Default"
+             + b"\x02"                                         # PopScope (ThemeDictionaries)
+             + b"\x21")                                        # EndInitPopScope (the root)
+    return compiled_document(strings, nodes)
 
 
 def textblock_xbf():
@@ -300,6 +367,12 @@ def main():
         resources["Files/Fixture/Invalid.xbf"] = bytes(malformed)
         resources["Files/Fixture/Dictionaries.xbf"] = application_dictionary_xbf()
         resources["Files/Fixture/MissingType.xbf"] = application_dictionary_xbf(unknown_child=True)
+        resources["Files/Fixture/Source.xbf"] = resource_dictionary_xbf(
+            [("Greeting", "Hello from Source"), ("Farewell", "Goodbye")])
+        resources["Files/Fixture/Theme.xbf"] = theme_dictionary_xbf()
+        # a dictionary whose Source names itself: the setter's recursion bound must refuse it instead of looping
+        resources["Files/Fixture/Loop.xbf"] = resource_dictionary_xbf(
+            [("Greeting", "Hello")], source="ms-appx:///Fixture/Loop.xaml")
     args.out.write_bytes(build(resources, args.extended))
     print(f"{args.out}: {len(resources)} resources")
 
