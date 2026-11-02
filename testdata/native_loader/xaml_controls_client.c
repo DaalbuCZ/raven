@@ -521,6 +521,94 @@ static size_t build_deferred_theme_document(unsigned char *doc)
 	return at;
 }
 
+/* A Grid whose dictionary entry "Alias" is a provided static-resource reference (node 34) to "Original", a key the same
+ * dictionary defines after it. The forward order is what makes the entry deferred: the reference must be followed when
+ * the TextBlock's SetValueFromStaticResource reads "Alias", not when the dictionary is filled. */
+static size_t build_provided_static_document(unsigned char *doc)
+{
+	size_t at = 136;
+	for (size_t index = 0; index < 260; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 112);
+	put64(doc, 20, 56); /* the string table, holding "Greeting" */
+	put64(doc, 28, 80);
+	put64(doc, 36, 84);
+	put64(doc, 44, 88);
+	put64(doc, 52, 92);
+	put64(doc, 60, 96);
+	put32(doc, 68, 1);
+	put32(doc, 72, 8);
+	doc[76] = 'G'; doc[78] = 'r'; doc[80] = 'e'; doc[82] = 'e';
+	doc[84] = 't'; doc[86] = 'i'; doc[88] = 'n'; doc[90] = 'g';
+	put32(doc, 124, 1);
+	put32(doc, 128, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the dictionary */
+	at = put_string_constant(doc, at, 0x22, "Original"); /* ProvideStaticResourceValue */
+	at = put_string_constant(doc, at, 0x0a, "Alias"); /* AddToDictionaryWithKey */
+	at = put_string_constant(doc, at, 0x04, "StaticResolved"); /* PushConstant */
+	at = put_string_constant(doc, at, 0x0a, "Original");
+	doc[at++] = 0x21; /* close the dictionary */
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* SetValue Panel.Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 800); /* SetValueFromStaticResource Text */
+	at = put_constant_string(doc, at, "Alias");
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
+	put32(doc, 132, (uint32_t)(at - 136));
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 136)));
+	return at;
+}
+
+/* The theme counterpart: the "Light" theme dictionary holds "ThemeAlias" as a provided theme-resource reference (node 35)
+ * to "Greeting", defined after it, and the TextBlock's SetValueFromThemeResource reads the alias. */
+static size_t build_provided_theme_document(unsigned char *doc)
+{
+	size_t at = 152;
+	for (size_t index = 0; index < 320; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 128);
+	put64(doc, 20, 56); /* the string table: "Greeting" (0), "Light" (1) */
+	put64(doc, 28, 94);
+	put64(doc, 36, 98);
+	put64(doc, 44, 102);
+	put64(doc, 52, 106);
+	put64(doc, 60, 110);
+	put32(doc, 68, 2);
+	put32(doc, 72, 8);
+	doc[76] = 'G'; doc[78] = 'r'; doc[80] = 'e'; doc[82] = 'e';
+	doc[84] = 't'; doc[86] = 'i'; doc[88] = 'n'; doc[90] = 'g';
+	put32(doc, 92, 5);
+	doc[96] = 'L'; doc[98] = 'i'; doc[100] = 'g'; doc[102] = 'h'; doc[104] = 't';
+	put32(doc, 140, 1);
+	put32(doc, 144, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the page dictionary */
+	doc[at++] = 0x13; at = put_stable(doc, at, 689); /* PushScopeGetValue ThemeDictionaries */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the "Light" dictionary */
+	at = put_string_constant(doc, at, 0x23, "Greeting"); /* ProvideThemeResourceValue */
+	at = put_string_constant(doc, at, 0x0a, "ThemeAlias");
+	at = put_string_constant(doc, at, 0x04, "Themed"); /* PushConstant */
+	at = put_string_constant(doc, at, 0x0a, "Greeting");
+	doc[at++] = 0x21; /* close the dictionary */
+	at = put_string_constant(doc, at, 0x0a, "Light");
+	doc[at++] = 0x21; /* close the theme map */
+	doc[at++] = 0x21; /* close the page dictionary */
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* SetValue Panel.Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x24; at = put_stable(doc, at, 800); /* SetValueFromThemeResource Text */
+	at = put_constant_string(doc, at, "ThemeAlias");
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
+	put32(doc, 148, (uint32_t)(at - 152));
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 152)));
+	return at;
+}
+
 /* A Grid whose resources merge two dictionaries that both define "Merged": the first holds "First", the second "Second".
  * The lookup walks MergedDictionaries newest-first, so the TextBlock's SetValueFromStaticResource resolves to "Second".
  * The node section is emitted through a cursor so its declared length is the bytes after the substream table. */
@@ -1669,6 +1757,26 @@ int raven_entry(void)
 		refused_root->lpVtbl->Release(refused_root);
 		unknown_type[179] = 0x02; /* the runtime-data type index becomes Style_v1, whose payload is not decoded */
 		if (load(unknown_type, (uint32_t)deferred_length, &refused_root) != E_NOTIMPL || refused_root) return 755;
+	}
+
+	/* Provided resource values: an entry that names another key is stored as a reference and resolved when it is read,
+	 * so an alias declared before its target still resolves (nodes 34/35). */
+	{
+		unsigned char provided_static[260];
+		unsigned char provided_theme[320];
+		IInspectable *provided_root = NULL;
+		HSTRING provided_value = NULL;
+		if (load(provided_static, (uint32_t)build_provided_static_document(provided_static), &provided_root) != S_OK ||
+			!provided_root) return 756;
+		if (FAILED(only_child_text(provided_root, &provided_value)) ||
+			!same(provided_value, L"StaticResolved", 14)) return 757;
+		WindowsDeleteString(provided_value);
+		provided_root->lpVtbl->Release(provided_root);
+		if (load(provided_theme, (uint32_t)build_provided_theme_document(provided_theme), &provided_root) != S_OK ||
+			!provided_root) return 758;
+		if (FAILED(only_child_text(provided_root, &provided_value)) || !same(provided_value, L"Themed", 6)) return 759;
+		WindowsDeleteString(provided_value);
+		provided_root->lpVtbl->Release(provided_root);
 	}
 
 	/* Merged dictionaries: the later dictionary wins over the earlier one, so the key resolves to "Second". */

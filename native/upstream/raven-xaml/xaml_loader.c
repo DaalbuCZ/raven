@@ -636,9 +636,29 @@ static void requested_theme_name(const WCHAR **name, UINT32 *length)
 
 /* The value a StaticResource or ThemeResource names: the resources of the innermost scope first, then each enclosing scope,
  * then Application.Resources. Within one dictionary the lookup handles merged dictionaries (newest-first) and, for a theme
- * resource, the theme stage. */
+ * resource, the theme stage. An entry may itself be a resource reference from ProvideStaticResourceValue/
+ * ProvideThemeResourceValue; the reference is followed through the same lookup, bounded so a cycle ends the search. */
+#define RESOURCE_HOPS 16
+
 static HRESULT resolve_resource(const struct scope *stack, size_t depth, int theme_resource, const WCHAR *key,
-	UINT32 length, IInspectable **out)
+	UINT32 length, IInspectable **out, int hops);
+
+static HRESULT resolve_follow(const struct scope *stack, size_t depth, IInspectable *value, IInspectable **out, int hops)
+{
+	const WCHAR *key = NULL;
+	UINT32 length = 0;
+	BOOL theme = FALSE;
+	if (!raven_xaml_resource_reference_key(value, &key, &length, &theme))
+		return S_OK;
+	value->lpVtbl->Release(value);
+	*out = NULL;
+	if (hops >= RESOURCE_HOPS)
+		return E_BOUNDS;
+	return resolve_resource(stack, depth, theme, key, length, out, hops + 1);
+}
+
+static HRESULT resolve_resource(const struct scope *stack, size_t depth, int theme_resource, const WCHAR *key,
+	UINT32 length, IInspectable **out, int hops)
 {
 	const WCHAR *theme = NULL;
 	UINT32 theme_length = 0;
@@ -654,7 +674,7 @@ static HRESULT resolve_resource(const struct scope *stack, size_t depth, int the
 		result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
 			raven_xaml_dictionary_lookup(dictionary, key, length, out);
 		if (SUCCEEDED(result))
-			return result;
+			return resolve_follow(stack, depth, *out, out, hops);
 	}
 	result = application_resources(&dictionary);
 	if (FAILED(result) || !dictionary)
@@ -662,7 +682,7 @@ static HRESULT resolve_resource(const struct scope *stack, size_t depth, int the
 	result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
 		raven_xaml_dictionary_lookup(dictionary, key, length, out);
 	IInspectable_Release(dictionary);
-	return result;
+	return SUCCEEDED(result) ? resolve_follow(stack, depth, *out, out, hops) : result;
 }
 
 static HRESULT get_merged_dictionaries(IInspectable *object, IInspectable **out)
@@ -907,6 +927,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
 	IInspectable *last_object = NULL;
+	IInspectable *pending_object = NULL;
 	struct value pending_value = {value_none, NULL, 0, 0, 0};
 	BOOL pending_value_valid = FALSE;
 	UINT32 pending_length = 0;
@@ -914,9 +935,14 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	while (r.at < r.end) {
 		const uint8_t kind = next_byte(&r);
 		/* A pushed constant is the value of the dictionary entry the next keyed insertion consumes; any other node in
-		 * between leaves it unused, the way an ignored PushConstant always behaved. */
+		 * between leaves it unused, the way an ignored PushConstant always behaved. A provided resource reference is
+		 * consumed the same way. */
 		if (kind != 4 && kind != 10)
 			pending_value_valid = FALSE;
+		if (kind != 10 && kind != 34 && kind != 35 && pending_object) {
+			IInspectable_Release(pending_object);
+			pending_object = NULL;
+		}
 		switch (kind) {
 		case 1:
 			if (depth < LOADER_DEPTH) {
@@ -1176,17 +1202,38 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				pending_value_valid = TRUE;
 				break;
 			}
+			if (kind == 34 || kind == 35) {
+				/* ProvideStaticResourceValue/ProvideThemeResourceValue: the operand is the key of the resource this
+				 * entry stands for, and the following keyed insertion stores the reference. The value is resolved
+				 * when the entry is read, the way a compiled App.xaml names a resource another dictionary defines. */
+				IInspectable *reference = NULL;
+				if (value.kind != value_string || !value.text) {
+					if (target) { status = E_NOTIMPL; goto done; }
+					break;
+				}
+				status = raven_xaml_resource_reference_create(value.text, value.length, kind == 35, &reference);
+				if (FAILED(status)) goto done;
+				if (pending_object) IInspectable_Release(pending_object);
+				pending_object = reference;
+				break;
+			}
 			if (target) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 10: {
 			struct value key = {value_none, NULL, 0, 0, 0};
+			IInspectable *value_object;
 			status = read_constant(&r, m, &key);
 			if (FAILED(status)) goto done;
-			status = add_to_dictionary(depth ? stack[depth - 1].object : NULL, &key, last_object,
+			/* The value the entry takes: the object the just-closed scope attached, else the reference a preceding
+			 * Provide node installed (nodes 34/35 are always followed by the keyed insertion), else a pushed constant. */
+			value_object = last_object ? last_object : pending_object;
+			status = add_to_dictionary(depth ? stack[depth - 1].object : NULL, &key, value_object,
 				pending_value_valid ? &pending_value : NULL);
 			if (last_object) IInspectable_Release(last_object);
 			last_object = NULL;
+			if (pending_object) IInspectable_Release(pending_object);
+			pending_object = NULL;
 			pending_value_valid = FALSE;
 			if (FAILED(status)) goto done;
 			break;
@@ -1273,7 +1320,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					applied = apply_value(stack[depth - 1].object, name, length, &value);
 				} else if (value.kind == value_string && value.text) {
 					IInspectable *resolved = NULL;
-					if (SUCCEEDED(resolve_resource(stack, depth, kind == 36, value.text, value.length, &resolved)) &&
+					if (SUCCEEDED(resolve_resource(stack, depth, kind == 36, value.text, value.length, &resolved, 0)) &&
 						resolved) {
 						applied = raven_xaml_element_apply_value(stack[depth - 1].object, name, length, resolved);
 						IInspectable_Release(resolved);
@@ -1322,6 +1369,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 done:
 	if (SUCCEEDED(status) && target && (pending_name || last_object)) status = E_INVALIDARG;
 	if (last_object) IInspectable_Release(last_object);
+	if (pending_object) IInspectable_Release(pending_object);
 	/* The scopes unwind without their deferred applications: a failed document never half-applies the templates it
 	 * declared, and the objects the unwind releases own the only references the deferred targets held through them. */
 	while (depth) {

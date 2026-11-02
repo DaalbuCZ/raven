@@ -228,6 +228,111 @@ static ULONG dictionary_release(struct dictionary *self)
 	return (ULONG)refs;
 }
 
+/* The value ProvideStaticResourceValue (node 34) and ProvideThemeResourceValue (node 35) put in a dictionary: a keyed
+ * reference, not the resource itself, because a compiled App.xaml names resources another dictionary in the same tree
+ * defines — a merged dictionary that loads later, or an enclosing scope. The loader follows the reference when the entry
+ * is read, through the same scope stack and with a hop limit, so a chain of references terminates. A WinRT caller never
+ * sees one: the object answers IInspectable only. */
+struct resource_reference {
+	const IInspectableVtbl *lpVtbl;
+	LONG refs;
+	WCHAR *key;
+	UINT32 length;
+	BOOL theme;
+};
+
+static const WCHAR reference_class_name[] = L"Windows.UI.Xaml.ResourceReference";
+
+static HRESULT WINAPI reference_query(IInspectable *This, REFIID iid, void **out)
+{
+	struct resource_reference *self = (struct resource_reference *)This;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	*out = self;
+	return S_OK;
+}
+
+static ULONG WINAPI reference_addref(IInspectable *This)
+{
+	return (ULONG)InterlockedIncrement(&((struct resource_reference *)This)->refs);
+}
+
+static ULONG WINAPI reference_release(IInspectable *This)
+{
+	struct resource_reference *self = (struct resource_reference *)This;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->key)
+			FREE(self->key);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI reference_iids(IInspectable *This, ULONG *count, IID **iids)
+{
+	(void)This;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI reference_name(IInspectable *This, HSTRING *name)
+{
+	(void)This;
+	return make_name(reference_class_name, name);
+}
+
+static HRESULT WINAPI reference_trust(IInspectable *This, TrustLevel *level)
+{
+	(void)This;
+	return inspectable_trust(level);
+}
+
+static const IInspectableVtbl reference_table = {
+	reference_query, reference_addref, reference_release, reference_iids, reference_name, reference_trust
+};
+
+HRESULT raven_xaml_resource_reference_create(const WCHAR *key, UINT32 length, BOOL theme, IInspectable **out)
+{
+	struct resource_reference *self;
+	if (!out || !key || !length)
+		return E_POINTER;
+	*out = NULL;
+	if (!(self = ALLOC(sizeof *self)))
+		return E_OUTOFMEMORY;
+	if (!(self->key = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)length * sizeof(WCHAR)))) {
+		FREE(self);
+		return E_OUTOFMEMORY;
+	}
+	memcpy(self->key, key, (SIZE_T)length * sizeof(WCHAR));
+	self->length = length;
+	self->theme = theme;
+	self->refs = 1;
+	self->lpVtbl = &reference_table;
+	InterlockedIncrement(&raven_xaml_objects);
+	*out = (IInspectable *)self;
+	return S_OK;
+}
+
+BOOL raven_xaml_resource_reference_key(IInspectable *object, const WCHAR **key, UINT32 *length, BOOL *theme)
+{
+	struct resource_reference *self;
+	if (!object || object->lpVtbl != &reference_table)
+		return FALSE;
+	self = (struct resource_reference *)object;
+	if (key)
+		*key = self->key;
+	if (length)
+		*length = self->length;
+	if (theme)
+		*theme = self->theme;
+	return TRUE;
+}
+
 /* The IResourceDictionary part */
 
 static HRESULT WINAPI resource_query(resource1 *iface, REFIID iid, void **out)

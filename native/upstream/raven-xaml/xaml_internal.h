@@ -77,6 +77,10 @@ IInspectable *raven_xaml_element_resources_existing(IInspectable *object);
 HRESULT raven_xaml_dictionary_lookup(IInspectable *dictionary, const WCHAR *text, UINT32 length, IInspectable **out);
 HRESULT raven_xaml_dictionary_lookup_theme(IInspectable *dictionary, const WCHAR *text, UINT32 length,
 	const WCHAR *theme, UINT32 theme_length, IInspectable **out);
+/* The deferred resource value ProvideStaticResourceValue/ProvideThemeResourceValue install: the entry names another
+ * resource, and the loader follows the reference when it reads the entry (xaml_dictionary.c). */
+HRESULT raven_xaml_resource_reference_create(const WCHAR *key, UINT32 length, BOOL theme, IInspectable **out);
+BOOL raven_xaml_resource_reference_key(IInspectable *object, const WCHAR **key, UINT32 *length, BOOL *theme);
 HRESULT raven_xaml_element_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
 HRESULT raven_xaml_window_set_name(IInspectable *object, const WCHAR *text, UINT32 length);
 BOOL raven_xaml_window_notify(DWORD reason, void *reserved);

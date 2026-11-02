@@ -1478,8 +1478,9 @@ the same day — see the two entries below. Evidence:
   walks past. `scripts/inspect-xbf.py`'s sibling dumper (kept out of the tree) confirmed the operand form and the
   placement of these nodes in a real page document. The x64/x86 fixtures check a static lookup ending in the resolved
   `Text` (checks 719–725) and a theme lookup through a `Light` theme dictionary (checks 726–732).
-  `ProvideStaticResourceValue`/`ProvideThemeResourceValue` (nodes 34/35) still refuse: no collected document has shown
-  their operand form, and guessing it would corrupt the node stream.
+  `ProvideStaticResourceValue`/`ProvideThemeResourceValue` (nodes 34/35) carry the key of another resource and had no
+  collected document showing their operand form when lookup landed; the real `App.xbf` has since answered it (see the
+  provided-value entry below).
   Merged precedence and the application stage are now exercised end to end: a page whose resources merge two
   dictionaries that both define the same key resolves to the later dictionary (checks 733–734), and an App.xaml-shaped
   document applied to the Application through the newly exported `raven_xaml_load_into` fills `Application.Resources`
@@ -1510,6 +1511,19 @@ the same day — see the two entries below. Evidence:
   visual-state manager (`420`) and the deferred-element forms — return `E_NOTIMPL` rather than guess a length. The
   x64/x86 fixture builds a Grid whose `Light` theme dictionary is filled from substream 1 and checks the resolved
   `Text` (checks 752–753), and patches the type index to `Style_v1` to check the refusal (check 755).
+- Provided resource values (2026-11-02, stage 3): `ProvideStaticResourceValue` (node 34) and
+  `ProvideThemeResourceValue` (node 35) take one operand, a constant key (`XamlBinaryFormatSubReader2::ReadProvideStaticResourceValueNode`
+  reads exactly a constant and nothing else). Substream 1 of the real `App.xbf` shows the shape: each provided value is
+  immediately followed by `AddToDictionaryWithKey`, so the entry's value is "whatever the key names", not a copy taken
+  when the dictionary is filled. The loader therefore stores a reference object — a dictionary-private `IInspectable`
+  holding the key, its length and the theme flag — and `resolve_resource` follows references when the entry is read,
+  through the same scope stack and theme stage and with a `RESOURCE_HOPS` bound so a reference cycle ends the search.
+  This is what makes a compiled `App.xaml` work: an alias declared before its target, or one whose target lives in a
+  merged dictionary or an enclosing scope, still resolves. A node 34/35 whose operand is not a string is skipped
+  (`E_NOTIMPL` with a target), and a reference that resolves nowhere behaves like any missing key. The x64/x86 fixtures
+  check a forward static alias (`Alias` → `Original`, defined after it, checks 756–757) and a forward theme alias inside
+  the `Light` dictionary (checks 758–759). A WinRT caller that reads the dictionary directly sees the reference object;
+  resolving it at that boundary is not implemented, since no engine path consumes resources that way yet.
 - Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
   fresh trace and the current component the first wall is still
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`
