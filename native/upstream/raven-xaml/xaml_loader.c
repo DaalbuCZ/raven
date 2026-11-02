@@ -1102,6 +1102,12 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (!depth && target) { status = E_INVALIDARG; goto done; }
 			if (depth) {
 				struct scope *scope = &stack[--depth];
+				/* A namespace scope carries no object: a value completed inside it rides over it to the collection or
+				 * map scope beneath, the choreography the compiled App.xaml runs for every merged dictionary
+				 * (GetValue MergedDictionaries, PushScopeAddNamespace, create, EndInitPopScope, AddToCollection). */
+				if (depth >= 2 && stack[depth - 1].kind == 6 && !stack[depth - 1].object &&
+					(stack[depth - 2].kind == 3 || stack[depth - 2].kind == 5))
+					--depth;
 				/* The deferred template application: the template scope closes with its root attached, so the control
 				 * stores the finished tree. A failed application fails the document the way a failed scoped property
 				 * does — the caller is not handed a tree that silently lost its template. */
@@ -1361,15 +1367,34 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			}
 			break;
 		}
-		case 3: case 18:
-			/* AddNamespace and PushScopeAddNamespace carry the same payload. The namespace scope the second form pushes
-			 * is bookkeeping the loader's resolution never consults — a document's types resolve through the document's
-			 * own type table — and pushing it would stand between a value scope and the collection that follows it in
-			 * the compiled App.xaml (GetValue MergedDictionaries, PushScopeAddNamespace, CreateType, EndInitPopScope,
-			 * AddToCollection). Both forms declare and move on. */
+		case 3:
+			/* AddNamespace declares and moves on. */
 			next_u16(&r);
 			status = skip_string(&r);
 			if (FAILED(status)) goto done;
+			break;
+		case 18:
+			/* PushScopeAddNamespace carries the same payload as AddNamespace, but it is a scope: the real App.xbf
+			 * balances its stream only if the EndInitPopScope after the object created inside the namespace closes
+			 * the namespace, leaving the MergedDictionaries collection scope beneath it for the AddToCollection.
+			 * The scope carries no object of its own; a type the create inside it built lands there (the create
+			 * node's empty-scope slot) and rides over it when it closes — the pop handler collapses an empty
+			 * namespace scope into the collection or map scope beneath it. The namespace itself stays bookkeeping
+			 * the loader's resolution never consults: a document's types resolve through the document's own table. */
+			next_u16(&r);
+			status = skip_string(&r);
+			if (FAILED(status)) goto done;
+			if (depth < LOADER_DEPTH) {
+				stack[depth].object = NULL;
+				stack[depth].kind = 6;
+				stack[depth].deferred_target = NULL;
+				stack[depth].deferred_name = NULL;
+				stack[depth].deferred_length = 0;
+				++depth;
+			} else {
+				status = E_INVALIDARG;
+				goto done;
+			}
 			break;
 		case 13: {
 			struct value value = {value_none, NULL, 0, 0, 0};

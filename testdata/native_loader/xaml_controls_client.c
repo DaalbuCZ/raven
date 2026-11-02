@@ -811,6 +811,49 @@ static size_t build_application_node23_document(unsigned char *doc)
 	return at;
 }
 
+/* The merged-dictionary choreography the real Shapr3D App.xbf runs, with the create inside the namespace scope a
+ * CreateTypeBeginInit (node 23) the way the real document creates XamlControlsResources: GetValue MergedDictionaries,
+ * PushScopeAddNamespace, CreateTypeBeginInit, EndInitPopScope, AddToCollection. The namespace scope carries no object,
+ * so the created dictionary rides over it onto the collection when it closes; without that the EndInitPopScope closes
+ * the collection scope itself and the AddToCollection loses both the value and the collection. Loaded into an
+ * Application, the merged dictionary's entry must resolve through Application.Resources. */
+static size_t build_app_merged_node23_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 300; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x17; at = put_stable(doc, at, 31); /* CreateTypeBeginInit Application: the target */
+	doc[at++] = 0x07; at = put_stable(doc, at, 73); /* SetValue Application.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the application dictionary */
+	doc[at++] = 0x13; at = put_stable(doc, at, 687); /* PushScopeGetValue MergedDictionaries */
+	doc[at++] = 0x12; /* PushScopeAddNamespace: the u16 xmlns reference and the empty prefix string */
+	doc[at++] = 0x00; doc[at++] = 0x00;
+	doc[at++] = 0x00; doc[at++] = 0x00; doc[at++] = 0x00; doc[at++] = 0x00;
+	doc[at++] = 0x17; at = put_stable(doc, at, 371); /* the merged dictionary, node 23 inside the namespace scope */
+	at = put_string_constant(doc, at, 0x04, "Merged");
+	at = put_string_constant(doc, at, 0x0a, "Greeting");
+	doc[at++] = 0x21; /* EndInitPopScope closes the namespace scope: the dictionary rides to the collection */
+	doc[at++] = 0x08; /* AddToCollection */
+	doc[at++] = 0x02; /* PopScope closes the getValue scope */
+	doc[at++] = 0x21; /* close the application dictionary */
+	doc[at++] = 0x21; /* close the Application */
+	put32(doc, 164, (uint32_t)(at - 168));
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	return at;
+}
+
 /* A document whose only type comes from the document's own tables under a "using:" directive: the WinUI 2.x controls
  * dictionary. The engine serves the class (a ResourceDictionary of the right runtime class), so the creation answers
  * the object instead of the class-not-registered refusal the stage walls recorded. */
@@ -2203,6 +2246,52 @@ int raven_entry(void)
 		if (FAILED(only_child_text(style_v2_root, &style_v2_value)) || !same(style_v2_value, L"Hi", 2)) return 777;
 		WindowsDeleteString(style_v2_value);
 		style_v2_root->lpVtbl->Release(style_v2_root);
+	}
+
+	/* The real App.xbf's merged-dictionary shape: the create inside the namespace scope is a CreateTypeBeginInit (node
+	 * 23), and the EndInitPopScope must hand the created dictionary to the AddToCollection through the collection scope
+	 * beneath the namespace. With a target the miss is a refusal, so the choreography is checked strictly. */
+	{
+		static const WCHAR merged_app_name[] = L"Windows.UI.Xaml.Application";
+		unsigned char merged_doc[340];
+		HSTRING merged_key = NULL;
+		IActivationFactory *merged_factory = NULL;
+		IInspectable *merged_app = NULL;
+		IInspectable *merged_greeting_key = NULL, *merged_found = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIApplication *merged_interface = NULL;
+		IInspectable *merged_resources = NULL;
+		__FIMap_2_IInspectable_IInspectable *merged_map = NULL;
+		boolean merged_has = FALSE;
+		typedef IInspectable *(*merged_boxed_function)(const WCHAR *, UINT32);
+		merged_boxed_function merged_boxed = (merged_boxed_function)GetProcAddress(component, "raven_xaml_boxed_string_create");
+		load_into_function merged_load = (load_into_function)GetProcAddress(component, "raven_xaml_load_into");
+		if (!merged_boxed || !merged_load) return 4200;
+		if (WindowsCreateString(merged_app_name, ARRAYSIZE(merged_app_name) - 1, &merged_key) != S_OK) return 4201;
+		if (RoGetActivationFactory(merged_key, &IID_IActivationFactory, (void **)&merged_factory) != S_OK || !merged_factory)
+			return 4202;
+		WindowsDeleteString(merged_key);
+		if (merged_factory->lpVtbl->ActivateInstance(merged_factory, &merged_app) != S_OK || !merged_app) return 4203;
+		merged_factory->lpVtbl->Release(merged_factory);
+		if (merged_load(merged_doc, (uint32_t)build_app_merged_node23_document(merged_doc), merged_app) != S_OK)
+			return 4204;
+		if (merged_app->lpVtbl->QueryInterface(merged_app, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication,
+			(void **)&merged_interface) != S_OK || !merged_interface) return 4205;
+		if (merged_interface->lpVtbl->get_Resources(merged_interface, &merged_resources) != S_OK || !merged_resources)
+			return 4206;
+		merged_interface->lpVtbl->Release(merged_interface);
+		if (merged_resources->lpVtbl->QueryInterface(merged_resources, &IID___FIMap_2_IInspectable_IInspectable,
+			(void **)&merged_map) != S_OK || !merged_map) return 4207;
+		merged_resources->lpVtbl->Release(merged_resources);
+		merged_greeting_key = merged_boxed(L"Greeting", 8);
+		if (!merged_greeting_key) return 4209;
+		if (merged_map->lpVtbl->HasKey(merged_map, merged_greeting_key, &merged_has) != S_OK || !merged_has)
+			return 4210;
+		if (merged_map->lpVtbl->Lookup(merged_map, merged_greeting_key, &merged_found) != S_OK || !merged_found)
+			return 4211;
+		merged_found->lpVtbl->Release(merged_found);
+		merged_greeting_key->lpVtbl->Release(merged_greeting_key);
+		merged_map->lpVtbl->Release(merged_map);
+		merged_app->lpVtbl->Release(merged_app);
 	}
 
 	/* The theme-dictionary value forms the real Shapr3D Colors.xbf carries. A dictionary root holds a SolidColorBrush

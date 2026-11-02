@@ -1725,6 +1725,53 @@ the same day — see the two entries below. Evidence:
   `SetValueFromStaticResource` with the brush object returning through
   `get_Foreground` (787-793). `native_xaml_controls_x64`/`_x32` pass; the
   full regression set passes except the known `native_edit_text_contract`.
+- The six `ResourceDictionary.Source` loads resolve and the real `App.xbf`
+  walks to its first one (2026-11-02, stage 3). The failure the last probe
+  of the six Source loads reported was never the PRI mapping: a freestanding
+  probe (a fresh `Windows.UI.Xaml.ResourceDictionary`, a
+  `Windows.Foundation.Uri` `ms-appx:///Themes/Colors.xaml` through the
+  public factory, `put_Source`) gets the `.xaml`→`/Files/….xbf` mapping,
+  the large-index name lookup and the nested `raven_xaml_load_into` all
+  working — `RavenXamlLastFailure` names the refusing node *inside*
+  Colors.xbf, byte 0xb96 (the `SetCustomRuntimeData` whose deferred
+  substream builds the theme dictionaries), status `0x80040111`
+  (`CLASS_E_CLASSNOTAVAILABLE`): the first object the deferred substream
+  creates under a target is the `ElementTheme` enum box (stable type 601,
+  `stable-type#601=2` in substream 1 at 0xcd6), which the runtime cannot
+  activate — the enum-boxing skip the previous bullet records, now
+  refusing rather than skipping because the Source load runs with the
+  adopting dictionary as its target. The end-to-end App.xbf probe
+  (`RoActivateInstance("Windows.UI.Xaml.Application")`, then
+  `raven_xaml_load_into` of the real 4182-byte document) exposed one real
+  gap before the Sources: with a target the load refused at byte 0xbc4
+  (the `AddToCollection` after the `XamlControlsResources` create,
+  `E_INVALIDARG`). Root cause: the
+  real document balances its node stream only if `PushScopeAddNamespace`
+  (node 18) pushes a scope — the `EndInitPopScope` at 0xbc3 must close the
+  namespace, leaving the `MergedDictionaries` collection scope beneath it
+  for the `AddToCollection`, and the `XamlControlsResources` object the
+  create inside the namespace built must ride out on the closing scope.
+  The loader treated node 18 as a declaration (no push), so the pop closed
+  the collection scope itself and destroyed the created object. Fix, in
+  `xaml_loader.c`: node 18 now pushes an object-less namespace scope, and
+  the pop handler collapses an empty namespace scope into the collection or
+  map scope beneath it, so the choreography the compiled App.xaml runs for
+  every merged dictionary (`GetValue MergedDictionaries`,
+  `PushScopeAddNamespace`, create, `EndInitPopScope`, `AddToCollection`)
+  delivers the created dictionary to the collection whether the create was
+  a scoped node 20 or a node 23. After the fix the App.xbf probe walks past
+  the `XamlControlsResources` append (0xbc4) and refuses at byte 0xbc8 —
+  the first `SetValueTypeConvertedConstant ResourceDictionary_Source
+  'ms-appx:///Themes/Colors.xaml'` — with the same `0x80040111` from the
+  nested theme document's enum box; the remaining five Source URIs sit
+  behind that one refusal, unchanged. Fixture: `xaml_controls_client.c`
+  gained `build_app_merged_node23_document` (the real choreography with a
+  node-23 create inside the namespace scope) and checks 4200-4211: loaded
+  into a real `Application` with a target, the merged dictionary lands in
+  `Application.Resources.MergedDictionaries` and its `Greeting` key
+  resolves through the merged fall-through. `native_xaml_controls_x64`/
+  `_x32` pass; the full regression set passes except the known
+  `native_edit_text_contract`.
 
 ## Performance rules
 
