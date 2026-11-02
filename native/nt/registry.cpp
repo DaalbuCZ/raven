@@ -211,6 +211,7 @@ void NativeRegistry::register_runtime_classes()
 		{u"Windows.System.DispatcherQueueController", u"raven-xaml.dll"},
 		{u"Windows.ApplicationModel.Package", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.ResourceDictionary", u"raven-xaml.dll"},
+		{u"Microsoft.UI.Xaml.Controls.XamlControlsResources", u"raven-xaml.dll"},
 		{u"Windows.ApplicationModel.Resources.Core.ResourceManager", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Style", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.Primitives.FrameworkElementAutomationPeer", u"raven-xaml.dll"},

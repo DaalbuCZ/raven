@@ -21,7 +21,10 @@
  * Keys: the compiled markup passes string keys, which a WinRT caller sees boxed, so a key that answers
  * IReference`1<HSTRING> compares by its string content (WindowsCompareStringOrdinal) and every other key compares by IUnknown
  * identity. Values are IInspectable references the dictionary owns; Insert replaces an existing key's value and reports the
- * replacement, Lookup and Remove of a missing key fail with E_BOUNDS per the IMap contract, and Clear empties the map.
+ * replacement, Lookup and Remove of a missing key fail with E_BOUNDS per the IMap contract, and Clear empties the map. Reads
+ * fall through to the merged dictionaries when the own store misses — newest-first, the order the loader's resource
+ * resolution documents — while Insert, Remove, Clear and Size stay on the own store, because a merged dictionary is read
+ * through the one that merged it and never mutated by it.
  * Mutations do not re-render yet: nothing in the render pass reads resources until the style stage arrives.
  *
  * Source is the one member that loads contents the caller did not Insert: setting it resolves the Uri's local package path
@@ -46,6 +49,7 @@ typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClass uri1;
 typedef __FIReference_1_HSTRING boxed_string;
 
 static const WCHAR class_name[] = L"Windows.UI.Xaml.ResourceDictionary";
+static const WCHAR controls_resources_name[] = L"Microsoft.UI.Xaml.Controls.XamlControlsResources";
 static const WCHAR map_class_name[] =
 	L"Windows.Foundation.Collections.IMap`2<Windows.Foundation.IInspectable, Windows.Foundation.IInspectable>";
 static const WCHAR map_view_class_name[] =
@@ -640,22 +644,60 @@ HRESULT raven_xaml_dictionary_lookup_theme(IInspectable *object, const WCHAR *te
 	return result;
 }
 
+/* A key that answers IReference`1<HSTRING>: its text is what matches a merged dictionary's entries, the way a compiled
+ * document's keys arrive boxed. */
+static int key_is_string(IInspectable *key, HSTRING *text)
+{
+	boxed_string *box = NULL;
+	int is_string = SUCCEEDED(key->lpVtbl->QueryInterface(key, &IID___FIReference_1_HSTRING, (void **)&box)) && box;
+	*text = NULL;
+	if (is_string && box->lpVtbl->get_Value(box, text) != S_OK) {
+		*text = NULL;
+		is_string = 0;
+	}
+	if (box)
+		box->lpVtbl->Release(box);
+	return is_string;
+}
+
+/* One map read: the own store first, then — for the dictionary's own map only — the merged dictionaries newest-first, the
+ * documented lookup order the loader's resource resolution follows. Only a string key crosses a dictionary boundary, since
+ * merged entries compare by string content; writes, Size and Remove stay on the own store, because a merged dictionary is
+ * read through the one that merged it and never mutated by it. The theme map shares this code but reads the theme store,
+ * which never falls through. */
+static HRESULT map_read(struct map_part *part, IInspectable *key, IInspectable **value)
+{
+	struct dictionary_entry *entry = store_find(part->store, key);
+	if (entry) {
+		*value = entry->value;
+		if (*value)
+			(*value)->lpVtbl->AddRef(*value);
+		return S_OK;
+	}
+	*value = NULL;
+	if (part->store == &part->owner->store) {
+		HSTRING text = NULL;
+		if (key_is_string(key, &text)) {
+			UINT32 length = 0;
+			const WCHAR *raw = WindowsGetStringRawBuffer(text, &length);
+			HRESULT result;
+			result = dictionary_lookup_depth(part->owner, raw, length, value, 0);
+			WindowsDeleteString(text);
+			return result;
+		}
+	}
+	return E_BOUNDS;
+}
+
 static HRESULT WINAPI map_lookup(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key, IInspectable **value)
 {
 	struct map_part *part = (struct map_part *)iface;
-	struct dictionary_entry *entry;
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
 	if (!key)
 		return E_POINTER;
-	entry = store_find(part->store, key);
-	if (!entry)
-		return E_BOUNDS;
-	*value = entry->value;
-	if (*value)
-		(*value)->lpVtbl->AddRef(*value);
-	return S_OK;
+	return map_read(part, key, value);
 }
 
 static HRESULT WINAPI map_size(__FIMap_2_IInspectable_IInspectable *iface, UINT32 *value)
@@ -669,12 +711,18 @@ static HRESULT WINAPI map_size(__FIMap_2_IInspectable_IInspectable *iface, UINT3
 static HRESULT WINAPI map_has_key(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key, boolean *found)
 {
 	struct map_part *part = (struct map_part *)iface;
+	IInspectable *value = NULL;
+	HRESULT result;
 	if (!found)
 		return E_POINTER;
 	*found = FALSE;
 	if (!key)
 		return E_POINTER;
-	*found = store_find(part->store, key) ? TRUE : FALSE;
+	result = map_read(part, key, &value);
+	if (value)
+		value->lpVtbl->Release(value);
+	if (SUCCEEDED(result))
+		*found = TRUE;
 	return S_OK;
 }
 
@@ -1295,6 +1343,33 @@ static const IActivationFactoryVtbl factory_table = {
 
 static struct dictionary_factory factory_instance = {&factory_table, 1};
 
+/* The WinUI controls dictionary activates under its own runtime class name: the factory reports the Microsoft.UI name and
+ * every instance it builds carries the name override, while the plumbing (queries, references, trust) is the base factory's. */
+
+static HRESULT WINAPI factory_name_controls(IActivationFactory *iface, HSTRING *name)
+{
+	(void)iface;
+	return make_name(controls_resources_name, name);
+}
+
+static HRESULT WINAPI factory_activate_controls(IActivationFactory *iface, IInspectable **out)
+{
+	(void)iface;
+	return raven_xaml_dictionary_create_controls_resources(out);
+}
+
+static const IActivationFactoryVtbl controls_factory_table = {
+	.QueryInterface = factory_query,
+	.AddRef = factory_addref,
+	.Release = factory_release,
+	.GetIids = factory_iids,
+	.GetRuntimeClassName = factory_name_controls,
+	.GetTrustLevel = factory_trust,
+	.ActivateInstance = factory_activate_controls,
+};
+
+static struct dictionary_factory controls_factory_instance = {&controls_factory_table, 1};
+
 HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out)
 {
 	UINT32 length = 0;
@@ -1303,11 +1378,19 @@ HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out)
 		return E_POINTER;
 	*out = NULL;
 	text = WindowsGetStringRawBuffer(name, &length);
-	if (length != ARRAYSIZE(class_name) - 1 || CompareStringOrdinal(text, (int)length, class_name, -1, FALSE) != CSTR_EQUAL)
-		return CLASS_E_CLASSNOTAVAILABLE;
-	InterlockedIncrement(&factory_instance.refs);
-	*out = (IActivationFactory *)&factory_instance;
-	return S_OK;
+	if (length == ARRAYSIZE(class_name) - 1 &&
+		CompareStringOrdinal(text, (int)length, class_name, -1, FALSE) == CSTR_EQUAL) {
+		InterlockedIncrement(&factory_instance.refs);
+		*out = (IActivationFactory *)&factory_instance;
+		return S_OK;
+	}
+	if (length == ARRAYSIZE(controls_resources_name) - 1 &&
+		CompareStringOrdinal(text, (int)length, controls_resources_name, -1, FALSE) == CSTR_EQUAL) {
+		InterlockedIncrement(&controls_factory_instance.refs);
+		*out = (IActivationFactory *)&controls_factory_instance;
+		return S_OK;
+	}
+	return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 /* The WinUI 2.x controls dictionary: a ResourceDictionary of the right runtime class whose default content is the WinUI
@@ -1316,7 +1399,6 @@ HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out)
  * resources behave exactly like the missing keys they are. */
 HRESULT raven_xaml_dictionary_create_controls_resources(IInspectable **out)
 {
-	static const WCHAR controls_resources_name[] = L"Microsoft.UI.Xaml.Controls.XamlControlsResources";
 	struct dictionary *dictionary;
 	if (!out)
 		return E_POINTER;

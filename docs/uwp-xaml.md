@@ -1607,6 +1607,51 @@ the same day — see the two entries below. Evidence:
   the WinUI 2.x ceiling recorded above therefore still holds, now with a
   fault rather than a `CLASS_E_CLASSNOTAVAILABLE` answer as evidence. The
   probe and its copied library were removed again.
+- `XamlControlsResources` activation through the catalog (2026-11-02,
+  stage 7): the stage-7 wall is the managed side, not the loader —
+  `sharedlibrary.dll` (the .NET Native runtime) constructs
+  `new XamlControlsResources()` outside the XBF loader and asks
+  `RoGetActivationFactory` for the class by name
+  (`launch-stage7c-4.log` ~1557: the name HSTRING originates at
+  `sharedlibrary.dll+9774f0`); the catalog had no entry, the runtime's
+  `RegGetValueW` for
+  `HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.
+  Xaml.Controls.XamlControlsResources\DllPath` returned error 2
+  (~1559-1574) and the runtime fail-fasted with `0x80040154` — the same
+  chain the successful `Windows.UI.Xaml.ResourceDictionary` activation in
+  the same log shows resolved by a registry hit, `LoadLibraryExW` of
+  `raven-xaml.dll` and its `DllGetActivationFactory` (~1355-1359). The
+  catalog (`native/nt/registry.cpp`) now lists
+  `Microsoft.UI.Xaml.Controls.XamlControlsResources` beside
+  `Windows.UI.Xaml.ResourceDictionary` with the same `raven-xaml.dll`
+  DllPath, and the component's `raven_dictionary_factory` matches the
+  48-character Microsoft.UI name and hands back a dedicated controls
+  factory whose `ActivateInstance` builds exactly the object the loader
+  path already serves (see "The compiled `App.xbf` walks the loader",
+  2026-11-02, stage 3, whose `raven_xaml_dictionary_create_controls_resources`
+  this dispatch reuses): a real engine `ResourceDictionary`,
+  empty — the WinUI generic.xaml content itself is not shipped and the
+  missing default keys behave like the missing keys they are — with no
+  `IXamlMetadataProvider` (QI answers `E_NOINTERFACE`) and no statics;
+  the factory answers `IActivationFactory`, `IInspectable` and `IUnknown`
+  only, and the instance reports the WinUI runtime class through the
+  name override. Alongside, the dictionary's `IMap<Object,Object>` reads
+  (`Lookup`, `HasKey`) now fall through to `MergedDictionaries`
+  newest-first after the own store misses — the documented lookup order
+  the loader's resource resolution already used — while `Insert`,
+  `Remove`, `Clear`, `Size` and the map view stay on the own store, and
+  the `ThemeDictionaries` map shares the code but never falls through.
+  The resource fixture gained checks 60-65: the class activates by name
+  through `RoGetActivationFactory` (60), the instance QIs
+  `IMap<Object,Object>` and `IResourceDictionary` (61), reports size 0
+  and `HasKey(missing) == false` (62), accepts a plain engine dictionary
+  appended to `MergedDictionaries` (size 1, 63), resolves a key only the
+  merged dictionary defines (a boxed string from a compiled document)
+  while own entries keep precedence over the merged ones (64), and
+  reports the runtime class
+  `Microsoft.UI.Xaml.Controls.XamlControlsResources` (65).
+  `native_resource_dictionary_x64`/`_x32` pass; the full regression set
+  passes except the known `native_edit_text_contract`.
 
 ## Performance rules
 

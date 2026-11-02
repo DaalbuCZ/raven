@@ -682,5 +682,99 @@ int raven_entry(void)
 		app_value->lpVtbl->Release((IInspectable *)app_value);
 		fixture_key_release(app_key);
 	}
+	/* The WinUI controls dictionary activates through the runtime catalog the way the managed side does: the .NET Native
+	 * runtime constructs XamlControlsResources with RoGetActivationFactory, so the class must answer by its Microsoft.UI
+	 * name and the object it builds must be a real engine dictionary of that class. */
+	{
+		static const WCHAR controls_name[] = L"Microsoft.UI.Xaml.Controls.XamlControlsResources";
+		static const WCHAR merged_source_text[] = L"ms-appx:///Fixture/Source.xaml";
+		HSTRING name = NULL;
+		IActivationFactory *factory = NULL;
+		IInspectable *controls = NULL, *merged_dictionary = NULL;
+		resource_i *controls_resource = NULL, *merged_resource = NULL;
+		map_i *controls_map = NULL;
+		merged_i *controls_merged = NULL;
+		uri_i *merged_source = NULL;
+		struct fixture_key *absent = make_key(L"controls.absent"), *greeting = make_key(L"Greeting"),
+			*farewell = make_key(L"Farewell");
+		struct fixture_value *own = NULL;
+		if (WindowsCreateString(controls_name, ARRAYSIZE(controls_name) - 1, &name) != S_OK)
+			return 60;
+		if (get_factory(name, &IID_IActivationFactory, (void **)&factory) != S_OK || !factory)
+			return 60;
+		WindowsDeleteString(name);
+		name = NULL;
+		if (factory->lpVtbl->ActivateInstance(factory, &controls) != S_OK || !controls)
+			return 61;
+		factory->lpVtbl->Release(factory);
+		factory = NULL;
+		if (controls->lpVtbl->QueryInterface(controls, &IID___FIMap_2_IInspectable_IInspectable, (void **)&controls_map) !=
+			S_OK || !controls_map)
+			return 61;
+		if (controls->lpVtbl->QueryInterface(controls, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary,
+			(void **)&controls_resource) != S_OK || !controls_resource)
+			return 61;
+		/* fresh out of the factory the dictionary is empty: no WinUI generic.xaml content ships with it */
+		if (controls_map->lpVtbl->get_Size(controls_map, &size) != S_OK || size)
+			return 62;
+		if (!absent || controls_map->lpVtbl->HasKey(controls_map, (IInspectable *)absent, &flag) != S_OK || flag)
+			return 62;
+		/* merging is live: a plain engine dictionary appended through the vector joins the lookups */
+		if (controls_resource->lpVtbl->get_MergedDictionaries(controls_resource, (void **)&controls_merged) != S_OK ||
+			!controls_merged)
+			return 63;
+		if (activate(dictionary_name, &merged_dictionary) != S_OK || !merged_dictionary)
+			return 63;
+		if (merged_dictionary->lpVtbl->QueryInterface(merged_dictionary,
+			&IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&merged_resource) != S_OK || !merged_resource)
+			return 63;
+		if (controls_merged->lpVtbl->Append(controls_merged, merged_resource) != S_OK)
+			return 63;
+		if (controls_merged->lpVtbl->get_Size(controls_merged, &size) != S_OK || size != 1)
+			return 63;
+		/* a key only the merged dictionary defines resolves through it; the merged dictionary here loads the same compiled
+		 * document the Source check above used, so the value is the boxed string the loader stored */
+		if (!greeting || !farewell)
+			return 64;
+		if (make_uri(merged_source_text, &merged_source) != S_OK || !merged_source)
+			return 64;
+		if (merged_resource->lpVtbl->put_Source(merged_resource, (uint64_t)(uintptr_t)merged_source) != S_OK)
+			return 64;
+		merged_source->lpVtbl->Release(merged_source);
+		merged_source = NULL;
+		if (controls_map->lpVtbl->Lookup(controls_map, (IInspectable *)greeting, &found) != S_OK || !found ||
+			!boxed_text_is(found, L"Hello from Source"))
+			return 64;
+		found->lpVtbl->Release(found);
+		found = NULL;
+		/* the dictionary's own entries keep precedence over what it merged */
+		if (!(own = make_value(9)))
+			return 64;
+		if (controls_map->lpVtbl->Insert(controls_map, (IInspectable *)farewell, (IInspectable *)own, &flag) != S_OK || flag)
+			return 64;
+		if (controls_map->lpVtbl->Lookup(controls_map, (IInspectable *)farewell, &found) != S_OK || !found ||
+			!same_unknown(found, (IInspectable *)own))
+			return 64;
+		found->lpVtbl->Release(found);
+		found = NULL;
+		/* the instance reports the WinUI runtime class, not the engine's own */
+		{
+			HSTRING class_text = NULL;
+			if (controls_resource->lpVtbl->GetRuntimeClassName(controls_resource, &class_text) != S_OK ||
+				!same_text(class_text, controls_name))
+				return 65;
+			WindowsDeleteString(class_text);
+		}
+		controls_merged->lpVtbl->Release(controls_merged);
+		merged_resource->lpVtbl->Release(merged_resource);
+		merged_dictionary->lpVtbl->Release(merged_dictionary);
+		controls_map->lpVtbl->Release(controls_map);
+		controls_resource->lpVtbl->Release(controls_resource);
+		controls->lpVtbl->Release(controls);
+		own->lpVtbl->Release((IInspectable *)own);
+		fixture_key_release(absent);
+		fixture_key_release(greeting);
+		fixture_key_release(farewell);
+	}
 	return 0;
 }
