@@ -99,6 +99,9 @@ def schema(pri, section_index):
     for _ in range(resource_count):
         parent, path_length, first, name_len, flags, offset, index_property = struct.unpack_from("<HHHBBHH", body, at)
         at += 12
+        # the 16-bit offset field counts into a name block that can exceed 64 Ki
+        # units; the entry flags' low two bits carry the offset's bits 16-17
+        offset |= (flags & 3) << 16
         entries.append({"parent": parent, "path_length": path_length, "first": first, "name_len": name_len,
                         "flags": flags, "offset": offset, "index": index_property})
     at += scope_count * 8 + item_count * 2
@@ -202,7 +205,8 @@ def resolve(pri, name):
                 items = data_items(pri, data_section)
                 if candidate["item"] < len(items["strings"]):
                     offset, length = items["strings"][candidate["item"]]
-                    offset *= 2
+                    # the string table's offset and length both count bytes
+                    # (the Shapr3D index stores its XBF blobs through it)
                 else:
                     blob = candidate["item"] - len(items["strings"])
                     if blob >= len(items["blobs"]):

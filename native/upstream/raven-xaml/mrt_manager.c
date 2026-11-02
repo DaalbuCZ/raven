@@ -173,15 +173,17 @@ static const IID qualifier_view_iid =
 
 struct pri_schema_entry {
 	UINT16 parent;
-	UINT16 flags; /* 0x10 marks a scope; the items carry values */
-	UINT16 offset; /* name offset in the unicode block, in 4-byte units */
+	UINT16 flags; /* 0x10 marks a scope; the items carry values; the low two
+	               * bits hold the name offset's bits 16-17 */
+	UINT32 offset; /* name offset in the unicode block, in 4-byte units, with
+	                * the flags' low two bits as its bits 16-17 */
 	UINT16 name_len; /* name length in UTF-16 units, 0 reads to the first terminator */
 	UINT16 index; /* the item's index into the resource map's item info */
 };
 
 struct pri_data_section {
 	UINT32 string_count, blob_count;
-	const BYTE *table, *blob_table; /* string_count (u16 units offset, u16 bytes length) pairs */
+	const BYTE *table, *blob_table; /* string_count (u16 byte offset, u16 byte length) pairs */
 	const BYTE *data; /* the stored strings */
 	UINT32 data_bytes;
 };
@@ -495,7 +497,9 @@ static BOOL parse_index(BYTE *data, UINT32 length)
 			return FALSE;
 		state->entries[i].parent = (UINT16)parent;
 		state->entries[i].flags = (UINT16)flags;
-		state->entries[i].offset = (UINT16)offset;
+		/* the on-disk 16-bit offset wraps for name blocks larger than 64 Ki
+		 * units; the entry flags' low two bits carry the offset's bits 16-17 */
+		state->entries[i].offset = offset | ((flags & 3u) << 16);
 		state->entries[i].name_len = (UINT16)name_len;
 		state->entries[i].index = (UINT16)index;
 	}
@@ -697,8 +701,8 @@ static BOOL entry_path(UINT32 index, WCHAR *out, UINT32 capacity, UINT32 *length
 	return TRUE;
 }
 
-/* The string a candidate names: kind 1 candidates point at a data item section's string table, the offset counting
- * UTF-16 units (doubled into bytes) and the length counting bytes. */
+/* The string a candidate names: kind 1 candidates point at a data item section's string table, the offset and the
+ * length both counting bytes — the way the Shapr3D package's index stores them. */
 static BOOL candidate_string(UINT32 index, const WCHAR **text, UINT32 *units)
 {
 	struct pri_state *state = &pri_state;
@@ -721,9 +725,9 @@ static BOOL candidate_string(UINT32 index, const WCHAR **text, UINT32 *units)
 		return FALSE;
 	offset = read_u16(state->data[i].table, item * 4);
 	length_bytes = read_u16(state->data[i].table, item * 4 + 2);
-	if (offset > state->data[i].data_bytes / 2 || length_bytes > state->data[i].data_bytes - offset * 2)
+	if (offset > state->data[i].data_bytes || length_bytes > state->data[i].data_bytes - offset)
 		return FALSE;
-	*text = (const WCHAR *)(state->data[i].data + offset * 2);
+	*text = (const WCHAR *)(state->data[i].data + offset);
 	*units = length_bytes / 2;
 	if (!*units || *units > PRI_MAX_VALUE_UNITS)
 		return FALSE;

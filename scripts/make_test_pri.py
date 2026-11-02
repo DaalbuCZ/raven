@@ -189,10 +189,10 @@ def resource_map(resources, schema_index, decision_index, data_index):
 
 
 def data_items(resources):
-    """The data item section: a string table of (offset, length) pairs — the
-    offset counts UTF-16 units, the reference parser doubles it, while the
-    length already counts bytes — then the string data. No blob storage; the
-    strings are nul-terminated with the terminator outside the counted length."""
+    """The data item section: a string table of (offset, length) pairs — both
+    counting bytes, the way the Shapr3D package's index stores them — then the
+    string data. No blob storage; the strings are nul-terminated with the
+    terminator outside the counted length."""
     values = list(resources.values())
     strings = [value for value in values if isinstance(value, str)]
     blobs = [value for value in values if isinstance(value, bytes)]
@@ -200,7 +200,7 @@ def data_items(resources):
     string_table = b""
     for value in strings:
         encoded = value.encode("utf-16le")
-        string_table += struct.pack("<HH", len(payload) // 2, len(encoded))
+        string_table += struct.pack("<HH", len(payload), len(encoded))
         payload += encoded + b"\0\0"
     blob_table = b""
     for value in blobs:

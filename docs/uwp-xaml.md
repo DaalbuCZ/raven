@@ -1558,6 +1558,33 @@ the same day — see the two entries below. Evidence:
   values and the color constants on the brushes they carry (`SetValueConstant SolidColorBrush_Color`, kind-8
   constants) are the next forms to serve. `RoGetActivationFactory` for the class from the application itself is still
   the stage-7 wall below — the loader path serves it, the catalog does not.
+- The PRI's theme names resolve (2026-11-02, stage 3): the `E_BOUNDS` the App.xbf Source loads hit was the index's
+  name decoder, not a missing index. In the x64 package's extended `[def_hnamesx]` hierarchical schema (6277 entries,
+  a 154294-byte ASCII name pool, `unicode_units` 0) the 16-bit per-entry name offset wraps: 4059 of the entries point
+  past 64 Ki units, and the wrap truncated each such name to a suffix fragment (`/Files/ettings_offPlaneEdge`,
+  `/Files/enu_tangent_secondary.svg`) while early entries — `App.xbf` among them — decoded whole, which is why the
+  App path resolved and every theme path answered not-found. The offset's bits 16-17 ride in the entry flags' low two
+  bits (`flags & 3 << 16`; the remaining flag bits are 0x10 scope and 0x20 ASCII-pool): oring them in decodes all 6277
+  entries, each name's case-folded first character matching the schema's per-entry first-character byte (6276/6276,
+  the root's empty name aside). Both decoders carried the bug and both carried a second one beside it: the data item
+  sections' string table offsets are byte offsets in the real index (string 31 of section 16 lands on `XBF\0` with an
+  exact length — the string pool holds binary XBF values too, 41 string entries among 4886 blobs), while the fixture
+  generator and the readers doubled them as UTF-16 units; `pri-extract.py`, `mrt_manager.c` and `make_test_pri.py` now
+  all read/write bytes and the checked-in `test_resources.pri` was regenerated to match. With the fix
+  `pri-extract.py` resolves App.xbf and all six theme documents, and the extracted files parse (`xbf-dump.py`, XBF
+  v2.1 each): `ms-appx:///Themes/Colors.xaml` → `/Files/Themes/Colors.xbf` (4157 bytes),
+  `/Themes/DefaultButtonStyles.xaml` → `/Files/Themes/DefaultButtonStyles.xbf` (7383),
+  `/Themes/GridViewItemStyle.xaml` → `/Files/Themes/GridViewItemStyle.xbf` (8122),
+  `/Themes/ListViewItemStyle.xaml` → `/Files/Themes/ListViewItemStyle.xbf` (10344, candidate 5877 through the string
+  table the old reader misread), `/Editor/Overlay/ContextMenu/ShaprMenuFlyoutItemStyle.xaml` →
+  `/Files/Editor/Overlay/ContextMenu/ShaprMenuFlyoutItemStyle.xbf` (5068),
+  `/Editor/Video/VideoPlayerWithCustomSubtitle.xaml` → `/Files/Editor/Video/VideoPlayerWithCustomSubtitle.xbf`
+  (1841) — the compiled `.xaml` spellings map to `.xbf` candidates under the index's `/Files` root. This unlocks the
+  six Source loads: the files exist to load; wiring `ResourceDictionary.Source` in the loader's Source setter to fetch
+  them through `raven_pri_get_blob` (the C reader's blob path, whose name lookup this fix unbreaks for indexes with
+  name pools past 64 Ki units) is the follow-up. The mrt/resource regression suite stays green with the regenerated
+  fixtures (native_mrt_manager,
+  native_mrt_extended, native_resource_dictionary, native_load_component, native_mrt, x64 and x86).
 - Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
   fresh trace and the current component the first wall is still
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`
