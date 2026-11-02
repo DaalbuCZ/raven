@@ -609,6 +609,236 @@ static size_t build_provided_theme_document(unsigned char *doc)
 	return at;
 }
 
+/* The compiled App.xaml's merged-dictionary choreography: PushScopeGetValue MergedDictionaries, PushScopeAddNamespace
+ * (which declares a namespace and opens no scope the loader consumes), PushScopeCreateTypeBeginInit, EndInitPopScope,
+ * AddToCollection, then PopScope closes the getValue scope. The merged dictionary's entry must resolve through the
+ * lookup that walks MergedDictionaries. */
+static size_t build_app_merged_choreography_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 300; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the page dictionary */
+	doc[at++] = 0x13; at = put_stable(doc, at, 687); /* PushScopeGetValue MergedDictionaries */
+	doc[at++] = 0x12; /* PushScopeAddNamespace: the u16 xmlns reference and the empty prefix string */
+	doc[at++] = 0x00; doc[at++] = 0x00;
+	doc[at++] = 0x00; doc[at++] = 0x00; doc[at++] = 0x00; doc[at++] = 0x00;
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the merged dictionary, inside the namespace scope */
+	at = put_string_constant(doc, at, 0x04, "Merged");
+	at = put_string_constant(doc, at, 0x0a, "Greeting");
+	doc[at++] = 0x21; /* EndInitPopScope closes the merged dictionary */
+	doc[at++] = 0x08; /* AddToCollection: the merged dictionary joins the getValue's collection */
+	doc[at++] = 0x02; /* PopScope closes the getValue scope */
+	doc[at++] = 0x21; /* close the page dictionary */
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* SetValue Panel.Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 800); /* SetValueFromStaticResource Text */
+	at = put_constant_string(doc, at, "Greeting");
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
+	put32(doc, 164, (uint32_t)(at - 168));
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	return at;
+}
+
+/* The Application a compiled App.xaml creates with CreateTypeBeginInit (node 23, no scope of its own in the stream):
+ * the dictionary that follows becomes Application.Resources through the trailing SetValue and the scope pops, the tail
+ * the real document carries (the dictionary's scope closes, the assignment names Resources, the Application's scope
+ * closes). The lookup document below then resolves the key the way Application.LoadComponent's callers do. */
+static size_t build_application_node23_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 218; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x17; at = put_stable(doc, at, 31); /* CreateTypeBeginInit Application: the target */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the application dictionary */
+	at = put_string_constant(doc, at, 0x04, "FromApp");
+	at = put_string_constant(doc, at, 0x0a, "AppKey");
+	doc[at++] = 0x21; /* the dictionary's scope closes: the deferred Resources application runs here */
+	doc[at++] = 0x07; at = put_stable(doc, at, 73); /* SetValue Application.Resources */
+	doc[at++] = 0x21; /* the Application's scope closes: the pending assignment consumes the dictionary */
+	put32(doc, 164, (uint32_t)(at - 168));
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	return at;
+}
+
+/* A document whose only type comes from the document's own tables under a "using:" directive: the WinUI 2.x controls
+ * dictionary. The engine serves the class (a ResourceDictionary of the right runtime class), so the creation answers
+ * the object instead of the class-not-registered refusal the stage walls recorded. */
+static size_t build_controls_resources_document(unsigned char *doc)
+{
+	size_t at, assemblies, namespaces, types, properties, xmlns_table, table, metadata_size;
+	for (size_t index = 0; index < 320; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 120); /* the strings table, holding the directive and the type name */
+	put32(doc, 132, 2);
+	at = put_text(doc, 136, "using:Microsoft.UI.Xaml.Controls");
+	at = put_text(doc, at, "XamlControlsResources");
+	assemblies = at;
+	put32(doc, assemblies, 0);
+	namespaces = assemblies + 4;
+	put32(doc, namespaces, 0);
+	types = namespaces + 4;
+	put32(doc, types, 1);
+	put32(doc, types + 4, 2); /* the XML namespace table */
+	put32(doc, types + 8, 0); /* its first entry */
+	put32(doc, types + 12, 1); /* "XamlControlsResources" */
+	properties = types + 16;
+	put32(doc, properties, 0);
+	xmlns_table = properties + 4;
+	put32(doc, xmlns_table, 1);
+	put32(doc, xmlns_table + 4, 0); /* the directive string */
+	at = xmlns_table + 8;
+	metadata_size = at - 12;
+	put64(doc, 28, assemblies - 12);
+	put64(doc, 36, namespaces - 12);
+	put64(doc, 44, types - 12);
+	put64(doc, 52, properties - 12);
+	put64(doc, 60, xmlns_table - 12);
+	put32(doc, 4, (uint32_t)metadata_size);
+	put32(doc, 8, 16);
+	table = at;
+	put32(doc, table, 1);
+	put32(doc, table + 4, 0);
+	put32(doc, table + 8, 4);
+	doc[table + 12] = 0x14; /* PushScopeCreateTypeBeginInit, document type 0 */
+	doc[table + 13] = 0x00;
+	doc[table + 14] = 0x00;
+	doc[table + 15] = 0x21; /* EndInitPopScope */
+	return table + 16;
+}
+
+/* A dictionary whose style enters through AddToDictionary (node 9, the implicit key): the style's TargetType names the
+ * key, and a later keyed entry must still resolve. */
+static size_t build_style_implicit_key_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 300; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the dictionary */
+	doc[at++] = 0x14; at = put_stable(doc, at, 114); /* create Style */
+	doc[at++] = 0x1d; at = put_stable(doc, at, 247); /* SetValueTypeConvertedResolvedType Style_TargetType */
+	at = put_stable(doc, at, 540); /* Button */
+	doc[at++] = 0x21; /* close the style */
+	doc[at++] = 0x09; /* AddToDictionary: the implicit key is the TargetType */
+	at = put_string_constant(doc, at, 0x04, "Hi");
+	at = put_string_constant(doc, at, 0x0a, "Greeting");
+	doc[at++] = 0x21; /* close the dictionary */
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* SetValue Panel.Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 800); /* SetValueFromStaticResource Text */
+	at = put_constant_string(doc, at, "Greeting");
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
+	put32(doc, 164, (uint32_t)(at - 168));
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	return at;
+}
+
+/* A Style whose deferred content arrives the way the real App.xbf's ToggleSwitch styles carry it: SetCustomRuntimeData
+ * with a Style_v2 payload (one literal setter: FrameworkElement.Height = 16.0) and an empty named substream. The payload
+ * must be consumed exactly so the stream continues; the setters themselves are not applied yet. */
+static size_t build_style_v2_payload_document(unsigned char *doc)
+{
+	size_t at = 160;
+	for (size_t index = 0; index < 300; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 128);
+	put64(doc, 20, 56); /* the string table: "Greeting" (0) */
+	put64(doc, 28, 80);
+	put64(doc, 36, 84);
+	put64(doc, 44, 88);
+	put64(doc, 52, 92);
+	put64(doc, 60, 96);
+	put32(doc, 68, 1);
+	put32(doc, 72, 8);
+	doc[76] = 'G'; doc[78] = 'r'; doc[80] = 'e'; doc[82] = 'e';
+	doc[84] = 't'; doc[86] = 'i'; doc[88] = 'n'; doc[90] = 'g';
+	put32(doc, 140, 2); /* two substreams: the page stream and the style's empty deferred stream */
+	put32(doc, 144, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the dictionary */
+	doc[at++] = 0x14; at = put_stable(doc, at, 114); /* create Style */
+	doc[at++] = 0x1d; at = put_stable(doc, at, 247); /* Style_TargetType */
+	at = put_stable(doc, at, 540); /* Button */
+	doc[at++] = 0x0f; /* SetCustomRuntimeData: substream 1, no legacy resources, Style_v2 */
+	doc[at++] = 0x01;
+	doc[at++] = 0x00;
+	doc[at++] = 0x00;
+	doc[at++] = 0x08;
+	doc[at++] = 0x01; /* one setter */
+	doc[at++] = 0x30; /* a literal value on a stable property */
+	at = put_stable(doc, at, 393); /* FrameworkElement.Height */
+	doc[at++] = 0x03; /* the float constant */
+	doc[at++] = 0x00; doc[at++] = 0x00; doc[at++] = 0x80; doc[at++] = 0x41; /* 16.0f */
+	doc[at++] = 0x21; /* close the style */
+	doc[at++] = 0x09; /* AddToDictionary: the implicit key */
+	at = put_string_constant(doc, at, 0x04, "Hi");
+	at = put_string_constant(doc, at, 0x0a, "Greeting");
+	doc[at++] = 0x21; /* close the dictionary */
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* SetValue Panel.Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 800); /* SetValueFromStaticResource Text */
+	at = put_constant_string(doc, at, "Greeting");
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
+	{
+		size_t page = at - 160; /* the page stream ends where the style's deferred stream begins */
+		doc[at++] = 0x01; /* the style's deferred stream: PushScope */
+		doc[at++] = 0x02; /* PopScope */
+		put32(doc, 148, (uint32_t)page);
+		put32(doc, 152, (uint32_t)page);
+		put32(doc, 156, (uint32_t)(at - 160));
+	}
+	put32(doc, 8, (uint32_t)(4 + 8 * 2 + (at - 160)));
+	return at;
+}
+
 /* A Grid whose resources merge two dictionaries that both define "Merged": the first holds "First", the second "Second".
  * The lookup walks MergedDictionaries newest-first, so the TextBlock's SetValueFromStaticResource resolves to "Second".
  * The node section is emitted through a cursor so its declared length is the bytes after the substream table. */
@@ -1777,6 +2007,79 @@ int raven_entry(void)
 		if (FAILED(only_child_text(provided_root, &provided_value)) || !same(provided_value, L"Themed", 6)) return 759;
 		WindowsDeleteString(provided_value);
 		provided_root->lpVtbl->Release(provided_root);
+	}
+
+	/* The compiled App.xaml's shapes. The merged-dictionary choreography (GetValue, PushScopeAddNamespace, CreateType,
+	 * EndInitPopScope, AddToCollection, PopScope) fills the page dictionary's MergedDictionaries and the merged key
+	 * resolves through the lookup that walks them. The WinUI controls dictionary is served by the engine as a real
+	 * ResourceDictionary of its runtime class. The Application a compiled App.xaml creates with CreateTypeBeginInit
+	 * (node 23, no scope of its own) takes the dictionary that follows as its Resources through the trailing SetValue
+	 * and the scope pops. A style enters through AddToDictionary (the implicit TargetType key), and one whose deferred
+	 * content is a Style_v2 runtime-data payload loads with the payload consumed exactly. */
+	{
+		static const WCHAR node23_name[] = L"Windows.UI.Xaml.Application";
+		unsigned char choreography[340], controls[320], node23[218], implicit_key[340], style_v2[340];
+		IInspectable *choreography_root = NULL, *controls_root = NULL, *node23_application = NULL;
+		IInspectable *implicit_root = NULL, *style_v2_root = NULL;
+		load_into_function load_into = NULL;
+		HSTRING choreography_value = NULL, implicit_value = NULL, style_v2_value = NULL, controls_name = NULL;
+		HSTRING node23_key = NULL;
+		IActivationFactory *node23_factory = NULL;
+		__FIMap_2_IInspectable_IInspectable *node23_map = NULL;
+		UINT32 node23_size = 0;
+		if (load(choreography, (uint32_t)build_app_merged_choreography_document(choreography), &choreography_root) != S_OK ||
+			!choreography_root) return 760;
+		if (FAILED(only_child_text(choreography_root, &choreography_value)) ||
+			!same(choreography_value, L"Merged", 6)) return 761;
+		WindowsDeleteString(choreography_value);
+		choreography_root->lpVtbl->Release(choreography_root);
+		if (load(controls, (uint32_t)build_controls_resources_document(controls), &controls_root) != S_OK || !controls_root)
+			return 762;
+		if (controls_root->lpVtbl->GetRuntimeClassName(controls_root, &controls_name) != S_OK || !controls_name) return 763;
+		if (!same(controls_name, L"Microsoft.UI.Xaml.Controls.XamlControlsResources", 48)) return 764;
+		WindowsDeleteString(controls_name);
+		controls_root->lpVtbl->Release(controls_root);
+		if (WindowsCreateString(node23_name, ARRAYSIZE(node23_name) - 1, &node23_key) != S_OK) return 765;
+		if (RoGetActivationFactory(node23_key, &IID_IActivationFactory, (void **)&node23_factory) != S_OK || !node23_factory)
+			return 766;
+		if (node23_factory->lpVtbl->ActivateInstance(node23_factory, &node23_application) != S_OK || !node23_application)
+			return 767;
+		WindowsDeleteString(node23_key);
+		load_into = (load_into_function)GetProcAddress(component, "raven_xaml_load_into");
+		if (!load_into) return 768;
+		if (load_into(node23, (uint32_t)build_application_node23_document(node23), node23_application) != S_OK)
+			return 769;
+		{
+			__x_ABI_CWindows_CUI_CXaml_CIApplication *node23_interface = NULL;
+			IInspectable *node23_dictionary = NULL;
+			if (node23_application->lpVtbl->QueryInterface(node23_application, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication,
+				(void **)&node23_interface) != S_OK || !node23_interface) return 770;
+			if (node23_interface->lpVtbl->get_Resources(node23_interface, &node23_dictionary) != S_OK || !node23_dictionary)
+				return 771;
+			node23_interface->lpVtbl->Release(node23_interface);
+			if (node23_dictionary->lpVtbl->QueryInterface(node23_dictionary, &IID___FIMap_2_IInspectable_IInspectable,
+				(void **)&node23_map) != S_OK || !node23_map) return 772;
+			node23_dictionary->lpVtbl->Release(node23_dictionary);
+		}
+		if (node23_map->lpVtbl->get_Size(node23_map, &node23_size) != S_OK || node23_size != 1) return 773;
+		node23_map->lpVtbl->Release(node23_map);
+		node23_application->lpVtbl->Release(node23_application);
+		node23_factory->lpVtbl->Release(node23_factory);
+		implicit_root = (IInspectable *)0x1;
+		{
+			HRESULT implicit_hr = load(implicit_key, (uint32_t)build_style_implicit_key_document(implicit_key), &implicit_root);
+			if (implicit_hr != S_OK || !implicit_root) return 7700 + (int)(implicit_hr & 0xfff);
+		}
+		if (FAILED(only_child_text(implicit_root, &implicit_value)) || !same(implicit_value, L"Hi", 2)) return 775;
+		WindowsDeleteString(implicit_value);
+		implicit_root->lpVtbl->Release(implicit_root);
+		{
+			HRESULT style_v2_hr = load(style_v2, (uint32_t)build_style_v2_payload_document(style_v2), &style_v2_root);
+			if (style_v2_hr != S_OK || !style_v2_root) return 7700 + (int)(style_v2_hr & 0xfff);
+		}
+		if (FAILED(only_child_text(style_v2_root, &style_v2_value)) || !same(style_v2_value, L"Hi", 2)) return 777;
+		WindowsDeleteString(style_v2_value);
+		style_v2_root->lpVtbl->Release(style_v2_root);
 	}
 
 	/* Merged dictionaries: the later dictionary wins over the earlier one, so the key resolves to "Second". */

@@ -37,6 +37,7 @@
 #include "xaml_input.h"
 #include "xaml_automation.h"
 #include "windows_ui_xaml_dictionary.h" /* the boxed string __FIReference_1_HSTRING; mingw precomputes no instantiation */
+#include "windows_ui_xaml_style.h" /* the Style interface the BasedOn assignment stores through */
 #include "xaml_styles.h"
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
@@ -3045,6 +3046,21 @@ HRESULT __declspec(dllexport) raven_xaml_element_apply_value(IInspectable *objec
 	HRESULT result;
 	if (!object)
 		return E_POINTER;
+	/* A Style's own object properties: the compiled App.xaml's styles take their BasedOn through a resource reference
+	 * (SetValueFromStaticResource Style_BasedOn), which lands here with the resolved base style. */
+	if (length == 7 && CompareStringOrdinal(name, 7, L"BasedOn", -1, FALSE) == CSTR_EQUAL) {
+		__x_ABI_CWindows_CUI_CXaml_CIStyle *style = NULL, *base = NULL;
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style)) || !style)
+			return S_FALSE;
+		if (FAILED(value->lpVtbl->QueryInterface(value, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&base)) || !base) {
+			style->lpVtbl->Release(style);
+			return E_INVALIDARG;
+		}
+		base->lpVtbl->Release(base);
+		result = style->lpVtbl->put_BasedOn(style, (uint64_t)(uintptr_t)value);
+		style->lpVtbl->Release(style);
+		return result;
+	}
 	result = raven_xaml_elements_set_object(object, name, length, value);
 	if (result != S_FALSE || !element_style_target(object, &target))
 		return result;

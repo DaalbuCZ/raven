@@ -28,6 +28,7 @@
 #include "xaml_internal.h"
 #include "windows_ui_xaml_application.h"
 #include "windows_ui_xaml_dictionary.h"
+#include "windows_ui_xaml_style.h"
 #include <stdint.h>
 #include <winstring.h>
 
@@ -387,6 +388,7 @@ static HRESULT create_known(const WCHAR *name, UINT32 length, IInspectable **out
 {
 	static const WCHAR template_name[] = L"Windows.UI.Xaml.Controls.ControlTemplate";
 	static const WCHAR presenter_name[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
+	static const WCHAR controls_resources_name[] = L"Microsoft.UI.Xaml.Controls.XamlControlsResources";
 	IActivationFactory *factory = NULL;
 	HRESULT result;
 	*out = NULL;
@@ -399,6 +401,10 @@ static HRESULT create_known(const WCHAR *name, UINT32 length, IInspectable **out
 			result = raven_xaml_elements_factory(key, &factory);
 			WindowsDeleteString(key);
 		}
+	} else if (CompareStringOrdinal(name, (int)length, controls_resources_name, -1, FALSE) == CSTR_EQUAL) {
+		/* The WinUI 2.x controls dictionary: a real ResourceDictionary of the right runtime class whose WinUI default
+		 * content this runtime does not ship (see xaml_dictionary.c). */
+		return raven_xaml_dictionary_create_controls_resources(out);
 	} else {
 		return CLASS_E_CLASSNOTAVAILABLE;
 	}
@@ -768,8 +774,58 @@ done:
 	return result;
 }
 
-#define LOADER_DEPTH 64
+/* AddToDictionary: the entry whose key the value carries itself. A Style enters under its TargetType — the implicit key
+ * a compiled dictionary uses for the un-keyed style form — read back from the style's own TargetType slot and boxed like
+ * every other string key. A value without a TargetType, or a target that is not a map, refuses. */
+static HRESULT add_with_implicit_key(IInspectable *object, IInspectable *value)
+{
+	__FIMap_2_IInspectable_IInspectable *map = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CIStyle *style = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName target_type;
+	IInspectable *key = NULL;
+	HSTRING name = NULL;
+	INT32 length = 0;
+	const WCHAR *text;
+	boolean replaced = FALSE;
+	HRESULT result;
+	if (!object || !value)
+		return E_INVALIDARG;
+	if (FAILED(value->lpVtbl->QueryInterface(value, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style)) || !style)
+		return E_NOTIMPL;
+	target_type.Name = NULL;
+	target_type.Kind = TypeKind_Metadata;
+	result = style->lpVtbl->get_TargetType(style, &target_type);
+	style->lpVtbl->Release(style);
+	if (FAILED(result))
+		return result;
+	name = target_type.Name;
+	if (!name) {
+		WindowsDeleteString(name);
+		return E_NOTIMPL;
+	}
+	text = WindowsGetStringRawBuffer(name, &length);
+	if (!text || length <= 0) {
+		WindowsDeleteString(name);
+		return E_NOTIMPL;
+	}
+	result = IInspectable_QueryInterface(object, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map);
+	if (FAILED(result)) {
+		WindowsDeleteString(name);
+		return result;
+	}
+	key = raven_xaml_boxed_string(text, (UINT32)length);
+	WindowsDeleteString(name);
+	if (!key) {
+		map->lpVtbl->Release(map);
+		return E_OUTOFMEMORY;
+	}
+	result = map->lpVtbl->Insert(map, key, value, &replaced);
+	map->lpVtbl->Release(map);
+	key->lpVtbl->Release(key);
+	return result;
+}
 
+#define LOADER_DEPTH 64
 /* The containers a SetCustomRuntimeData payload is built from. Every reader answers whether the stream stayed inside its
  * declared extent; a payload that runs past the substream is a malformed document, not an unapplied feature. */
 static int skip_token_vector(struct reader *r)
@@ -872,10 +928,49 @@ static int skip_predicates(struct reader *r)
 	return !r->invalid;
 }
 
+/* A Style_v2 setter entry: the property arrives either as a stable index or as a name string beside its owner document
+ * type (the form a custom control's property takes), and the value either as a literal constant or as a theme/static
+ * resource marker whose key the named substream's Setter nodes carry. The trailing byte of a resource entry travels with
+ * it (its meaning is not established; every collected instance carries one). */
+static int skip_style_v2_setters(struct reader *r, const struct metadata *m)
+{
+	const uint32_t setters = (uint32_t)next_vint(r);
+	if (r->invalid || setters > 0x10000)
+		return 0;
+	for (uint32_t index = 0; index < setters; ++index) {
+		const uint8_t kind = next_byte(r);
+		if (r->invalid)
+			return 0;
+		if (kind & 0x10) {
+			next_u16(r); /* the property, by stable index */
+		} else {
+			next_u16(r); /* the property name string */
+			next_u16(r); /* the owner type, by document type index */
+		}
+		switch (kind & 0x0f) {
+		case 0: { /* a literal value, as a constant */
+			struct value ignored = {value_none, NULL, 0, 0, 0};
+			if (FAILED(read_constant(r, m, &ignored)))
+				return 0;
+			break;
+		}
+		case 1: /* a theme resource reference */
+		case 2: /* a static resource reference */
+			next_byte(r);
+			break;
+		default:
+			return 0;
+		}
+		if (r->invalid)
+			return 0;
+	}
+	return 1;
+}
+
 /* The runtime-data payload of a SetCustomRuntimeData node, by the type index Microsoft's XBF reader dispatches on. The
- * ResourceDictionary versions are decoded to their end so the node stream can continue; a Style's or a deferred element's
- * payload is not decoded here, and the node refuses rather than guess its length. */
-static HRESULT read_custom_runtime_data(struct reader *r, uint32_t *type_index)
+ * ResourceDictionary versions and the Style_v2 setter table are decoded to their end so the node stream can continue; a
+ * deferred element's payload is not decoded here, and the node refuses rather than guess its length. */
+static HRESULT read_custom_runtime_data(struct reader *r, const struct metadata *m, uint32_t *type_index)
 {
 	const uint32_t type = (uint32_t)next_vint(r);
 	int complete = 0;
@@ -893,6 +988,9 @@ static HRESULT read_custom_runtime_data(struct reader *r, uint32_t *type_index)
 		break;
 	case 12: /* ResourceDictionary_v4 */
 		complete = skip_key_map(r) && skip_token_vector(r) && skip_conditional_key_map(r);
+		break;
+	case 8: /* Style_v2 */
+		complete = skip_style_v2_setters(r, m);
 		break;
 	default:
 		return E_NOTIMPL;
@@ -927,6 +1025,8 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
 	IInspectable *last_object = NULL;
+	IInspectable *completed_value = NULL;
+
 	IInspectable *pending_object = NULL;
 	struct value pending_value = {value_none, NULL, 0, 0, 0};
 	BOOL pending_value_valid = FALSE;
@@ -973,6 +1073,30 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						status = applied;
 						goto done;
 					}
+					/* The attached application dictionary is the value the following assignment node consumes: the
+					 * compiled App.xaml names Application.Resources after the dictionary's scope closes. */
+					if (scope->kind == 4) {
+						if (completed_value) IInspectable_Release(completed_value);
+						completed_value = scope->object;
+						IInspectable_AddRef(completed_value);
+					}
+				}
+				/* A pending property assignment that outlived the value's own scope (the compiled App.xaml ends
+				 * SetValue Application.Resources, PopScope): the value is the one the previous scope completed, and the
+				 * assignment lands on the scope the pop closes — the application dictionary through the application's
+				 * own property when the pair is that shape. */
+				if (pending_name && scope->object) {
+					const HRESULT applied = !completed_value ? S_FALSE :
+						is_application_dictionary(scope->object, completed_value) ?
+						set_application_resources(scope->object, completed_value) :
+						raven_xaml_element_apply_value(scope->object, pending_name, pending_length, completed_value);
+					pending_name = NULL;
+					if (target && applied != S_OK) {
+						if (scope->object)
+							IInspectable_Release(scope->object);
+						status = FAILED(applied) ? applied : E_NOTIMPL;
+						goto done;
+					}
 				}
 				if (scope->object && depth && (stack[depth - 1].kind == 3 ||
 					(scope->kind == 0 && is_map_object(stack[depth - 1].object)))) {
@@ -983,11 +1107,31 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			}
 			break;
 		case 8:
-			if (!depth || stack[depth - 1].kind != 3 || !last_object) { status = E_INVALIDARG; goto done; }
+			if (!depth || stack[depth - 1].kind != 3 || !last_object) {
+				/* With a target the document must hand the collection its value; without one the skip convention
+				 * applies (an object whose creation was skipped leaves nothing to append). */
+				if (target) { status = E_INVALIDARG; goto done; }
+				break;
+			}
 			status = append_dictionary(stack[depth - 1].object, last_object);
 			IInspectable_Release(last_object); last_object = NULL;
 			if (FAILED(status)) goto done;
 			break;
+		case 9: {
+			/* AddToDictionary: the keyed insertion whose key the value carries itself — a Style enters the dictionary
+			 * under its TargetType, the implicit key. The key is the type name the style stored, boxed like every
+			 * other string key. */
+			IInspectable *value_object = last_object;
+			if (!depth || !value_object) {
+				if (target) { status = E_INVALIDARG; goto done; }
+				break;
+			}
+			status = add_with_implicit_key(stack[depth - 1].object, value_object);
+			IInspectable_Release(last_object); last_object = NULL;
+			if (FAILED(status) && target) goto done;
+			if (FAILED(status)) status = S_OK;
+			break;
+		}
 		case 20: case 21: case 22: {
 			const uint16_t reference = next_u16(&r);
 			IInspectable *object = NULL;
@@ -1007,6 +1151,10 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				*target_used = TRUE;
 			} else status = create_reference(m, reference, &object);
 			if (target && (FAILED(status) || !object)) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
+			/* The skip convention: a type the runtime cannot build is an unapplied value when no target demands it, and
+			 * a failed create must not poison the rest of the load. A malformed reference (E_INVALIDARG: the metadata
+			 * does not name a type at all) is not a skip — it refuses the document. */
+			if (FAILED(status) && status != E_INVALIDARG) status = S_OK;
 			if (object) {
 				if (raven_xaml_object_is_control_template(object)) {
 					/* The template scope opens; the pending property name rides the scope as the deferred
@@ -1112,6 +1260,10 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				}
 			} else status = create_reference(m, reference, &object);
 			if (target && (FAILED(status) || !object)) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
+			/* The skip convention: a type the runtime cannot build is an unapplied value when no target demands it, and
+			 * a failed create must not poison the rest of the load. A malformed reference (E_INVALIDARG: the metadata
+			 * does not name a type at all) is not a skip — it refuses the document. */
+			if (FAILED(status) && status != E_INVALIDARG) status = S_OK;
 			if (object) {
 				if (depth && !stack[depth - 1].object) {
 					stack[depth - 1].object = object;
@@ -1137,18 +1289,31 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					*root = object;
 					IInspectable_AddRef(object);
 				}
+				/* A root object (the Application a compiled App.xaml creates before any scope exists) opens the scope the
+				 * rest of the document builds inside: the dictionary that follows must see it as the parent whose
+				 * Resources it becomes. The scope owns its own reference; the stream's matching pop closes it. */
+				if (!depth && depth < LOADER_DEPTH) {
+					stack[depth].object = object;
+					IInspectable_AddRef(object);
+					stack[depth].kind = 0;
+					stack[depth].deferred_target = NULL;
+					stack[depth].deferred_name = NULL;
+					stack[depth].deferred_length = 0;
+					++depth;
+				}
 				IInspectable_Release(object);
 			}
 			break;
 		}
 		case 3: case 18:
+			/* AddNamespace and PushScopeAddNamespace carry the same payload. The namespace scope the second form pushes
+			 * is bookkeeping the loader's resolution never consults — a document's types resolve through the document's
+			 * own type table — and pushing it would stand between a value scope and the collection that follows it in
+			 * the compiled App.xaml (GetValue MergedDictionaries, PushScopeAddNamespace, CreateType, EndInitPopScope,
+			 * AddToCollection). Both forms declare and move on. */
 			next_u16(&r);
 			status = skip_string(&r);
 			if (FAILED(status)) goto done;
-			if (kind == 18) {
-				if (depth == LOADER_DEPTH) { status = E_INVALIDARG; goto done; }
-				memset(&stack[depth++], 0, sizeof stack[0]);
-			}
 			break;
 		case 13: {
 			struct value value = {value_none, NULL, 0, 0, 0};
@@ -1235,7 +1400,13 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (pending_object) IInspectable_Release(pending_object);
 			pending_object = NULL;
 			pending_value_valid = FALSE;
-			if (FAILED(status)) goto done;
+			/* An entry whose value never materialized (the object creation was skipped: a struct the runtime does not
+			 * activate, an unresolvable type) leaves the dictionary without the key when no target demands the
+			 * document complete; with a target the miss is refused. */
+			if (FAILED(status)) {
+				if (target) goto done;
+				status = S_OK;
+			}
 			break;
 		}
 		case 11:
@@ -1254,28 +1425,45 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (r.invalid || statics > 0x10000 || themes > 0x10000) { status = E_INVALIDARG; goto done; }
 			for (uint32_t index = 0; index < statics + themes; ++index)
 				next_u16(&r);
-			status = read_custom_runtime_data(&r, &runtime_type);
+			status = read_custom_runtime_data(&r, m, &runtime_type);
 			if (FAILED(status))
 				goto done;
-			/* A dictionary's deferred content is the substream itself: load it and let it take the placeholder's place,
-			 * so the enclosing map receives the finished dictionary. A substream that cannot be loaded leaves the
-			 * placeholder in place, which is the skip the loader gives any unapplied value. */
+			/* A dictionary's deferred content is the substream itself. When the current object is the dictionary the
+			 * content belongs to — the compiled App.xaml keeps filling its application dictionary after the theme
+			 * dictionaries — the substream loads with that dictionary as its target, so the entries join what the
+			 * scope already holds. Otherwise the substream builds a fresh dictionary that takes the placeholder's
+			 * place, the way a theme dictionary's deferred content replaces the empty one the scope pushed. A
+			 * substream that cannot be loaded leaves the placeholder in place, which is the skip the loader gives
+			 * any unapplied value. */
 			if (depth && context && deferral_depth < 2) {
 				size_t deferred_begin = 0, deferred_end = 0;
 				if (substream_range(context, stream_index, &deferred_begin, &deferred_end) &&
 					deferred_begin < deferred_end) {
 					IInspectable *deferred = NULL;
-					const HRESULT loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, NULL, NULL, context,
-						deferral_depth + 1);
-					if (SUCCEEDED(loaded) && deferred) {
-						__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
-						if (SUCCEEDED(IInspectable_QueryInterface(deferred, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary,
-							(void **)&dictionary)) && dictionary) {
-							dictionary->lpVtbl->Release(dictionary);
-							if (stack[depth - 1].object)
-								IInspectable_Release(stack[depth - 1].object);
-							stack[depth - 1].object = deferred;
-							deferred = NULL;
+					__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *current = NULL;
+					HRESULT loaded = S_OK;
+					const int dictionary_content = runtime_type == 371 || runtime_type == 7 ||
+						runtime_type == 10 || runtime_type == 12;
+					if (dictionary_content && stack[depth - 1].object &&
+						SUCCEEDED(IInspectable_QueryInterface(stack[depth - 1].object,
+							&IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&current))) {
+						BOOL into_used = FALSE;
+						current->lpVtbl->Release(current);
+						loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, stack[depth - 1].object,
+							&into_used, context, deferral_depth + 1);
+					} else {
+						loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, NULL, NULL, context,
+							deferral_depth + 1);
+						if (SUCCEEDED(loaded) && deferred) {
+							__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
+							if (SUCCEEDED(IInspectable_QueryInterface(deferred, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary,
+								(void **)&dictionary)) && dictionary) {
+								dictionary->lpVtbl->Release(dictionary);
+								if (stack[depth - 1].object)
+									IInspectable_Release(stack[depth - 1].object);
+								stack[depth - 1].object = deferred;
+								deferred = NULL;
+							}
 						}
 					}
 					if (deferred)
@@ -1369,6 +1557,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 done:
 	if (SUCCEEDED(status) && target && (pending_name || last_object)) status = E_INVALIDARG;
 	if (last_object) IInspectable_Release(last_object);
+	if (completed_value) IInspectable_Release(completed_value);
 	if (pending_object) IInspectable_Release(pending_object);
 	/* The scopes unwind without their deferred applications: a failed document never half-applies the templates it
 	 * declared, and the objects the unwind releases own the only references the deferred targets held through them. */

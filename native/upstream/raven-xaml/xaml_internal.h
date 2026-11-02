@@ -90,6 +90,7 @@ HRESULT raven_storage_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_style_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_automation_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_xaml_dictionary_create_controls_resources(IInspectable **out);
 HRESULT raven_mrt_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_package_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out);

@@ -1524,6 +1524,40 @@ the same day — see the two entries below. Evidence:
   check a forward static alias (`Alias` → `Original`, defined after it, checks 756–757) and a forward theme alias inside
   the `Light` dictionary (checks 758–759). A WinRT caller that reads the dictionary directly sees the reference object;
   resolving it at that boundary is not implemented, since no engine path consumes resources that way yet.
+- The compiled `App.xbf` walks the loader (2026-11-02, stage 3): the real document (4182 bytes, extracted from the
+  x64 package's `resources.pri`, `python3 scripts/pri-extract.py <pri> --name /Files/App/App.xbf --out App.xbf`) now
+  drives `load_nodes` past the walls that stopped it. Four fixes carry it. (1) A failed `create_reference` no longer
+  poisons the load: the failure lived in `status` even when the skip convention tolerated it, and every later node's
+  success left the stale `CLASS_E_CLASSNOTAVAILABLE` as the function's answer — prefix 133 of substream 0 (through
+  `EndInitPopScope` after the `XamlControlsResources` creation) failed with it with and without a target. The reset
+  clears non-`E_INVALIDARG` failures when no target demands them; a malformed reference (the metadata names no type:
+  the URI-namespace and truncated-reference fixtures) still refuses. (2) `PushScopeAddNamespace` (node 18) no longer
+  pushes a scope: its namespace bookkeeping is never consulted (document types resolve through the document's own type
+  table), and the scope it pushed stood between the `MergedDictionaries` value scope and the `AddToCollection` that
+  follows the created dictionary in the compiled stream. `CreateTypeBeginInit` (node 23) now opens the root scope when
+  it creates the Application, owning its own reference — the compiled document creates the Application before any scope
+  exists, and the dictionary that follows must see it as the parent whose Resources it becomes. (3) The document's tail
+  is answered: `AddToDictionary` (node 9) enters a style under its `TargetType` (the implicit key, read back from the
+  style and boxed like every other string key), a keyed entry whose value never materialized is skipped without a
+  target, and the pop of a scope closes with a pending property assignment applied to the scope the pop closes — the
+  compiled document ends `SetValue Application.Resources`, PopScope, with the dictionary the previous pop completed as
+  the value. (4) `SetCustomRuntimeData` decodes the Style_v2 payload (seven instances in the real document fixed the
+  shape: a setter count, then per setter a property as a stable index or as a name string beside its owner document
+  type, and a value as a literal constant or as a theme/static resource marker plus a trailing byte whose meaning is
+  not established), and a dictionary-typed payload now loads with the current dictionary as its target so the entries
+  join what the scope already holds instead of replacing it. `Microsoft.UI.Xaml.Controls.XamlControlsResources` is
+  served by the engine as a real ResourceDictionary of its runtime class (the WinUI default content itself is not
+  shipped; its missing keys behave like the missing keys they are), and a Style's `BasedOn` applies through the
+  resource-reference form. The x64/x86 fixtures check the choreography (the merged dictionary is created inside the
+  namespace scope and its key resolves, 760-761), the served class name (762-764), the node-23 Application whose
+  Resources the tail fills (765-773), the implicit-key style (774-775) and the Style_v2 payload consumption (776-777).
+  The document's remaining refusals, in order: the six `ResourceDictionary_Source` loads (`ms-appx:///Themes/...`) —
+  the PRI scan of this package answers `E_BOUNDS` for every theme path because the hierarchical schema's later entries
+  decode to suffix fragments of their names (both `pri-extract.py` and the C reader; the extended `[def_hnames]` name
+  form needs its per-entry offsets resolved), so the theme dictionaries stay empty; past that, the deferred setter
+  values and the color constants on the brushes they carry (`SetValueConstant SolidColorBrush_Color`, kind-8
+  constants) are the next forms to serve. `RoGetActivationFactory` for the class from the application itself is still
+  the stage-7 wall below — the loader path serves it, the catalog does not.
 - Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
   fresh trace and the current component the first wall is still
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`

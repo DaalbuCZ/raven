@@ -130,6 +130,7 @@ struct dictionary {
 	struct dictionary_store themes;
 	IInspectable *source;
 	struct merged_vector *merged;
+	const WCHAR *name_override;
 };
 
 static struct dictionary *create_dictionary(void);
@@ -358,8 +359,8 @@ static HRESULT WINAPI resource_iids(resource1 *iface, ULONG *count, IID **iids)
 
 static HRESULT WINAPI resource_name(resource1 *iface, HSTRING *name)
 {
-	(void)iface;
-	return make_name(class_name, name);
+	struct dictionary *self = ((struct resource_part *)iface)->owner;
+	return make_name(self->name_override ? self->name_override : class_name, name);
 }
 
 static HRESULT WINAPI resource_trust(resource1 *iface, TrustLevel *level)
@@ -1306,5 +1307,23 @@ HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out)
 		return CLASS_E_CLASSNOTAVAILABLE;
 	InterlockedIncrement(&factory_instance.refs);
 	*out = (IActivationFactory *)&factory_instance;
+	return S_OK;
+}
+
+/* The WinUI 2.x controls dictionary: a ResourceDictionary of the right runtime class whose default content is the WinUI
+ * framework's own, which this runtime does not ship. The engine serves the class so a compiled App.xaml that merges it
+ * (and the application, whose stage asks for the type by name) gets a real dictionary; the missing WinUI default
+ * resources behave exactly like the missing keys they are. */
+HRESULT raven_xaml_dictionary_create_controls_resources(IInspectable **out)
+{
+	static const WCHAR controls_resources_name[] = L"Microsoft.UI.Xaml.Controls.XamlControlsResources";
+	struct dictionary *dictionary;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!(dictionary = create_dictionary()))
+		return E_OUTOFMEMORY;
+	dictionary->name_override = controls_resources_name;
+	*out = (IInspectable *)&dictionary->resource;
 	return S_OK;
 }
