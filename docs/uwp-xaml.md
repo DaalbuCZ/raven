@@ -1486,6 +1486,14 @@ the same day — see the two entries below. Evidence:
   where a page with no such key then resolves it (checks 740–747). `raven_xaml_load_into` is the same target form
   `Application.LoadComponent` and `ResourceDictionary.Source` use internally; exporting it lets a fixture reach the path
   without a private copy.
+- `Application.Resources` is never null (2026-11-02, stage 3): the getter now creates the dictionary on the first read and
+  the application owns that reference, matching the platform where an application that never assigns `Resources` still
+  has a dictionary to read and a compiled `App.xaml` fills the same one. The property can still be replaced by an
+  assignment and cleared by a null assignment; a read after a clear creates a new empty dictionary. The existing
+  `native_load_component` and `native_resource_dictionary` x64/x86 fixtures were updated to check the non-null, stable
+  identity instead of the old null expectation: a failed `LoadComponent` leaves the same dictionary in place (checks
+  9–10 of `load_component`), and the dictionary exists and stays the same across reads before any assignment
+  (`resource_dictionary` checks 50 and 59).
 - Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
   fresh trace and the current component the first wall is still
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`

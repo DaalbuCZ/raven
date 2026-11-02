@@ -2191,6 +2191,24 @@ int raven_entry(void)
 		WindowsDeleteString(application_key);
 		if (application_activation->lpVtbl->ActivateInstance(application_activation, &application) != S_OK ||
 			!application) return 747;
+		/* Resources is never null: the first read creates the dictionary, and every read hands out the same one. */
+		{
+			__x_ABI_CWindows_CUI_CXaml_CIApplication *application_interface = NULL;
+			IInspectable *created = NULL, *created_again = NULL;
+			__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *created_dictionary = NULL;
+			if (application->lpVtbl->QueryInterface(application, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication,
+				(void **)&application_interface) != S_OK || !application_interface) return 748;
+			if (application_interface->lpVtbl->get_Resources(application_interface, &created) != S_OK || !created)
+				return 749;
+			if (created->lpVtbl->QueryInterface(created, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary,
+				(void **)&created_dictionary) != S_OK || !created_dictionary) return 750;
+			created_dictionary->lpVtbl->Release(created_dictionary);
+			if (application_interface->lpVtbl->get_Resources(application_interface, &created_again) != S_OK ||
+				created_again != created) return 751;
+			created_again->lpVtbl->Release(created_again);
+			created->lpVtbl->Release(created);
+			application_interface->lpVtbl->Release(application_interface);
+		}
 		if (load_into(app_fixture, (uint32_t)build_application_resources_document(app_fixture), application) != S_OK)
 			return 741;
 		if (load(page_fixture, (uint32_t)build_application_lookup_document(page_fixture), &lookup_root) != S_OK ||

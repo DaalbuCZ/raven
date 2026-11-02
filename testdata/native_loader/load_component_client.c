@@ -63,12 +63,15 @@ int raven_entry(void)
 		__x_ABI_CWindows_CUI_CXaml_CIApplication *app = NULL;
 		__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL, *first = NULL, *second = NULL;
 		__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *merged = NULL;
-		IInspectable *resources = NULL;
+		IInspectable *resources = NULL, *before = NULL;
 		UINT32 count = 0;
+		/* Application.Resources exists before anything is loaded (the getter creates it lazily) and a failed load must
+		 * leave that same dictionary in place. */
 		if (IInspectable_QueryInterface(wrong, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&app) != S_OK || !app ||
-			app->lpVtbl->get_Resources(app, &resources) != S_OK || resources) return 9;
+			app->lpVtbl->get_Resources(app, &before) != S_OK || !before) return 9;
 		if (SUCCEEDED(statics->lpVtbl->LoadComponent(statics, wrong, (IInspectable *)missing_type)) ||
-			app->lpVtbl->get_Resources(app, &resources) != S_OK || resources) return 10;
+			app->lpVtbl->get_Resources(app, &resources) != S_OK || resources != before) return 10;
+		IInspectable_Release(resources); resources = NULL;
 		if (statics->lpVtbl->LoadComponent(statics, wrong, (IInspectable *)dictionaries) != S_OK ||
 			app->lpVtbl->get_Resources(app, &resources) != S_OK || !resources ||
 			IInspectable_QueryInterface(resources, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary) != S_OK ||
@@ -89,7 +92,8 @@ int raven_entry(void)
 			second_map->lpVtbl->Release(second_map);
 		}
 		first->lpVtbl->Release(first); second->lpVtbl->Release(second); merged->lpVtbl->Release(merged);
-		dictionary->lpVtbl->Release(dictionary); IInspectable_Release(resources); app->lpVtbl->Release(app);
+		dictionary->lpVtbl->Release(dictionary); IInspectable_Release(resources); IInspectable_Release(before);
+		app->lpVtbl->Release(app);
 	}
 	IInspectable_Release(wrong);
 	uri->lpVtbl->Release(uri); missing->lpVtbl->Release(missing); invalid->lpVtbl->Release(invalid);

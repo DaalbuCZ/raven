@@ -125,14 +125,23 @@ struct application_factory {
 
 /* Resources stores the ResourceDictionary the application assigns; the engine reads it once the style stage applies resources.
  * A put re-renders like every other property store, even though nothing reaches the tree yet. */
+/* Application.Resources is never null on the real platform: an application that never assigns it still has a dictionary to
+ * read, and a compiled App.xaml fills that same dictionary. The first read creates it; the application owns the reference
+ * and every later read hands out the same object. */
 static HRESULT WINAPI application1_get_Resources(xaml_application1 *iface, IInspectable **out)
 {
 	struct application *self = ((struct application1_part *)iface)->owner;
 	if (!out)
 		return E_POINTER;
+	if (!self->resources) {
+		IInspectable *created = NULL;
+		const HRESULT made = raven_xaml_create_stable(371, &created);
+		if (FAILED(made) || !created)
+			return FAILED(made) ? made : E_OUTOFMEMORY;
+		self->resources = created;
+	}
 	*out = self->resources;
-	if (self->resources)
-		self->resources->lpVtbl->AddRef(self->resources);
+	(*out)->lpVtbl->AddRef(*out);
 	return S_OK;
 }
 

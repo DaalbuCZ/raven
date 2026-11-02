@@ -629,8 +629,17 @@ int raven_entry(void)
 		if (application->lpVtbl->QueryInterface(application, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication,
 			(void **)&app) != S_OK || !app)
 			return 49;
-		if (app->lpVtbl->get_Resources(app, &stored) != S_OK || stored)
+		/* the application dictionary exists before anything is assigned: the first read creates it, and it is empty */
+		if (app->lpVtbl->get_Resources(app, &stored) != S_OK || !stored)
 			return 50;
+		{
+			IInspectable *empty_again = NULL;
+			if (app->lpVtbl->get_Resources(app, &empty_again) != S_OK || empty_again != stored)
+				return 50;
+			empty_again->lpVtbl->Release(empty_again);
+		}
+		stored->lpVtbl->Release(stored);
+		stored = NULL;
 		if (activate(dictionary_name, &assigned) != S_OK || !assigned)
 			return 51;
 		if (app->lpVtbl->put_Resources(app, assigned) != S_OK)
@@ -655,8 +664,18 @@ int raven_entry(void)
 		stored = NULL;
 		if (app->lpVtbl->put_Resources(app, 0) != S_OK)
 			return 58;
-		if (app->lpVtbl->get_Resources(app, &stored) != S_OK || stored)
+		/* clearing the property and reading it back yields a fresh empty dictionary, not a null */
+		if (app->lpVtbl->get_Resources(app, &stored) != S_OK || !stored)
 			return 59;
+		{
+			__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *cleared = NULL;
+			if (IInspectable_QueryInterface(stored, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary,
+				(void **)&cleared) != S_OK || !cleared)
+				return 59;
+			cleared->lpVtbl->Release(cleared);
+		}
+		stored->lpVtbl->Release(stored);
+		stored = NULL;
 		app->lpVtbl->Release(app);
 		application->lpVtbl->Release(application);
 		assigned->lpVtbl->Release(assigned);
