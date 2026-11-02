@@ -36,6 +36,7 @@ typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProviderVtbl markup_pro
 typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType markup_type;
 typedef __x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlTypeVtbl markup_typeVtbl;
 typedef __x_ABI_CWindows_CUI_CXaml_CIApplicationFactory application_factory1;
+typedef HRESULT (*load_into_function)(const void *, uint32_t, IInspectable *);
 typedef HRESULT (*resources_put_function)(IInspectable *, IInspectable *);
 typedef HRESULT (*resources_get_function)(IInspectable *, IInspectable **);
 
@@ -183,6 +184,30 @@ static size_t build_fixture(unsigned char *doc, uint16_t stable)
 	doc[170] = (unsigned char)((stable >> 8) | 0x80);
 	doc[171] = 0x02;
 	return 172;
+}
+
+static size_t put_text(unsigned char *doc, size_t at, const char *text);
+
+/* Node-stream emission for the documents below: a stable reference is the index with the 0x8000 marker, and a string
+ * constant is the kind byte 9 followed by the length-prefixed UTF-16 text. The builder keeps its cursor so the node
+ * section's declared length cannot drift from the bytes written. */
+static size_t put_stable(unsigned char *doc, size_t at, uint16_t stable)
+{
+	doc[at++] = (unsigned char)(stable & 0xff);
+	doc[at++] = (unsigned char)((stable >> 8) | 0x80);
+	return at;
+}
+
+static size_t put_constant_string(unsigned char *doc, size_t at, const char *text)
+{
+	doc[at++] = 0x09;
+	return put_text(doc, at, text);
+}
+
+static size_t put_string_constant(unsigned char *doc, size_t at, unsigned char node, const char *text)
+{
+	doc[at++] = node;
+	return put_constant_string(doc, at, text);
 }
 
 static size_t put_text(unsigned char *doc, size_t at, const char *text)
@@ -373,6 +398,112 @@ static size_t build_static_resource_document(unsigned char *doc)
 	doc[172] = 0x21; /* close the text block scope */
 	doc[173] = 0x21; /* close the grid scope */
 	return 174;
+}
+
+/* An App.xaml-shaped document: the Application (31) is the target, so its Resources (73) is the application dictionary the
+ * loader fills instead of creating a page. The dictionary holds "AppKey" = "FromApp". */
+static size_t build_application_resources_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 218; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 31); /* create Application: the target */
+	doc[at++] = 0x07; at = put_stable(doc, at, 73); /* SetValue Application.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the application dictionary */
+	at = put_string_constant(doc, at, 0x04, "FromApp");
+	at = put_string_constant(doc, at, 0x0a, "AppKey");
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	put32(doc, 164, (uint32_t)(at - 168));
+	return at;
+}
+
+/* A lone TextBlock whose Text comes from Application.Resources: no element scope holds the key, so the lookup reaches the
+ * application's dictionary, the last stage. */
+static size_t build_application_lookup_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 192; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 800); /* SetValueFromStaticResource Text */
+	at = put_constant_string(doc, at, "AppKey");
+	doc[at++] = 0x21;
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	put32(doc, 164, (uint32_t)(at - 168));
+	return at;
+}
+
+/* A Grid whose resources merge two dictionaries that both define "Merged": the first holds "First", the second "Second".
+ * The lookup walks MergedDictionaries newest-first, so the TextBlock's SetValueFromStaticResource resolves to "Second".
+ * The node section is emitted through a cursor so its declared length is the bytes after the substream table. */
+static size_t build_merged_resource_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 290; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* create the page dictionary */
+	doc[at++] = 0x13; at = put_stable(doc, at, 687); /* PushScopeGetValue MergedDictionaries */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* first merged dictionary */
+	at = put_string_constant(doc, at, 0x04, "First");
+	at = put_string_constant(doc, at, 0x0a, "Merged");
+	doc[at++] = 0x21;
+	doc[at++] = 0x08; /* AddToCollection */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* second merged dictionary */
+	at = put_string_constant(doc, at, 0x04, "Second");
+	at = put_string_constant(doc, at, 0x0a, "Merged");
+	doc[at++] = 0x21;
+	doc[at++] = 0x08;
+	doc[at++] = 0x21; /* close MergedDictionaries */
+	doc[at++] = 0x21; /* close the page dictionary */
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* SetValue Panel.Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 800); /* SetValueFromStaticResource Text */
+	at = put_constant_string(doc, at, "Merged"); /* the key constant, no node byte of its own */
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	put32(doc, 164, (uint32_t)(at - 168));
+	return at;
 }
 
 /* A Grid whose resources carry ThemeDictionaries (689) with a "Light" dictionary holding "Greeting" = "Themed", and
@@ -1202,6 +1333,45 @@ static struct fixture_provider *fixture_provider_create(struct fixture_type *typ
 	return provider;
 }
 
+/* The Text of the only child of a panel root, for the resource documents: the child is a TextBlock whose Text the loader
+ * set from a resolved resource. The returned HSTRING is owned by the caller. */
+static HRESULT only_child_text(IInspectable *root, HSTRING *text)
+{
+	panel1 *panel = NULL;
+	IInspectable *children_object = NULL, *child = NULL;
+	struct fixture_vector *children = NULL;
+	textblock1 *textblock = NULL;
+	UINT32 count = 0;
+	HRESULT result;
+	*text = NULL;
+	if (!root || FAILED(root->lpVtbl->QueryInterface(root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+		(void **)&panel)) || !panel)
+		return E_FAIL;
+	result = panel->lpVtbl->get_Children(panel, (uint64_t)(uintptr_t)&children_object);
+	panel->lpVtbl->Release(panel);
+	if (FAILED(result) || !children_object)
+		return E_FAIL;
+	children = (struct fixture_vector *)children_object;
+	result = children->lpVtbl->get_Size(children, &count);
+	if (SUCCEEDED(result) && count != 1)
+		result = E_FAIL;
+	if (SUCCEEDED(result))
+		result = children->lpVtbl->GetAt(children, 0, &child);
+	children->lpVtbl->Release(children);
+	if (FAILED(result) || !child)
+		return E_FAIL;
+	result = child->lpVtbl->QueryInterface(child, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+		(void **)&textblock);
+	child->lpVtbl->Release(child);
+	if (FAILED(result) || !textblock)
+		return E_FAIL;
+	result = textblock->lpVtbl->get_Text(textblock, (uint64_t)(uintptr_t)text);
+	textblock->lpVtbl->Release(textblock);
+	if (FAILED(result) || !*text)
+		return E_FAIL;
+	return S_OK;
+}
+
 /* Frame and Page through the metadata provider and the XBF loader: Navigate resolves a type name and creates the page, the frame
  * reports its source type, and a compiled document instantiates its root type. */
 int raven_entry(void)
@@ -1417,6 +1587,17 @@ int raven_entry(void)
 		children->lpVtbl->Release(children);
 		theme_panel->lpVtbl->Release(theme_panel);
 		theme_root->lpVtbl->Release(theme_root);
+	}
+	/* Merged dictionaries: the later dictionary wins over the earlier one, so the key resolves to "Second". */
+	{
+		unsigned char merged_fixture[290];
+		IInspectable *merged_root = NULL;
+		HSTRING merged_value = NULL;
+		if (load(merged_fixture, (uint32_t)build_merged_resource_document(merged_fixture), &merged_root) != S_OK ||
+			!merged_root) return 733;
+		if (FAILED(only_child_text(merged_root, &merged_value)) || !same(merged_value, L"Second", 6)) return 734;
+		WindowsDeleteString(merged_value);
+		merged_root->lpVtbl->Release(merged_root);
 	}
 
 	unsigned char property_fixture[194];
@@ -1991,6 +2172,39 @@ int raven_entry(void)
 	WindowsDeleteString(app_key);
 	fixture_type->lpVtbl->Release((markup_type *)fixture_type);
 	marker->lpVtbl->Release(marker);
+
+	/* Application.Resources: the App.xaml-shaped document fills the application dictionary through the target form, and a
+	 * page document whose own scopes hold no such key resolves it there — the last stage of the lookup. */
+	{
+		static const WCHAR application_name[] = L"Windows.UI.Xaml.Application";
+		load_into_function load_into = (load_into_function)GetProcAddress(component, "raven_xaml_load_into");
+		unsigned char app_fixture[218], page_fixture[192];
+		IInspectable *lookup_root = NULL, *application = NULL;
+		textblock1 *application_text = NULL;
+		HSTRING application_value = NULL, application_key = NULL;
+		IActivationFactory *application_activation = NULL;
+		if (!load_into) return 740;
+		/* A fresh application: its runtime class name is the one the target form expects. */
+		if (WindowsCreateString(application_name, ARRAYSIZE(application_name) - 1, &application_key) != S_OK) return 745;
+		if (RoGetActivationFactory(application_key, &IID_IActivationFactory, (void **)&application_activation) != S_OK ||
+			!application_activation) return 746;
+		WindowsDeleteString(application_key);
+		if (application_activation->lpVtbl->ActivateInstance(application_activation, &application) != S_OK ||
+			!application) return 747;
+		if (load_into(app_fixture, (uint32_t)build_application_resources_document(app_fixture), application) != S_OK)
+			return 741;
+		if (load(page_fixture, (uint32_t)build_application_lookup_document(page_fixture), &lookup_root) != S_OK ||
+			!lookup_root) return 742;
+		if (lookup_root->lpVtbl->QueryInterface(lookup_root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+			(void **)&application_text) != S_OK || !application_text) return 743;
+		if (application_text->lpVtbl->get_Text(application_text, (uint64_t)(uintptr_t)&application_value) != S_OK ||
+			!application_value || !same(application_value, L"FromApp", 7)) return 744;
+		WindowsDeleteString(application_value);
+		application_text->lpVtbl->Release(application_text);
+		lookup_root->lpVtbl->Release(lookup_root);
+		application_activation->lpVtbl->Release(application_activation);
+		application->lpVtbl->Release(application);
+	}
 
 	frame_fifth->lpVtbl->Release(frame_fifth);
 	frame_fourth->lpVtbl->Release(frame_fourth);

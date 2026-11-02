@@ -1185,7 +1185,9 @@ __declspec(dllexport) HRESULT WINAPI RavenXamlLoad(const void *data, uint32_t si
 	return load_document(data, size, root, NULL);
 }
 
-HRESULT raven_xaml_load_into(const void *data, uint32_t size, IInspectable *target)
+/* The target form: a document applied INTO an object the caller already owns (Application.LoadComponent and a dictionary's
+ * Source both use it). Exported so a fixture can populate Application.Resources the way a compiled App.xaml does. */
+__declspec(dllexport) HRESULT raven_xaml_load_into(const void *data, uint32_t size, IInspectable *target)
 {
 	IInspectable *root = NULL;
 	if (!target) return E_POINTER;

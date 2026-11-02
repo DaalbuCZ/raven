@@ -1480,6 +1480,12 @@ the same day — see the two entries below. Evidence:
   `Text` (checks 719–725) and a theme lookup through a `Light` theme dictionary (checks 726–732).
   `ProvideStaticResourceValue`/`ProvideThemeResourceValue` (nodes 34/35) still refuse: no collected document has shown
   their operand form, and guessing it would corrupt the node stream.
+  Merged precedence and the application stage are now exercised end to end: a page whose resources merge two
+  dictionaries that both define the same key resolves to the later dictionary (checks 733–734), and an App.xaml-shaped
+  document applied to the Application through the newly exported `raven_xaml_load_into` fills `Application.Resources`
+  where a page with no such key then resolves it (checks 740–747). `raven_xaml_load_into` is the same target form
+  `Application.LoadComponent` and `ResourceDictionary.Source` use internally; exporting it lets a fixture reach the path
+  without a private copy.
 - Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
   fresh trace and the current component the first wall is still
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`
