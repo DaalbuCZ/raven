@@ -51,6 +51,15 @@ struct metadata {
 	size_t xmlns, xmlns_count;
 };
 
+/* The document's substream table. A SetCustomRuntimeData node names one substream that carries a deferred object's
+ * content; the table entries are (node offset, line offset) pairs relative to the first substream's node bytes. */
+struct load_context {
+	const struct metadata *m;
+	size_t table; /* absolute offset of the substream count */
+	size_t nodes; /* absolute offset of the first substream's nodes */
+	uint32_t count;
+};
+
 enum value_kind { value_none, value_string, value_bool, value_integer, value_float };
 struct value {
 	enum value_kind kind;
@@ -741,8 +750,157 @@ done:
 
 #define LOADER_DEPTH 64
 
+/* The containers a SetCustomRuntimeData payload is built from. Every reader answers whether the stream stayed inside its
+ * declared extent; a payload that runs past the substream is a malformed document, not an unapplied feature. */
+static int skip_token_vector(struct reader *r)
+{
+	const uint32_t count = (uint32_t)next_vint(r);
+	if (r->invalid || count > 0x10000)
+		return 0;
+	for (uint32_t index = 0; index < count; ++index)
+		next_vint(r);
+	return !r->invalid;
+}
+
+/* A legacy resource map: xstring key to stream token. */
+static int skip_resource_map(struct reader *r)
+{
+	const uint32_t count = (uint32_t)next_vint(r);
+	if (r->invalid || count > 0x10000)
+		return 0;
+	for (uint32_t index = 0; index < count; ++index) {
+		next_u16(r);
+		next_vint(r);
+	}
+	return !r->invalid;
+}
+
+static int skip_string_vector(struct reader *r)
+{
+	const uint32_t count = (uint32_t)next_vint(r);
+	if (r->invalid || count > 0x10000)
+		return 0;
+	for (uint32_t index = 0; index < count; ++index)
+		next_u16(r);
+	return !r->invalid;
+}
+
+/* A conditional resource map: xstring key to a vector of stream tokens (the objects the predicates guard). */
+static int skip_conditional_map(struct reader *r)
+{
+	const uint32_t count = (uint32_t)next_vint(r);
+	if (r->invalid || count > 0x10000)
+		return 0;
+	for (uint32_t index = 0; index < count; ++index) {
+		next_u16(r);
+		if (!skip_token_vector(r))
+			return 0;
+	}
+	return !r->invalid;
+}
+
+/* The v4 key carries a fixed-width 64-bit hash beside the string. */
+static int skip_key_pair(struct reader *r)
+{
+	next_u16(r);
+	if (r->invalid || r->end - r->at < 8) {
+		r->invalid = 1;
+		return 0;
+	}
+	r->at += 8;
+	return 1;
+}
+
+static int skip_key_map(struct reader *r)
+{
+	const uint32_t count = (uint32_t)next_vint(r);
+	if (r->invalid || count > 0x10000)
+		return 0;
+	for (uint32_t index = 0; index < count; ++index)
+		if (!skip_key_pair(r))
+			return 0;
+	return !r->invalid;
+}
+
+static int skip_conditional_key_map(struct reader *r)
+{
+	const uint32_t count = (uint32_t)next_vint(r);
+	if (r->invalid || count > 0x10000)
+		return 0;
+	for (uint32_t index = 0; index < count; ++index)
+		if (!skip_key_pair(r) || !skip_token_vector(r))
+			return 0;
+	return !r->invalid;
+}
+
+/* The conditionally declared objects: an object token and the predicates that guard it (a type reference and its
+ * arguments string). */
+static int skip_predicates(struct reader *r)
+{
+	const uint32_t count = (uint32_t)next_vint(r);
+	if (r->invalid || count > 0x10000)
+		return 0;
+	for (uint32_t index = 0; index < count; ++index) {
+		const uint32_t guarded = (uint32_t)next_vint(r);
+		if (r->invalid || guarded > 0x10000)
+			return 0;
+		for (uint32_t predicate = 0; predicate < guarded; ++predicate) {
+			next_u16(r);
+			next_u16(r);
+		}
+	}
+	return !r->invalid;
+}
+
+/* The runtime-data payload of a SetCustomRuntimeData node, by the type index Microsoft's XBF reader dispatches on. The
+ * ResourceDictionary versions are decoded to their end so the node stream can continue; a Style's or a deferred element's
+ * payload is not decoded here, and the node refuses rather than guess its length. */
+static HRESULT read_custom_runtime_data(struct reader *r, uint32_t *type_index)
+{
+	const uint32_t type = (uint32_t)next_vint(r);
+	int complete = 0;
+	switch (type) {
+	case 371: /* ResourceDictionary_v1 */
+		complete = skip_resource_map(r) && skip_token_vector(r) && skip_resource_map(r) &&
+			skip_string_vector(r) && skip_string_vector(r);
+		break;
+	case 7: /* ResourceDictionary_v2 */
+		complete = skip_resource_map(r) && skip_token_vector(r) && skip_resource_map(r) && skip_string_vector(r);
+		break;
+	case 10: /* ResourceDictionary_v3 */
+		complete = skip_resource_map(r) && skip_token_vector(r) && skip_resource_map(r) &&
+			skip_conditional_map(r) && skip_conditional_map(r);
+		break;
+	case 12: /* ResourceDictionary_v4 */
+		complete = skip_key_map(r) && skip_token_vector(r) && skip_conditional_key_map(r);
+		break;
+	default:
+		return E_NOTIMPL;
+	}
+	/* v3 and v4 also carry the objects declared under a conditional scope. */
+	if (complete && (type == 10 || type == 12))
+		complete = skip_predicates(r);
+	if (!complete || r->invalid)
+		return E_INVALIDARG;
+	*type_index = type;
+	return S_OK;
+}
+
+/* The substream a SetCustomRuntimeData node names, as a node range. Only substream 0 of a document is a page stream; the
+ * rest carry deferred objects. */
+static int substream_range(const struct load_context *context, uint32_t index, size_t *begin, size_t *end)
+{
+	const uint8_t *data;
+	if (!context || !context->m || index >= context->count)
+		return 0;
+	data = context->m->data;
+	*begin = context->nodes + read_u32(data + context->table + 4 + (size_t)index * 8);
+	*end = context->nodes + read_u32(data + context->table + 8 + (size_t)index * 8);
+	return *begin <= *end;
+}
+
 static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root,
-	IInspectable *target, BOOL *target_used)
+	IInspectable *target, BOOL *target_used, const struct load_context *context, int deferral_depth)
 {
 	struct reader r = {m->data, begin, end, 0};
 	struct scope stack[LOADER_DEPTH];
@@ -1038,6 +1196,51 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (FAILED(status))
 				goto done;
 			break;
+		case 15: {
+			/* SetCustomRuntimeData: the object's deferred content lives in a substream, and the payload names it together
+			 * with the runtime-data form that describes what the substream holds. The counts before the type are the
+			 * legacy resource tables a Threshold-era document carried; they are persisted nodes even when empty. */
+			const uint32_t stream_index = (uint32_t)next_vint(&r);
+			const uint32_t statics = (uint32_t)next_vint(&r);
+			const uint32_t themes = (uint32_t)next_vint(&r);
+			uint32_t runtime_type = 0;
+			if (r.invalid || statics > 0x10000 || themes > 0x10000) { status = E_INVALIDARG; goto done; }
+			for (uint32_t index = 0; index < statics + themes; ++index)
+				next_u16(&r);
+			status = read_custom_runtime_data(&r, &runtime_type);
+			if (FAILED(status))
+				goto done;
+			/* A dictionary's deferred content is the substream itself: load it and let it take the placeholder's place,
+			 * so the enclosing map receives the finished dictionary. A substream that cannot be loaded leaves the
+			 * placeholder in place, which is the skip the loader gives any unapplied value. */
+			if (depth && context && deferral_depth < 2) {
+				size_t deferred_begin = 0, deferred_end = 0;
+				if (substream_range(context, stream_index, &deferred_begin, &deferred_end) &&
+					deferred_begin < deferred_end) {
+					IInspectable *deferred = NULL;
+					const HRESULT loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, NULL, NULL, context,
+						deferral_depth + 1);
+					if (SUCCEEDED(loaded) && deferred) {
+						__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
+						if (SUCCEEDED(IInspectable_QueryInterface(deferred, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary,
+							(void **)&dictionary)) && dictionary) {
+							dictionary->lpVtbl->Release(dictionary);
+							if (stack[depth - 1].object)
+								IInspectable_Release(stack[depth - 1].object);
+							stack[depth - 1].object = deferred;
+							deferred = NULL;
+						}
+					}
+					if (deferred)
+						IInspectable_Release(deferred);
+					if (target && FAILED(loaded)) {
+						status = loaded;
+						goto done;
+					}
+				}
+			}
+			break;
+		}
 		case 17: {
 			const int32_t substream = (next_u16(&r), next_vint(&r));
 			const int32_t statics = next_vint(&r);
@@ -1135,6 +1338,7 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 	uint32_t metadata_size, node_size, count;
 	size_t table, node_end, substreams;
 	struct metadata metadata;
+	struct load_context context;
 	HRESULT status;
 	BOOL target_used = FALSE;
 	if (!root)
@@ -1157,6 +1361,10 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 	if ((size_t)count > (node_end - table - 4) / 8)
 		return E_INVALIDARG;
 	substreams = table + 4 + (size_t)count * 8;
+	context.m = &metadata;
+	context.table = table;
+	context.nodes = substreams;
+	context.count = count;
 	/* Validate every extent before creating any objects; a later invalid stream cannot leak the first root. */
 	for (uint32_t index = 0; index < count; ++index) {
 		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
@@ -1168,7 +1376,7 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
 		const uint32_t line_offset = read_u32(bytes + table + 4 + (size_t)index * 8 + 4);
 		const size_t begin = substreams + node_offset, end = substreams + line_offset;
-		status = load_nodes(&metadata, begin, end, root, target, &target_used);
+		status = load_nodes(&metadata, begin, end, root, target, &target_used, &context, 0);
 		if (FAILED(status)) {
 			if (*root) {
 				IInspectable_Release(*root);

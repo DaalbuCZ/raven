@@ -459,6 +459,68 @@ static size_t build_application_lookup_document(unsigned char *doc)
 	return at;
 }
 
+/* A Grid whose "Light" theme dictionary carries its content the way a compiled App.xaml does: SetCustomRuntimeData (node
+ * 15) names substream 1, and that substream builds the dictionary holding "Greeting" = "Deferred". The payload is the
+ * ResourceDictionary_v3 runtime data (type index 10) with every map empty, so only the substream matters. */
+static size_t build_deferred_theme_document(unsigned char *doc)
+{
+	size_t at = 160;
+	for (size_t index = 0; index < 256; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 128);
+	put64(doc, 20, 56); /* the string table: "Greeting" (0), "Light" (1) */
+	put64(doc, 28, 94);
+	put64(doc, 36, 98);
+	put64(doc, 44, 102);
+	put64(doc, 52, 106);
+	put64(doc, 60, 110);
+	put32(doc, 68, 2);
+	put32(doc, 72, 8);
+	doc[76] = 'G'; doc[78] = 'r'; doc[80] = 'e'; doc[82] = 'e';
+	doc[84] = 't'; doc[86] = 'i'; doc[88] = 'n'; doc[90] = 'g';
+	put32(doc, 92, 5);
+	doc[96] = 'L'; doc[98] = 'i'; doc[100] = 'g'; doc[102] = 'h'; doc[104] = 't';
+	put32(doc, 140, 2); /* two substreams: the page stream and the deferred dictionary */
+	put32(doc, 144, 0);
+	put32(doc, 148, 47); /* the page stream ends where the deferred dictionary begins */
+	put32(doc, 152, 47);
+	put32(doc, 156, 0); /* the deferred stream's end, filled in below once its nodes are emitted */
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the page dictionary */
+	doc[at++] = 0x13; at = put_stable(doc, at, 689); /* PushScopeGetValue ThemeDictionaries */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the "Light" dictionary, filled from the substream */
+	doc[at++] = 0x0f; /* SetCustomRuntimeData */
+	doc[at++] = 0x01; /* substream 1 */
+	doc[at++] = 0x00; /* legacy static resource count */
+	doc[at++] = 0x00; /* legacy theme resource count */
+	doc[at++] = 0x0a; /* ResourceDictionary_v3 */
+	doc[at++] = 0x00; /* explicit resources */
+	doc[at++] = 0x00; /* auto-undeferral tokens */
+	doc[at++] = 0x00; /* implicit resources */
+	doc[at++] = 0x00; /* conditional explicit resources */
+	doc[at++] = 0x00; /* conditional implicit resources */
+	doc[at++] = 0x00; /* conditionally declared objects */
+	doc[at++] = 0x21; /* close the theme dictionary */
+	doc[at++] = 0x0a; doc[at++] = 0x05; doc[at++] = 1; doc[at++] = 0; /* AddToDictionaryWithKey "Light" */
+	doc[at++] = 0x21; /* close the theme map */
+	doc[at++] = 0x21; /* close the page dictionary */
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* SetValue Panel.Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x24; at = put_stable(doc, at, 800); /* SetValueFromThemeResource Text */
+	doc[at++] = 0x05; doc[at++] = 0; doc[at++] = 0; /* key StringReference 0: "Greeting" */
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the deferred dictionary */
+	at = put_string_constant(doc, at, 0x04, "Deferred");
+	at = put_string_constant(doc, at, 0x0a, "Greeting");
+	doc[at++] = 0x21;
+	put32(doc, 8, (uint32_t)(4 + 8 * 2 + (at - 160)));
+	put32(doc, 156, (uint32_t)(at - 160));
+	return at;
+}
+
 /* A Grid whose resources merge two dictionaries that both define "Merged": the first holds "First", the second "Second".
  * The lookup walks MergedDictionaries newest-first, so the TextBlock's SetValueFromStaticResource resolves to "Second".
  * The node section is emitted through a cursor so its declared length is the bytes after the substream table. */
@@ -1588,6 +1650,27 @@ int raven_entry(void)
 		theme_panel->lpVtbl->Release(theme_panel);
 		theme_root->lpVtbl->Release(theme_root);
 	}
+	/* Deferred content: the theme dictionary's entries come from substream 1 through SetCustomRuntimeData, and the lookup
+	 * still resolves them. A runtime-data form the loader does not decode refuses instead of guessing its length. */
+	{
+		unsigned char deferred_fixture[256];
+		IInspectable *deferred_root = NULL;
+		HSTRING deferred_value = NULL;
+		unsigned char unknown_type[256];
+		IInspectable *refused_root = NULL;
+		size_t deferred_length = build_deferred_theme_document(deferred_fixture);
+		if (load(deferred_fixture, (uint32_t)deferred_length, &deferred_root) != S_OK || !deferred_root) return 752;
+		if (FAILED(only_child_text(deferred_root, &deferred_value)) || !same(deferred_value, L"Deferred", 8)) return 753;
+		WindowsDeleteString(deferred_value);
+		deferred_root->lpVtbl->Release(deferred_root);
+		deferred_length = build_deferred_theme_document(unknown_type);
+		if (load(unknown_type, (uint32_t)deferred_length, &refused_root) != S_OK)
+			return 754;
+		refused_root->lpVtbl->Release(refused_root);
+		unknown_type[179] = 0x02; /* the runtime-data type index becomes Style_v1, whose payload is not decoded */
+		if (load(unknown_type, (uint32_t)deferred_length, &refused_root) != E_NOTIMPL || refused_root) return 755;
+	}
+
 	/* Merged dictionaries: the later dictionary wins over the earlier one, so the key resolves to "Second". */
 	{
 		unsigned char merged_fixture[290];

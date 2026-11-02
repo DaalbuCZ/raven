@@ -1494,6 +1494,22 @@ the same day — see the two entries below. Evidence:
   identity instead of the old null expectation: a failed `LoadComponent` leaves the same dictionary in place (checks
   9–10 of `load_component`), and the dictionary exists and stays the same across reads before any assignment
   (`resource_dictionary` checks 50 and 59).
+- `SetCustomRuntimeData` (node 15) and deferred dictionary content (2026-11-02, stage 3): a compiled `App.xaml` does
+  not emit its theme dictionaries' entries inline. The `ResourceDictionary` is created empty, and the node after it names
+  the substream that builds it. The payload is a LEB128 substream index, the LEB128 legacy static- and theme-resource
+  counts (each count is followed by that many persisted u16 node references; they are empty in current output), then the
+  LEB128 runtime-data type index: `ResourceDictionary_v1` 371, v2 7, v3 10, v4 12. Because the dictionary is on the
+  scope stack when the node arrives, the loader loads the named substream immediately and lets the loaded
+  `ResourceDictionary` take the placeholder's place, so the enclosing `ThemeDictionaries` insertion receives the finished
+  dictionary and the later lookup sees its entries. A substream load failure leaves the placeholder in place (the
+  skip-rather-than-guess rule) unless a target is present. The type index was decoded from the Microsoft XBF reader
+  sources and validated against the real `App.xbf` of the Shapr3D package: stream 1, both counts 0, type 10, and the
+  payload consuming exactly up to the next node byte. The payload readers for the four dictionary versions and the
+  predicates of the v3/v4 conditional maps consume the whole form so a document that carries entries instead of deferring
+  them stays in sync; the type indices whose payload is not decoded — `Style` v1/v2/v3 (`2`, `8`, `11`), the legacy
+  visual-state manager (`420`) and the deferred-element forms — return `E_NOTIMPL` rather than guess a length. The
+  x64/x86 fixture builds a Grid whose `Light` theme dictionary is filled from substream 1 and checks the resolved
+  `Text` (checks 752–753), and patches the type index to `Style_v1` to check the refusal (check 755).
 - Stage 7 re-probe after the resource-dictionary work (2026-11-01): with a
   fresh trace and the current component the first wall is still
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` — `sharedlibrary.dll`
