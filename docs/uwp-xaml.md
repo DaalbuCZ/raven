@@ -1652,6 +1652,79 @@ the same day — see the two entries below. Evidence:
   `Microsoft.UI.Xaml.Controls.XamlControlsResources` (65).
   `native_resource_dictionary_x64`/`_x32` pass; the full regression set
   passes except the known `native_edit_text_contract`.
+- Theme-dictionary value forms: the `Windows.UI.Color` constant and the
+  `SolidColorBrush` (2026-11-02, stage 3). The six real Shapr3D theme
+  documents (Colors, DefaultButtonStyles, GridViewItemStyle,
+  ListViewItemStyle, ShaprMenuFlyoutItemStyle, VideoPlayerWithCustomSubtitle
+  XBFs, extracted from
+  `resources.pri` into `/tmp/pri-work/out/`) were dumped and their value
+  forms inventoried before any code. The inventory, per node kind across
+  all six: `SetValueConstant` 357 (colour payloads 17 —
+  `SolidColorBrush.Color` 13, `AcrylicBrush.TintColor` and
+  `XamlCompositionBrushBase.FallbackColor` 2 each — enum payloads 16,
+  `AutomationProperties.AccessibilityView` 4 and
+  `DragOverThemeAnimation.Direction` 12, the remaining 324
+  booleans/integers/doubles), `SetValueTypeConvertedConstant` 191
+  (KeyTime 80 and Duration 35, `Setter_Target` name strings 61,
+  `ResourceDictionary.Source` URIs 6, KeySpline strings 4,
+  `TintLuminosityOpacity`/`BackgroundSource` 2 each,
+  `RenderTransformOrigin` 1), `SetValueFromThemeResource` 149 and
+  `SetValueFromStaticResource` 29 (of which 14 target
+  `SolidColorBrush.Color` — the brush built from a colour the dictionary
+  does not itself define, e.g. the system accent colours — and 9
+  `Setter_Value`), `PushScopeCreateTypeWithConstant` 45 (42 are
+  `Windows.UI.Color` structs, all in Colors.xbf; 3 are `ElementTheme`
+  enums), `AddToDictionaryWithKey` 37, `SetValue` 77, `SetName` 147,
+  `SetValueTypeConvertedResolvedType` 16, `SetCustomRuntimeData` 21, plus
+  object creation that is already
+  served (`VisualState` 108, `Setter` 61, `Storyboard` 67, key-frame
+  animation 150, `SolidColorBrush` 27, `ResourceDictionary` 15,
+  `ControlTemplate` 9, `Style` 7, `AcrylicBrush` 2, and the animation
+  theme classes). What the loader could not build was exactly the two
+  colour forms: the kind-8 constant (a packed ARGB `Windows.UI.Color`,
+  which the constant reader silently re-labelled an integer) and the brush
+  that constant lands on. Implemented, in the inventory's own order:
+  (a) the kind-8 constant is now its own value kind — four bytes read
+  ARGB high-byte-first, the spelling `xbf-dump.py` prints (#aarrggbb) —
+  and `apply_value` hands it to the engine brush; every other target (the
+  `AcrylicBrush` tint colours, a foreign brush) stays the skip it was;
+  (b) `SolidColorBrush` (stable type 265, verified against
+  `scripts/xbf-stable-indices.json`) is served by the loader's
+  `create_known` through a new engine class in `xaml_styles.c` reporting
+  the runtime class `Microsoft.UI.Xaml.Media.SolidColorBrush` — the
+  Microsoft.UI namespace is what the documents' own xmlns declares
+  (`using:Microsoft.UI.Xaml.Media`); its `Color` (stable property 476)
+  takes the kind-8 constant, and the readers are the engine's own exports
+  (`raven_xaml_solid_brush_color`) rather than a hand-derived
+  `ISolidColorBrush` IID, the convention the DependencyProperty interop
+  established for surfaces whose projection IID no header in tree carries;
+  (c) node 22 with stable type 42 (`Windows.UI.Color`, a struct, not
+  activatable — the RoActivateInstance path never had it) boxes the four
+  bytes into an engine colour value (`property_value.c`) reporting the
+  runtime class `Windows.UI.Color` behind an engine-internal interop
+  interface, so the 42 colour structs a real Colors.xbf declares become
+  dictionary values instead of skips. Usability, not just storage: the
+  element side's brush readers (`style_brush_color`, `Panel.Background`,
+  `TextBlock.Foreground`) now read the engine brush's colour beside the
+  composition colour brush, and the colour-name store keeps an owned brush
+  reference when the value was one (it used to drop the object and keep
+  only the colour, which made a dictionary brush invisible to the
+  getter). The setter application (`grid_apply_setter`/
+  `textblock_apply_setter`) is therefore the same path a theme brush
+  travels end to end. Still refusing, honestly: `AcrylicBrush` creation
+  and its tint constants (skip), `ElementTheme` enum boxing (skip), the
+  `SetValueFromStaticResource`/`SetValueFromThemeResource` colour sources
+  the documents reference but never define in these files
+  (`SystemAccentColorLight1` and friends — the system theme generation
+  owns them), the `SetValueTypeConvertedConstant` time-span/KeyTime forms,
+  and the whole key-frame animation surface. Fixture checks 778-793 in
+  `xaml_controls_client.c`: a dictionary root holding a kind-8-constant
+  brush and a node-22 colour reads both back through `IMap.Lookup`
+  (runtime classes and exact bytes, 778-786), and a second document
+  applies the brush to `TextBlock.Foreground` through
+  `SetValueFromStaticResource` with the brush object returning through
+  `get_Foreground` (787-793). `native_xaml_controls_x64`/`_x32` pass; the
+  full regression set passes except the known `native_edit_text_contract`.
 
 ## Performance rules
 

@@ -34,6 +34,9 @@ struct stable_property_entry {
 static const struct stable_property_entry properties[] = {
 	{73, L"Resources"},
 	{404, L"Resources"}, /* FrameworkElement.Resources */
+	/* SolidColorBrush.Color: the property the compiled theme dictionaries apply their kind-8 constants to (the brush
+	 * itself builds through the loader's create_known). Index verified against scripts/xbf-stable-indices.json. */
+	{476, L"SolidColorBrush_Color"},
 	{687, L"MergedDictionaries"},
 	{688, L"Source"},
 	{689, L"ThemeDictionaries"},
@@ -97,6 +100,10 @@ static const struct metadata_entry entries[] = {
 	 * activation falls to the loader's engine-internal factory path, not RoActivateInstance. */
 	{191, L"ControlTemplate", L"Windows.UI.Xaml.Controls.ControlTemplate"},
 	{296, L"ContentPresenter", L"Windows.UI.Xaml.Controls.ContentPresenter"},
+	/* The media brush the compiled theme dictionaries build: the XBFs' xmlns is "using:Microsoft.UI.Xaml.Media" (the
+	 * WinUI namespace), so that is the runtime class the stable index carries; activation lands on the loader's
+	 * create_known, which serves it from the engine (xaml_styles.c). */
+	{265, L"SolidColorBrush", L"Microsoft.UI.Xaml.Media.SolidColorBrush"},
 };
 
 const WCHAR *raven_xaml_class_by_stable(uint32_t stable)

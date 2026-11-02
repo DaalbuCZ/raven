@@ -61,7 +61,7 @@ struct load_context {
 	uint32_t count;
 };
 
-enum value_kind { value_none, value_string, value_bool, value_integer, value_float };
+enum value_kind { value_none, value_string, value_bool, value_integer, value_float, value_color };
 struct value {
 	enum value_kind kind;
 	const WCHAR *text;
@@ -389,10 +389,16 @@ static HRESULT create_known(const WCHAR *name, UINT32 length, IInspectable **out
 	static const WCHAR template_name[] = L"Windows.UI.Xaml.Controls.ControlTemplate";
 	static const WCHAR presenter_name[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
 	static const WCHAR controls_resources_name[] = L"Microsoft.UI.Xaml.Controls.XamlControlsResources";
+	static const WCHAR solid_brush_name[] = L"Microsoft.UI.Xaml.Media.SolidColorBrush";
 	IActivationFactory *factory = NULL;
 	HRESULT result;
 	*out = NULL;
-	if (CompareStringOrdinal(name, (int)length, template_name, -1, FALSE) == CSTR_EQUAL) {
+	if (CompareStringOrdinal(name, (int)length, solid_brush_name, -1, FALSE) == CSTR_EQUAL) {
+		/* The media brush the theme dictionaries build: a projected runtime class the runtime catalog does not carry,
+		 * served by the engine (see xaml_styles.c). The Microsoft.UI namespace is what the documents' own xmlns
+		 * declares ("using:Microsoft.UI.Xaml.Media"). */
+		return raven_solid_brush_create(out);
+	} else if (CompareStringOrdinal(name, (int)length, template_name, -1, FALSE) == CSTR_EQUAL) {
 		result = raven_xaml_control_template_factory(&factory);
 	} else if (CompareStringOrdinal(name, (int)length, presenter_name, -1, FALSE) == CSTR_EQUAL) {
 		HSTRING key = NULL;
@@ -462,12 +468,17 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 			return E_INVALIDARG;
 		r->at += 8;
 		break;
-	case 8:
 	case 11:
-		if (kind == 11)
-			next_u16(r);
+		next_u16(r); /* the enum's stable type reference */
 		v->kind = value_integer;
 		v->integer = next_i32(r);
+		break;
+	case 8:
+		/* A packed Windows.UI.Color: the constant the theme dictionaries apply to SolidColorBrush.Color and the one the
+		 * PushScopeCreateTypeWithConstant nodes build the colour structs from. The four bytes read ARGB, high byte
+		 * first — the spelling xbf-dump prints (#aarrggbb). */
+		v->kind = value_color;
+		v->integer = (uint32_t)next_i32(r);
 		break;
 	case 9:
 		v->kind = value_string;
@@ -517,6 +528,19 @@ static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 lengt
 		return raven_xaml_element_set_integer(object, name, length, value->integer);
 	case value_float:
 		return raven_xaml_elements_set_float(object, name, length, (float)value->real);
+	case value_color:
+		/* A kind-8 constant lands where a brush colour goes: the engine SolidColorBrush takes it, every other target
+		 * (the AcrylicBrush the loader cannot build, a foreign brush) is the skip. */
+		if (!object)
+			return S_FALSE;
+		{
+			__x_ABI_CWindows_CUI_CColor color;
+			color.A = (BYTE)((value->integer >> 24) & 0xff);
+			color.R = (BYTE)((value->integer >> 16) & 0xff);
+			color.G = (BYTE)((value->integer >> 8) & 0xff);
+			color.B = (BYTE)(value->integer & 0xff);
+			return raven_solid_brush_put_color(object, &color);
+		}
 	default:
 		return S_FALSE;
 	}
@@ -1017,6 +1041,18 @@ static int substream_range(const struct load_context *context, uint32_t index, s
 	return *begin <= *end;
 }
 
+/* The last node a load refused: the offset is relative to the document start (the absolute position within the bytes
+ * the caller passed), the status the HRESULT the load answered. Both zero-meaning: no failure recorded yet. */
+static UINT32 last_failure_offset;
+static HRESULT last_failure_status;
+
+/* The diagnostic a probe or a test reads after a failed RavenXamlLoad: which node and why. Engine-internal, __cdecl. */
+__declspec(dllexport) void __cdecl RavenXamlLastFailure(UINT32 *offset, HRESULT *status)
+{
+	if (offset) *offset = last_failure_offset;
+	if (status) *status = last_failure_status;
+}
+
 static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root,
 	IInspectable *target, BOOL *target_used, const struct load_context *context, int deferral_depth)
 {
@@ -1032,8 +1068,13 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	BOOL pending_value_valid = FALSE;
 	UINT32 pending_length = 0;
 	HRESULT status = S_OK;
+	/* The byte offset of the node being decoded: the last failure records it so a probe can name the form that refused
+	 * (RavenXamlLastFailure below); a nested Source load overwrites the outer document's record, which is the evidence
+	 * the caller wants — the deepest failure is the one that propagates. */
+	size_t node_at = begin;
 	while (r.at < r.end) {
 		const uint8_t kind = next_byte(&r);
+		node_at = r.at - 1;
 		/* A pushed constant is the value of the dictionary entry the next keyed insertion consumes; any other node in
 		 * between leaves it unused, the way an ignored PushConstant always behaved. A provided resource reference is
 		 * consumed the same way. */
@@ -1149,7 +1190,22 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				status = use_target(m, reference, target, &object);
 				if (FAILED(status)) goto done;
 				*target_used = TRUE;
-			} else status = create_reference(m, reference, &object);
+			} else {
+				status = create_reference(m, reference, &object);
+				/* A Windows.UI.Color struct (stable 42, the index the stable table names) is not activatable: the
+				 * kind-8 constant beside the node is the colour, so it boxes into the engine's colour value — the
+				 * same object the dictionary then keys it under. Any other failed create keeps the skip. */
+				if (FAILED(status) && !object && reference == (0x8000 | 42) && value.kind == value_color) {
+					__x_ABI_CWindows_CUI_CColor color;
+					color.A = (BYTE)((value.integer >> 24) & 0xff);
+					color.R = (BYTE)((value.integer >> 16) & 0xff);
+					color.G = (BYTE)((value.integer >> 8) & 0xff);
+					color.B = (BYTE)(value.integer & 0xff);
+					status = raven_color_value_create(&color, &object);
+					if (FAILED(status))
+						object = NULL;
+				}
+			}
 			if (target && (FAILED(status) || !object)) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
 			/* The skip convention: a type the runtime cannot build is an unapplied value when no target demands it, and
 			 * a failed create must not poison the rest of the load. A malformed reference (E_INVALIDARG: the metadata
@@ -1555,6 +1611,10 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 		}
 	}
 done:
+	if (FAILED(status)) {
+		last_failure_offset = (UINT32)node_at;
+		last_failure_status = status;
+	}
 	if (SUCCEEDED(status) && target && (pending_name || last_object)) status = E_INVALIDARG;
 	if (last_object) IInspectable_Release(last_object);
 	if (completed_value) IInspectable_Release(completed_value);

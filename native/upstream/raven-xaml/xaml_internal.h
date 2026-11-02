@@ -11,6 +11,7 @@
 #include <weakreference.h>
 #include <windows.ui.core.h>
 #include <windows.system.h>
+#include <windows.ui.h>
 
 /* ---- Weak references (implemented in resources.c, shared by every object .NET Native projects) ----
  *
@@ -97,6 +98,15 @@ HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_elements_set_name(IInspectable *object, const WCHAR *text, UINT32 length);
 HRESULT raven_xaml_elements_set_text(IInspectable *object, const WCHAR *name, UINT32 length, const WCHAR *text, UINT32 text_length);
 HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
+/* The engine's SolidColorBrush (xaml_styles.c) and its colour reader: the loader creates the class the compiled theme
+ * dictionaries name and applies the kind-8 colour constants to it, and the element side reads the colour back. */
+HRESULT raven_solid_brush_create(IInspectable **out);
+HRESULT raven_solid_brush_put_color(IInspectable *brush, const __x_ABI_CWindows_CUI_CColor *color);
+HRESULT raven_solid_brush_get_color(IInspectable *brush, __x_ABI_CWindows_CUI_CColor *color);
+/* The boxed Windows.UI.Color value (property_value.c): the struct a PushScopeCreateTypeWithConstant node carries is not
+ * activatable, so the loader boxes the four bytes into this object. */
+HRESULT raven_color_value_create(const __x_ABI_CWindows_CUI_CColor *color, IInspectable **out);
+HRESULT raven_color_value_of(IInspectable *object, __x_ABI_CWindows_CUI_CColor *color);
 HRESULT raven_xaml_application_current(IInspectable **out);
 HRESULT raven_xaml_window_current(IInspectable **out);
 HRESULT raven_launch_arguments_create(IInspectable **out);

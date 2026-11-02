@@ -459,6 +459,129 @@ static size_t build_application_lookup_document(unsigned char *doc)
 	return at;
 }
 
+/* A Grid whose page dictionary holds a SolidColorBrush built the way the real theme dictionaries build theirs: the brush
+ * (stable 265) takes its colour from a SetValueConstant SolidColorBrush_Color (476) whose constant is the kind-8 packed
+ * Windows.UI.Color (#ff0080c0), and the keyed insertion stores it under "BrushKey". The TextBlock that follows reads the
+ * entry through SetValueFromStaticResource Foreground (788), the application path a theme brush travels. */
+static size_t build_dictionary_brush_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 300; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the page dictionary */
+	doc[at++] = 0x14; at = put_stable(doc, at, 265); /* create SolidColorBrush */
+	doc[at++] = 0x1a; at = put_stable(doc, at, 476); /* SetValueConstant SolidColorBrush.Color */
+	doc[at++] = 0x08; /* the kind-8 packed colour */
+	put32(doc, at, 0xff0080c0u);
+	at += 4;
+	doc[at++] = 0x21; /* close the brush scope */
+	doc[at++] = 0x0a; /* AddToDictionaryWithKey "BrushKey" */
+	at = put_constant_string(doc, at, "BrushKey");
+	doc[at++] = 0x21; /* close the dictionary scope */
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* SetValue Panel.Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 396); /* create TextBlock */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 788); /* SetValueFromStaticResource Foreground */
+	at = put_constant_string(doc, at, "BrushKey");
+	doc[at++] = 0x21; /* close the text block scope */
+	doc[at++] = 0x21; /* close the grid scope */
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	put32(doc, 164, (uint32_t)(at - 168));
+	return at;
+}
+
+/* The colour structs the real Colors.xbf declares with PushScopeCreateTypeWithConstant (node 22): the type is
+ * Windows.UI.Color (stable 42) and the constant beside it the kind-8 packed #ff3c3c3c. The struct is not activatable, so
+ * the loader boxes it and the keyed insertion stores it under "AccentKey". */
+static size_t build_dictionary_color_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 260; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the page dictionary */
+	doc[at++] = 0x16; at = put_stable(doc, at, 42); /* PushScopeCreateTypeWithConstant Windows.UI.Color */
+	doc[at++] = 0x08; /* the kind-8 packed colour */
+	put32(doc, at, 0xff3c3c3cu);
+	at += 4;
+	doc[at++] = 0x02; /* EndInitPopScope */
+	doc[at++] = 0x0a; /* AddToDictionaryWithKey "AccentKey" */
+	at = put_constant_string(doc, at, "AccentKey");
+	doc[at++] = 0x21; /* close the dictionary scope */
+	doc[at++] = 0x21; /* close the grid scope */
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	put32(doc, 164, (uint32_t)(at - 168));
+	return at;
+}
+
+/* A ResourceDictionary as the page root holding both value forms the real Colors.xbf declares: "BrushKey" is a
+ * SolidColorBrush whose Color came from a kind-8 constant, "AccentKey" a boxed Windows.UI.Color struct from node 22. The
+ * dictionary is the root, so the fixture reads both back through the map. */
+static size_t build_dictionary_values_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 300; ++index)
+		doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put32(doc, 12, 2);
+	put32(doc, 16, 1);
+	put64(doc, 20, 0x78);
+	put64(doc, 28, 0x7c);
+	put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84);
+	put64(doc, 52, 0x88);
+	put64(doc, 60, 0x8c);
+	put32(doc, 156, 1);
+	put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the dictionary is the root */
+	doc[at++] = 0x14; at = put_stable(doc, at, 265); /* create SolidColorBrush */
+	doc[at++] = 0x1a; at = put_stable(doc, at, 476); /* SetValueConstant SolidColorBrush.Color */
+	doc[at++] = 0x08;
+	put32(doc, at, 0xff0080c0u);
+	at += 4;
+	doc[at++] = 0x21; /* close the brush scope */
+	doc[at++] = 0x0a; /* AddToDictionaryWithKey "BrushKey" */
+	at = put_constant_string(doc, at, "BrushKey");
+	doc[at++] = 0x16; at = put_stable(doc, at, 42); /* PushScopeCreateTypeWithConstant Windows.UI.Color */
+	doc[at++] = 0x08;
+	put32(doc, at, 0xff3c3c3cu);
+	at += 4;
+	doc[at++] = 0x02; /* EndInitPopScope */
+	doc[at++] = 0x0a; /* AddToDictionaryWithKey "AccentKey" */
+	at = put_constant_string(doc, at, "AccentKey");
+	doc[at++] = 0x21; /* close the dictionary scope */
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	put32(doc, 164, (uint32_t)(at - 168));
+	return at;
+}
+
 /* A Grid whose "Light" theme dictionary carries its content the way a compiled App.xaml does: SetCustomRuntimeData (node
  * 15) names substream 1, and that substream builds the dictionary holding "Greeting" = "Deferred". The payload is the
  * ResourceDictionary_v3 runtime data (type index 10) with every map empty, so only the substream matters. */
@@ -2080,6 +2203,86 @@ int raven_entry(void)
 		if (FAILED(only_child_text(style_v2_root, &style_v2_value)) || !same(style_v2_value, L"Hi", 2)) return 777;
 		WindowsDeleteString(style_v2_value);
 		style_v2_root->lpVtbl->Release(style_v2_root);
+	}
+
+	/* The theme-dictionary value forms the real Shapr3D Colors.xbf carries. A dictionary root holds a SolidColorBrush
+	 * whose Color came from a kind-8 constant and a boxed Windows.UI.Color from node 22; both read back through the map,
+	 * the brush by its runtime class and its colour, the struct by the engine's colour reader. A second document applies
+	 * the brush to a TextBlock.Foreground through SetValueFromStaticResource — the application path a theme brush
+	 * travels — and the element hands the brush object back. */
+	{
+		/* Windows.UI.Color's four-byte ABI, declared locally because the hand headers carry no projection of it. */
+		struct fixture_color { BYTE A, R, G, B; } read;
+		typedef HRESULT (*brush_color_function)(IInspectable *, struct fixture_color *);
+		typedef IInspectable *(*boxed_string_function)(const WCHAR *, UINT32);
+		unsigned char values_fixture[300], brush_fixture[300];
+		IInspectable *values_root = NULL, *brush_root = NULL, *brush_entry = NULL, *accent_entry = NULL;
+		brush_color_function brush_color = NULL, color_value = NULL;
+		boxed_string_function boxed_string = NULL;
+		HSTRING brush_name = NULL, accent_name = NULL;
+		__FIMap_2_IInspectable_IInspectable *values_map = NULL;
+		brush_color = (brush_color_function)GetProcAddress(component, "raven_xaml_solid_brush_color");
+		color_value = (brush_color_function)GetProcAddress(component, "raven_xaml_color_value");
+		boxed_string = (boxed_string_function)GetProcAddress(component, "raven_xaml_boxed_string_create");
+		if (!brush_color || !color_value || !boxed_string) return 778;
+		if (load(values_fixture, (uint32_t)build_dictionary_values_document(values_fixture), &values_root) != S_OK ||
+			!values_root) return 779;
+		if (values_root->lpVtbl->QueryInterface(values_root, &IID___FIMap_2_IInspectable_IInspectable,
+			(void **)&values_map) != S_OK || !values_map) return 780;
+		values_root->lpVtbl->Release(values_root);
+		{
+			IInspectable *brush_key = boxed_string(L"BrushKey", 8);
+			IInspectable *accent_key = boxed_string(L"AccentKey", 9);
+			if (!brush_key || !accent_key) return 781;
+			if (values_map->lpVtbl->Lookup(values_map, brush_key, &brush_entry) != S_OK || !brush_entry) return 781;
+			if (values_map->lpVtbl->Lookup(values_map, accent_key, &accent_entry) != S_OK || !accent_entry) return 782;
+			brush_key->lpVtbl->Release(brush_key);
+			accent_key->lpVtbl->Release(accent_key);
+		}
+		if (brush_entry->lpVtbl->GetRuntimeClassName(brush_entry, &brush_name) != S_OK || !brush_name) return 783;
+		if (!same(brush_name, L"Microsoft.UI.Xaml.Media.SolidColorBrush", 39)) return 783;
+		WindowsDeleteString(brush_name);
+		if (brush_color(brush_entry, &read) != S_OK) return 784;
+		if (read.A != 0xff || read.R != 0x00 || read.G != 0x80 || read.B != 0xc0) return 784;
+		brush_entry->lpVtbl->Release(brush_entry);
+		if (accent_entry->lpVtbl->GetRuntimeClassName(accent_entry, &accent_name) != S_OK || !accent_name) return 785;
+		if (!same(accent_name, L"Windows.UI.Color", 16)) return 785;
+		WindowsDeleteString(accent_name);
+		if (color_value(accent_entry, &read) != S_OK) return 786;
+		if (read.A != 0xff || read.R != 0x3c || read.G != 0x3c || read.B != 0x3c) return 786;
+		accent_entry->lpVtbl->Release(accent_entry);
+		values_map->lpVtbl->Release(values_map);
+		/* The application path: the resolved brush lands on the TextBlock's Foreground and reads back as the same brush. */
+		if (load(brush_fixture, (uint32_t)build_dictionary_brush_document(brush_fixture), &brush_root) != S_OK ||
+			!brush_root) return 787;
+		{
+			panel1 *panel = NULL;
+			IInspectable *children_object = NULL, *text_object = NULL;
+			struct fixture_vector *children = NULL;
+			textblock1 *text = NULL;
+			IInspectable *foreground = NULL;
+			HSTRING applied_name = NULL;
+			if (brush_root->lpVtbl->QueryInterface(brush_root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+				(void **)&panel) != S_OK || !panel) return 788;
+			if (panel->lpVtbl->get_Children(panel, (uint64_t)(uintptr_t)&children_object) != S_OK || !children_object)
+				return 788;
+			panel->lpVtbl->Release(panel);
+			children = (struct fixture_vector *)children_object;
+			if (children->lpVtbl->GetAt(children, 0, &text_object) != S_OK || !text_object) return 789;
+			children->lpVtbl->Release(children);
+			if (text_object->lpVtbl->QueryInterface(text_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+				(void **)&text) != S_OK || !text) return 790;
+			text_object->lpVtbl->Release(text_object);
+			if (text->lpVtbl->get_Foreground(text, (uint64_t)(uintptr_t)&foreground) != S_OK || !foreground) return 791;
+			text->lpVtbl->Release(text);
+			if (foreground->lpVtbl->GetRuntimeClassName(foreground, &applied_name) != S_OK || !applied_name) return 792;
+			if (!same(applied_name, L"Microsoft.UI.Xaml.Media.SolidColorBrush", 39)) return 792;
+			WindowsDeleteString(applied_name);
+			if (brush_color(foreground, &read) != S_OK) return 793;
+			if (read.A != 0xff || read.R != 0x00 || read.G != 0x80 || read.B != 0xc0) return 793;
+			foreground->lpVtbl->Release(foreground);
+			brush_root->lpVtbl->Release(brush_root);
+		}
 	}
 
 	/* Merged dictionaries: the later dictionary wins over the earlier one, so the key resolves to "Second". */

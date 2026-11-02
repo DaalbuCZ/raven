@@ -2631,3 +2631,100 @@ __declspec(dllexport) HRESULT raven_style_default_attach(IInspectable *element)
 	}
 	return raven_xaml_element_put_style(element, (IInspectable *)style);
 }
+
+/* SolidColorBrush: the media brush the theme dictionaries build. The class surface the engine serves is the one the
+ * compiled documents name — the XBFs' media namespace is Microsoft.UI.Xaml.Media, so that is the runtime class the
+ * object answers with — and its Color the loader applies from a kind-8 constant. The engine's own readers
+ * (raven_solid_brush_put_color / raven_solid_brush_get_color) stand in for ISolidColorBrush, whose instantiation IID no
+ * header in tree carries, the way the DependencyProperty interop above does; the element side reads the colour back
+ * through the same reader so a dictionary brush lands where a composition colour brush would. */
+static const WCHAR solid_brush_class_name[] = L"Microsoft.UI.Xaml.Media.SolidColorBrush";
+struct solid_brush { IInspectable inspectable; LONG refs; __x_ABI_CWindows_CUI_CColor color; };
+static const IInspectableVtbl solid_brush_table;
+
+static HRESULT WINAPI solid_brush_query(IInspectable *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject))
+		*out = self;
+	else
+		return E_NOINTERFACE;
+	IInspectable_AddRef(self);
+	return S_OK;
+}
+static ULONG WINAPI solid_brush_addref(IInspectable *self) { return InterlockedIncrement(&((struct solid_brush *)self)->refs); }
+static ULONG WINAPI solid_brush_release(IInspectable *self)
+{
+	ULONG refs = InterlockedDecrement(&((struct solid_brush *)self)->refs);
+	if (!refs)
+		HeapFree(GetProcessHeap(), 0, self);
+	return refs;
+}
+static HRESULT WINAPI solid_brush_iids(IInspectable *self, ULONG *count, IID **iids) { (void)self; if (!count || !iids) return E_POINTER; *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI solid_brush_name(IInspectable *self, HSTRING *out)
+{
+	(void)self;
+	if (!out)
+		return E_POINTER;
+	return WindowsCreateString(solid_brush_class_name, (UINT32)(ARRAYSIZE(solid_brush_class_name) - 1), out);
+}
+static HRESULT WINAPI solid_brush_trust(IInspectable *self, TrustLevel *out) { (void)self; if (!out) return E_POINTER; *out = BaseTrust; return S_OK; }
+static const IInspectableVtbl solid_brush_table = {
+	solid_brush_query, solid_brush_addref, solid_brush_release, solid_brush_iids, solid_brush_name, solid_brush_trust,
+};
+
+HRESULT raven_solid_brush_create(IInspectable **out)
+{
+	struct solid_brush *brush;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	brush = ALLOC(sizeof *brush);
+	if (!brush)
+		return E_OUTOFMEMORY;
+	brush->inspectable.lpVtbl = &solid_brush_table;
+	brush->refs = 1;
+	memset(&brush->color, 0, sizeof brush->color);
+	*out = &brush->inspectable;
+	return S_OK;
+}
+
+HRESULT raven_solid_brush_put_color(IInspectable *brush, const __x_ABI_CWindows_CUI_CColor *color)
+{
+	struct solid_brush *self = (struct solid_brush *)brush;
+	if (!brush || !color)
+		return E_POINTER;
+	if (brush->lpVtbl != &solid_brush_table)
+		return S_FALSE;
+	self->color = *color;
+	return S_OK;
+}
+
+HRESULT raven_solid_brush_get_color(IInspectable *brush, __x_ABI_CWindows_CUI_CColor *color)
+{
+	struct solid_brush *self = (struct solid_brush *)brush;
+	if (!brush || !color)
+		return E_POINTER;
+	if (brush->lpVtbl != &solid_brush_table)
+		return S_FALSE;
+	*color = self->color;
+	return S_OK;
+}
+
+__declspec(dllexport) HRESULT raven_xaml_solid_brush_create(IInspectable **out)
+{
+	return raven_solid_brush_create(out);
+}
+
+__declspec(dllexport) HRESULT raven_xaml_solid_brush_color(IInspectable *brush, __x_ABI_CWindows_CUI_CColor *color)
+{
+	return raven_solid_brush_get_color(brush, color);
+}
+
+/* The fixture-facing form of the dictionary key box: the same object map Lookup takes. */
+__declspec(dllexport) IInspectable *raven_xaml_boxed_string_create(const WCHAR *text, UINT32 length)
+{
+	return raven_xaml_boxed_string(text, length);
+}

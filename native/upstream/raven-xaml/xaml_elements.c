@@ -885,7 +885,9 @@ static HRESULT WINAPI panel_background(panel1 *iface, uint64_t out)
 }
 
 /* Panel.Background takes a Brush; the composition colour brush is the brush the engine can read a colour from today, so a
- * brush of that kind fills the panel and any other brush is stored without effect until the media brushes arrive. */
+ * brush of that kind fills the panel and any other brush is stored without effect until the media brushes arrive. The
+ * engine SolidColorBrush the theme dictionaries build reads through the same colour reader, so a dictionary brush fills
+ * the panel too. */
 static HRESULT WINAPI panel_put_background(panel1 *iface, uint64_t value)
 {
 	struct grid *self = ((struct panel_part *)iface)->owner;
@@ -893,15 +895,20 @@ static HRESULT WINAPI panel_put_background(panel1 *iface, uint64_t value)
 	COLORREF color = 0;
 	BYTE alpha = 0;
 	if (brush) {
-		__x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush *color_brush = NULL;
-		if (SUCCEEDED(brush->lpVtbl->QueryInterface(brush,
-			&IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush, (void **)&color_brush)) && color_brush) {
-			__x_ABI_CWindows_CUI_CColor read;
-			if (color_brush->lpVtbl->get_Color(color_brush, &read) == S_OK) {
-				color = RGB(read.R, read.G, read.B);
-				alpha = read.A;
+		__x_ABI_CWindows_CUI_CColor read;
+		if (raven_solid_brush_get_color(brush, &read) != S_OK) {
+			__x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush *color_brush = NULL;
+			if (SUCCEEDED(brush->lpVtbl->QueryInterface(brush,
+				&IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush, (void **)&color_brush)) && color_brush) {
+				if (color_brush->lpVtbl->get_Color(color_brush, &read) == S_OK) {
+					color = RGB(read.R, read.G, read.B);
+					alpha = read.A;
+				}
+				color_brush->lpVtbl->Release(color_brush);
 			}
-			color_brush->lpVtbl->Release(color_brush);
+		} else {
+			color = RGB(read.R, read.G, read.B);
+			alpha = read.A;
 		}
 		brush->lpVtbl->AddRef(brush);
 	}
@@ -1117,15 +1124,20 @@ static HRESULT WINAPI text_put_foreground(textblock1 *iface, uint64_t value)
 	COLORREF color = 0;
 	BYTE alpha = 0;
 	if (brush) {
-		__x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush *color_brush = NULL;
-		if (SUCCEEDED(brush->lpVtbl->QueryInterface(brush,
-			&IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush, (void **)&color_brush)) && color_brush) {
-			__x_ABI_CWindows_CUI_CColor read;
-			if (color_brush->lpVtbl->get_Color(color_brush, &read) == S_OK) {
-				color = RGB(read.R, read.G, read.B);
-				alpha = read.A;
+		__x_ABI_CWindows_CUI_CColor read;
+		if (raven_solid_brush_get_color(brush, &read) != S_OK) {
+			__x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush *color_brush = NULL;
+			if (SUCCEEDED(brush->lpVtbl->QueryInterface(brush,
+				&IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush, (void **)&color_brush)) && color_brush) {
+				if (color_brush->lpVtbl->get_Color(color_brush, &read) == S_OK) {
+					color = RGB(read.R, read.G, read.B);
+					alpha = read.A;
+				}
+				color_brush->lpVtbl->Release(color_brush);
 			}
-			color_brush->lpVtbl->Release(color_brush);
+		} else {
+			color = RGB(read.R, read.G, read.B);
+			alpha = read.A;
 		}
 		brush->lpVtbl->AddRef(brush);
 	}
@@ -2391,27 +2403,27 @@ static int named_color(const WCHAR *text, UINT32 length, COLORREF *color, BYTE *
 	return 0;
 }
 
-static void grid_store_color(struct grid *self, COLORREF color, BYTE alpha)
+/* The colour store takes an owned brush reference the caller hands it (a colour NAME passes NULL, the way the compiled
+ * colour constants always did), so a value that was a real brush keeps answering the getter. */
+static void grid_store_color(struct grid *self, COLORREF color, BYTE alpha, IInspectable *brush)
 {
 	self->color = color;
 	self->alpha = alpha;
-	if (self->background) {
+	if (self->background)
 		self->background->lpVtbl->Release(self->background);
-		self->background = NULL;
-	}
+	self->background = brush;
 	raven_render_changed();
 }
 
 /* The compiled colour-name path of the TextBlock foreground: the named colour replaces the brush reference, the way the
  * grid's Background constant does. */
-static void textblock_store_color(struct textblock *self, COLORREF color, BYTE alpha)
+static void textblock_store_color(struct textblock *self, COLORREF color, BYTE alpha, IInspectable *brush)
 {
 	self->foreground = color;
 	self->foreground_alpha = alpha;
-	if (self->foreground_brush) {
+	if (self->foreground_brush)
 		self->foreground_brush->lpVtbl->Release(self->foreground_brush);
-		self->foreground_brush = NULL;
-	}
+	self->foreground_brush = brush;
 	raven_render_changed();
 }
 
@@ -2559,7 +2571,7 @@ HRESULT raven_xaml_elements_set_text(IInspectable *object, const WCHAR *name, UI
 		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) || !grid)
 			return S_FALSE;
 		if (grid->lpVtbl == &grid1_table && named)
-			grid_store_color(((struct grid1_part *)grid)->owner, color, alpha);
+			grid_store_color(((struct grid1_part *)grid)->owner, color, alpha, NULL);
 		grid->lpVtbl->Release(grid);
 		return S_OK;
 	}
@@ -2572,7 +2584,7 @@ HRESULT raven_xaml_elements_set_text(IInspectable *object, const WCHAR *name, UI
 			(void **)&textblock)) || !textblock)
 			return S_FALSE;
 		if (textblock->lpVtbl == &textblock_table && named)
-			textblock_store_color((struct textblock *)textblock, color, alpha);
+			textblock_store_color((struct textblock *)textblock, color, alpha, NULL);
 		textblock->lpVtbl->Release(textblock);
 		return S_OK;
 	}
@@ -2787,22 +2799,31 @@ static int style_boxed_number(IInspectable *value, float *number)
 }
 
 /* A brush value: the composition colour brush is the brush the engine can read a colour from, the way Panel.Background
- * treats one. */
+ * treats one; the engine SolidColorBrush the theme dictionaries build reads through the same reader, so a dictionary
+ * brush lands where a composition colour brush would. */
 static int style_brush_color(IInspectable *value, COLORREF *color, BYTE *alpha)
 {
 	__x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush *brush = NULL;
-	if (FAILED(value->lpVtbl->QueryInterface(value, &IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush,
-		(void **)&brush)) || !brush)
-		return 0;
-	__x_ABI_CWindows_CUI_CColor read;
-	int matched = 0;
-	if (brush->lpVtbl->get_Color(brush, &read) == S_OK) {
+	if (SUCCEEDED(value->lpVtbl->QueryInterface(value, &IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush,
+		(void **)&brush)) && brush) {
+		__x_ABI_CWindows_CUI_CColor read;
+		int matched = 0;
+		if (brush->lpVtbl->get_Color(brush, &read) == S_OK) {
+			*color = RGB(read.R, read.G, read.B);
+			*alpha = read.A;
+			matched = 1;
+		}
+		brush->lpVtbl->Release(brush);
+		return matched;
+	}
+	{
+		__x_ABI_CWindows_CUI_CColor read;
+		if (raven_solid_brush_get_color(value, &read) != S_OK)
+			return 0;
 		*color = RGB(read.R, read.G, read.B);
 		*alpha = read.A;
-		matched = 1;
 	}
-	brush->lpVtbl->Release(brush);
-	return matched;
+	return 1;
 }
 
 /* The application of one setter value to the grid's own storage. check_only validates the value kind without mutating:
@@ -2815,8 +2836,10 @@ static HRESULT grid_apply_setter(void *state, const WCHAR *name, UINT32 length, 
 		COLORREF color = 0;
 		BYTE alpha = 0;
 		if (value && style_brush_color(value, &color, &alpha)) {
-			if (!check_only)
-				grid_store_color(self, color, alpha);
+			if (!check_only) {
+				value->lpVtbl->AddRef(value);
+				grid_store_color(self, color, alpha, value);
+			}
 			return S_OK;
 		}
 		HSTRING string = NULL;
@@ -2827,7 +2850,7 @@ static HRESULT grid_apply_setter(void *state, const WCHAR *name, UINT32 length, 
 			WindowsDeleteString(string);
 			if (named) {
 				if (!check_only)
-					grid_store_color(self, color, alpha);
+					grid_store_color(self, color, alpha, NULL);
 				return S_OK;
 			}
 		}
@@ -2862,8 +2885,10 @@ static HRESULT textblock_apply_setter(void *state, const WCHAR *name, UINT32 len
 		COLORREF color = 0;
 		BYTE alpha = 0;
 		if (value && style_brush_color(value, &color, &alpha)) {
-			if (!check_only)
-				textblock_store_color(self, color, alpha);
+			if (!check_only) {
+				value->lpVtbl->AddRef(value);
+				textblock_store_color(self, color, alpha, value);
+			}
 			return S_OK;
 		}
 		HSTRING string = NULL;
@@ -2874,7 +2899,7 @@ static HRESULT textblock_apply_setter(void *state, const WCHAR *name, UINT32 len
 			WindowsDeleteString(string);
 			if (named) {
 				if (!check_only)
-					textblock_store_color(self, color, alpha);
+					textblock_store_color(self, color, alpha, NULL);
 				return S_OK;
 			}
 		}

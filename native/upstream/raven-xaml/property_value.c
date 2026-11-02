@@ -265,3 +265,105 @@ static const __x_ABI_CWindows_CFoundation_CIPropertyValueStaticsVtbl statics_tab
 static struct property_factory factory={{(void *)&activation_table},{(void *)&statics_table},1};
 HRESULT raven_property_value_statics(statics_i **out) { if(!out)return E_POINTER; *out=&factory.statics; InterlockedIncrement(&factory.refs); return S_OK; }
 __declspec(dllexport) HRESULT raven_property_value_factory(HSTRING name,IActivationFactory **out) { UINT32 length=0; const WCHAR *text; if(!out)return E_POINTER; *out=NULL; text=WindowsGetStringRawBuffer(name,&length); if(length!=ARRAYSIZE(class_name)-1 || CompareStringOrdinal(text,length,class_name,-1,FALSE)!=CSTR_EQUAL)return CLASS_E_CLASSNOTAVAILABLE; *out=&factory.activation; InterlockedIncrement(&factory.refs); return S_OK; }
+
+/* Windows.UI.Color as a value object. The struct is not activatable — a compiled theme dictionary reaches its colours
+ * through the loader's kind-8 constants — so the engine boxes the four bytes into an IInspectable whose runtime class is
+ * "Windows.UI.Color" and whose readers are the engine's own interop interface, the convention the DependencyProperty
+ * interop uses where the real ABI has no getter to call and no winmd in tree carries the projection IID. */
+static const WCHAR color_value_class_name[] = L"Windows.UI.Color";
+static const IID raven_color_value_interop_iid = {0x8f4d2c63, 0x51a7, 0x4be0, {0x92, 0xb4, 0x6e, 0x21, 0x0c, 0x55, 0x7d, 0xa1}};
+typedef struct raven_color_value_interop raven_color_value_interop;
+struct raven_color_value_interop_vtbl {
+	HRESULT (WINAPI *QueryInterface)(raven_color_value_interop *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(raven_color_value_interop *);
+	ULONG (WINAPI *Release)(raven_color_value_interop *);
+	HRESULT (WINAPI *get_Color)(raven_color_value_interop *, __x_ABI_CWindows_CUI_CColor *);
+};
+struct raven_color_value_interop { const struct raven_color_value_interop_vtbl *lpVtbl; };
+struct color_value { IInspectable inspectable; raven_color_value_interop interop; LONG refs; __x_ABI_CWindows_CUI_CColor color; };
+#define COLOR_OWNER(part) ((struct color_value *)((char *)(part)-offsetof(struct color_value, interop)))
+
+static HRESULT WINAPI color_value_query(IInspectable *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject))
+		*out = self;
+	else if (IsEqualIID(iid, &raven_color_value_interop_iid))
+		*out = &((struct color_value *)self)->interop;
+	else
+		return E_NOINTERFACE;
+	IInspectable_AddRef(self);
+	return S_OK;
+}
+static ULONG WINAPI color_value_addref(IInspectable *self) { return InterlockedIncrement(&((struct color_value *)self)->refs); }
+static ULONG WINAPI color_value_release(IInspectable *self)
+{
+	ULONG refs = InterlockedDecrement(&((struct color_value *)self)->refs);
+	if (!refs)
+		HeapFree(GetProcessHeap(), 0, self);
+	return refs;
+}
+static HRESULT WINAPI color_value_iids(IInspectable *self, ULONG *count, IID **iids) { (void)self; if (!count || !iids) return E_POINTER; *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI color_value_name(IInspectable *self, HSTRING *out)
+{
+	(void)self;
+	if (!out)
+		return E_POINTER;
+	return WindowsCreateString(color_value_class_name, (UINT32)(ARRAYSIZE(color_value_class_name) - 1), out);
+}
+static HRESULT WINAPI color_value_trust(IInspectable *self, TrustLevel *out) { (void)self; if (!out) return E_POINTER; *out = BaseTrust; return S_OK; }
+static const IInspectableVtbl color_value_table = {
+	color_value_query, color_value_addref, color_value_release, color_value_iids, color_value_name, color_value_trust,
+};
+static HRESULT WINAPI color_interop_query(raven_color_value_interop *self, REFIID iid, void **out) { return color_value_query(&COLOR_OWNER(self)->inspectable, iid, out); }
+static ULONG WINAPI color_interop_addref(raven_color_value_interop *self) { return color_value_addref(&COLOR_OWNER(self)->inspectable); }
+static ULONG WINAPI color_interop_release(raven_color_value_interop *self) { return color_value_release(&COLOR_OWNER(self)->inspectable); }
+static HRESULT WINAPI color_interop_get(raven_color_value_interop *self, __x_ABI_CWindows_CUI_CColor *out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = COLOR_OWNER(self)->color;
+	return S_OK;
+}
+static const struct raven_color_value_interop_vtbl color_interop_table = {
+	color_interop_query, color_interop_addref, color_interop_release, color_interop_get,
+};
+
+HRESULT raven_color_value_create(const __x_ABI_CWindows_CUI_CColor *color, IInspectable **out)
+{
+	struct color_value *value;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!color)
+		return E_POINTER;
+	value = ALLOC(sizeof *value);
+	if (!value)
+		return E_OUTOFMEMORY;
+	value->inspectable.lpVtbl = &color_value_table;
+	value->interop.lpVtbl = &color_interop_table;
+	value->refs = 1;
+	value->color = *color;
+	*out = &value->inspectable;
+	return S_OK;
+}
+
+HRESULT raven_color_value_of(IInspectable *object, __x_ABI_CWindows_CUI_CColor *color)
+{
+	raven_color_value_interop *interop = NULL;
+	HRESULT result;
+	if (!object || !color)
+		return E_POINTER;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &raven_color_value_interop_iid, (void **)&interop)))
+		return S_FALSE;
+	result = interop->lpVtbl->get_Color(interop, color);
+	interop->lpVtbl->Release(interop);
+	return result;
+}
+
+__declspec(dllexport) HRESULT raven_xaml_color_value(IInspectable *object, __x_ABI_CWindows_CUI_CColor *color)
+{
+	return raven_color_value_of(object, color);
+}
