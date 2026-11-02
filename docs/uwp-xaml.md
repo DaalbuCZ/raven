@@ -1772,6 +1772,29 @@ the same day — see the two entries below. Evidence:
   resolves through the merged fall-through. `native_xaml_controls_x64`/
   `_x32` pass; the full regression set passes except the known
   `native_edit_text_contract`.
+- Stage 7 re-probe after the catalog and colour work (2026-11-02): the
+  `XamlControlsResources` activation wall is gone. A fresh traced launch
+  (`RAVEN_TRACE_API=1 RAVEN_TRACE_FAIL=1 RAVEN_TRACE_STRINGS=1
+  RAVEN_TRACE_EXCEPTIONS=1 raven --run-process --execution=native
+  .../Shapr3D.exe`, log kept out of the tree) shows no catalog miss and no
+  `0x80040154` anywhere — where `launch-stage7c-4.log` recorded
+  `RegGetValueW(...ActivatableClassId\Microsoft.UI.Xaml.Controls.
+  XamlControlsResources\DllPath) -> 2` and a fail-fast, the new trace
+  records the loader-side `create_known` match (`raven-xaml.dll+40759`)
+  serving the class and the walk proceeding into the compiled App.xbf's
+  deferred dictionary content. The new wall at trace time was an honest
+  refusal inside the loader: a substream `load_nodes` ended `E_INVALIDARG`,
+  `Application.LoadComponent` returned `0x80070057`, and .NET Native
+  originated the language exception and fail-fasted with the same code
+  (`RoOriginateLanguageException`/`RaiseFailFastException` from
+  `sharedlibrary.dll`) — the node-18 choreography the preceding bullet
+  fixed, which is why the six theme `Source` loads never started in that
+  trace. After that fix the same walk refuses at the first Source
+  assignment's nested `ElementTheme` enum box, so the next increment is
+  enum boxing (the inventory's 16 enum payloads and 3 `ElementTheme`
+  structs); `RavenXamlLastFailure` is the designed probe for naming the
+  exact node. The WinUI 2.x content ceiling stays recorded: the catalog
+  serves the class, its dictionary is empty.
 
 ## Performance rules
 
