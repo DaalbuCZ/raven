@@ -65,7 +65,7 @@ std::optional<Conversion> parse_conversion(std::u16string_view format, size_t &a
 		}
 	}
 	for (; at < format.size(); ++at) {
-		if (format[at] == u'l') item.wide_size = true;
+		if (format[at] == u'l' || format[at] == u'w') item.wide_size = true;
 		else if (format[at] == u'h') item.narrow_size = true;
 		else break;
 	}
@@ -177,7 +177,7 @@ void NativeWindows::reshape(uint64_t handle, DesktopRect outer)
 		// window, because that surface stays attached to it; any other gets a new host window, which the compositor places afresh.
 		const bool visible = window->visible;
 		const bool kept = keep_host_window;
-		keep_host_window = keep_host_window || hosting_surface.contains(handle);
+		keep_host_window = keep_host_window || hosts_surface(handle);
 		resizing = true;
 		try { release_surface(handle); } catch (...) { keep_host_window = kept; resizing = false; throw; }
 		keep_host_window = kept;

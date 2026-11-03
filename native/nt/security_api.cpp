@@ -1,6 +1,7 @@
 #include "elevation.h"
 #include "access_token.h"
 #include "file_objects.h"
+#include "hash.h"
 #include "kernel_context.h"
 #include "text.h"
 
@@ -428,8 +429,11 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[0], acl);
 		call.ret(1);
 	});
-	const auto add_ace = [](ApiCall &call, uint8_t type) {
-		if (!valid_sid(call, call[3])) {
+	const auto add_ace = [](ApiCall &call, uint8_t type, bool with_flags) {
+		// The Ex forms carry the inheritance flags as a third argument, ahead of the mask and the SID.
+		const size_t mask_argument = with_flags ? 3 : 2;
+		const uint64_t sid_address = call[mask_argument + 1];
+		if (!valid_sid(call, sid_address)) {
 			call.fail(1337);
 			return;
 		}
@@ -444,7 +448,7 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			std::memcpy(&entry_size, entry.data() + 2, 2);
 			used += entry_size;
 		}
-		const auto length = sid_length(call, call[3]);
+		const auto length = sid_length(call, sid_address);
 		const uint32_t entry_size = 8 + length;
 		if (used + entry_size > size) {
 			call.fail(122);
@@ -452,11 +456,12 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		}
 		std::vector<uint8_t> entry(entry_size);
 		entry[0] = type;
+		entry[1] = with_flags ? uint8_t(call.u32(2)) : 0;
 		const uint16_t entry_size16 = uint16_t(entry_size);
-		const uint32_t mask = call.u32(2);
+		const uint32_t mask = call.u32(mask_argument);
 		std::memcpy(entry.data() + 2, &entry_size16, 2);
 		std::memcpy(entry.data() + 4, &mask, 4);
-		const auto sid = call.read(call[3], length);
+		const auto sid = call.read(sid_address, length);
 		std::memcpy(entry.data() + 8, sid.data(), length);
 		call.write(call[0] + used, entry);
 		call.store<uint16_t>(call[0] + 4, uint16_t(count + 1));
@@ -554,7 +559,8 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		// TokenElevationType: full for an elevated process, limited (the filtered token of an administrator) otherwise; TokenElevation.
 		case 18: data = {process_elevated() ? uint8_t(2) : uint8_t(3), 0, 0, 0}; break;
 		case 20: data = {process_elevated() ? uint8_t(1) : uint8_t(0), 0, 0, 0}; break;
-		case 29: data = {0, 0, 0, 0}; break;
+		// TokenUIAccess and TokenIsAppContainer: no process here is an accessibility tool or runs in an app container.
+		case 26: case 29: data = {0, 0, 0, 0}; break;
 		case 25: with_sid(make_sid(16, {value.integrity}), 0x60, true); break;
 		case 10: data.assign(56, 0); break;
 		default:
@@ -791,28 +797,57 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	});
-	// The SIDs that exist on every system, by their well known names.
-	registry.add("CreateWellKnownSid", 4, [](ApiCall &call) {
+	// The SIDs that exist on every system, by their WELL_KNOWN_SID_TYPE; none for a type this system does not name without a domain.
+	const auto well_known_sid = [](uint32_t type) {
 		std::vector<uint8_t> sid;
-		switch (call.u32(0)) {
+		switch (type) {
 		case 0: sid = make_sid(0, {0}); break;
 		case 1: sid = make_sid(1, {0}); break;
 		case 2: sid = make_sid(2, {0}); break;
+		case 3: sid = make_sid(3, {0}); break;
+		case 4: sid = make_sid(3, {1}); break;
+		case 5: sid = make_sid(3, {2}); break;
+		case 6: sid = make_sid(3, {3}); break;
+		case 8: sid = make_sid(5, {1}); break;
+		case 9: sid = make_sid(5, {2}); break;
+		case 10: sid = make_sid(5, {3}); break;
 		case 11: sid = make_sid(5, {4}); break;
 		case 12: sid = make_sid(5, {6}); break;
+		case 13: sid = make_sid(5, {7}); break;
+		case 14: sid = make_sid(5, {8}); break;
+		case 15: sid = make_sid(5, {9}); break;
+		case 16: sid = make_sid(5, {10}); break;
 		case 17: sid = make_sid(5, {11}); break;
 		case 18: sid = make_sid(5, {12}); break;
-		case 36: sid = make_sid(5, {32, 555}); break;
+		case 19: sid = make_sid(5, {13}); break;
+		case 20: sid = make_sid(5, {14}); break;
 		case 22: sid = make_sid(5, {18}); break;
 		case 23: sid = make_sid(5, {19}); break;
 		case 24: sid = make_sid(5, {20}); break;
+		case 25: sid = make_sid(5, {32}); break;
 		case 26: sid = make_sid(5, {32, 544}); break;
 		case 27: sid = make_sid(5, {32, 545}); break;
+		case 28: sid = make_sid(5, {32, 546}); break;
+		case 29: sid = make_sid(5, {32, 547}); break;
+		case 30: sid = make_sid(5, {32, 548}); break;
+		case 31: sid = make_sid(5, {32, 549}); break;
+		case 32: sid = make_sid(5, {32, 550}); break;
+		case 33: sid = make_sid(5, {32, 551}); break;
+		case 34: sid = make_sid(5, {32, 552}); break;
+		case 35: sid = make_sid(5, {32, 554}); break;
+		case 36: sid = make_sid(5, {32, 555}); break;
+		case 65: sid = make_sid(16, {0}); break;
 		case 66: sid = make_sid(16, {4096}); break;
 		case 67: sid = make_sid(16, {8192}); break;
 		case 68: sid = make_sid(16, {12288}); break;
 		case 69: sid = make_sid(16, {16384}); break;
-		default:
+		default: break;
+		}
+		return sid;
+	};
+	registry.add("CreateWellKnownSid", 4, [well_known_sid](ApiCall &call) {
+		const auto sid = well_known_sid(call.u32(0));
+		if (sid.empty()) {
 			call.fail(87);
 			return;
 		}
@@ -828,6 +863,14 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.write(call[2], sid);
 		call.ret(1);
+	});
+	registry.add("IsWellKnownSid", 2, [well_known_sid](ApiCall &call) {
+		if (!valid_sid(call, call[0])) {
+			call.ret(0);
+			return;
+		}
+		const auto sid = well_known_sid(call.u32(1));
+		call.ret(!sid.empty() && sid_length(call, call[0]) == sid.size() && call.read(call[0], sid.size()) == sid);
 	});
 	// A descriptor as one self-relative block that the program frees with LocalFree: the owner, group and ACL pointers point inside it.
 	struct Entry {
@@ -1214,33 +1257,35 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetSidSubAuthority", 2, [](ApiCall &call) { call.ret(call[0] + 8 + 4 * uint64_t(call.u32(1))); });
 	registry.add("GetSidLengthRequired", 1, [](ApiCall &call) { call.ret(8 + 4 * uint32_t(uint8_t(call.u32(0)))); });
 	// S-R-I-S-S...: the string form of a SID, in memory the program frees with LocalFree.
-	registry.add("ConvertSidToStringSidW", 2, [&context](ApiCall &call) {
-		if (!valid_sid(call, call[0]) || !call[1]) {
-			call.fail(87);
-			return;
-		}
-		const auto sid = call.read(call[0], sid_length(call, call[0]));
-		uint64_t authority = 0;
-		for (int index = 2; index < 8; ++index)
-			authority = authority << 8 | sid[size_t(index)];
-		std::string text = "S-1-" + std::to_string(authority);
-		for (size_t index = 0; index < sid[1]; ++index) {
-			uint32_t value;
-			std::memcpy(&value, sid.data() + 8 + index * 4, 4);
-			text += "-" + std::to_string(value);
-		}
-		const auto memory = context.allocator.allocate((text.size() + 1) * 2, true);
-		if (!memory) {
-			call.fail(8);
-			return;
-		}
-		std::vector<uint8_t> wide((text.size() + 1) * 2);
-		for (size_t index = 0; index < text.size(); ++index)
-			wide[index * 2] = uint8_t(text[index]);
-		call.write(memory, wide);
-		call.store_pointer(call[1], memory);
-		call.ret(1);
-	});
+	for (const bool wide : {true, false})
+		registry.add(wide ? "ConvertSidToStringSidW" : "ConvertSidToStringSidA", 2, [&context, wide](ApiCall &call) {
+			if (!valid_sid(call, call[0]) || !call[1]) {
+				call.fail(87);
+				return;
+			}
+			const auto sid = call.read(call[0], sid_length(call, call[0]));
+			uint64_t authority = 0;
+			for (int index = 2; index < 8; ++index)
+				authority = authority << 8 | sid[size_t(index)];
+			std::string text = "S-1-" + std::to_string(authority);
+			for (size_t index = 0; index < sid[1]; ++index) {
+				uint32_t value;
+				std::memcpy(&value, sid.data() + 8 + index * 4, 4);
+				text += "-" + std::to_string(value);
+			}
+			const size_t unit = wide ? 2 : 1;
+			const auto memory = context.allocator.allocate((text.size() + 1) * unit, true);
+			if (!memory) {
+				call.fail(8);
+				return;
+			}
+			std::vector<uint8_t> bytes((text.size() + 1) * unit);
+			for (size_t index = 0; index < text.size(); ++index)
+				bytes[index * unit] = uint8_t(text[index]);
+			call.write(memory, bytes);
+			call.store_pointer(call[1], memory);
+			call.ret(1);
+		});
 	// The string form of a security descriptor to a self-relative one in memory the program frees with LocalFree.
 	for (const bool wide : {true, false})
 		registry.add(wide ? "ConvertStringSecurityDescriptorToSecurityDescriptorW" : "ConvertStringSecurityDescriptorToSecurityDescriptorA", 4,
@@ -1386,6 +1431,38 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 	// memory; a process of the prefix is not visible to the others, so the bytes stay as they are and both directions succeed.
 	registry.add("SystemFunction040", 3, [](ApiCall &call) { call.ret(0); });
 	registry.add("SystemFunction041", 3, [](ApiCall &call) { call.ret(0); });
+	// An AppContainer's SID is S-1-15-2 and the SHA-256 of its lowercased name split in seven words.
+	const auto container_sid = [&context](ApiCall &call, uint64_t name, uint64_t out) {
+		auto text = call.wide(name, 64);
+		if (text.empty()) {
+			call.ret(0x80070057);
+			return;
+		}
+		for (auto &character : text)
+			if (character >= u'A' && character <= u'Z')
+				character = char16_t(character + 32);
+		const auto digest = make_digest(0x800c);
+		digest->update({reinterpret_cast<const uint8_t *>(text.data()), text.size() * sizeof(char16_t)});
+		const auto hash = digest->finish();
+		std::vector<uint8_t> sid(8 + 8 * 4);
+		sid[0] = 1;
+		sid[1] = 8;
+		sid[7] = 15;
+		sid[8] = 2;
+		std::memcpy(sid.data() + 12, hash.data(), 28);
+		const auto block = context.allocator.allocate(sid.size(), false);
+		if (!block) {
+			call.ret(0x8007000e);
+			return;
+		}
+		call.write(block, sid);
+		call.store_pointer(out, block);
+		call.ret(0);
+	};
+	registry.add("DeriveAppContainerSidFromAppContainerName", 2, [container_sid](ApiCall &call) { container_sid(call, call[0], call[1]); });
+	// Containers keep no profile of their own here: creating one only names its SID, and deleting one has nothing to remove.
+	registry.add("CreateAppContainerProfile", 6, [container_sid](ApiCall &call) { container_sid(call, call[0], call[5]); });
+	registry.add("DeleteAppContainerProfile", 1, [](ApiCall &call) { call.ret(0); });
 	registry.add("ConvertStringSidToSidW", 2, [&context](ApiCall &call) {
 		const auto parsed = sid_from_text(call.wide(call[0], 256));
 		if (!parsed) {
@@ -1607,8 +1684,10 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint16_t>(call[0] + 4, uint16_t(count + added_count));
 		call.ret(1);
 	});
-	registry.add("AddAccessAllowedAce", 4, [add_ace](ApiCall &call) { add_ace(call, 0); });
-	registry.add("AddAccessDeniedAce", 4, [add_ace](ApiCall &call) { add_ace(call, 1); });
+	registry.add("AddAccessAllowedAce", 4, [add_ace](ApiCall &call) { add_ace(call, 0, false); });
+	registry.add("AddAccessDeniedAce", 4, [add_ace](ApiCall &call) { add_ace(call, 1, false); });
+	registry.add("AddAccessAllowedAceEx", 5, [add_ace](ApiCall &call) { add_ace(call, 0, true); });
+	registry.add("AddAccessDeniedAceEx", 5, [add_ace](ApiCall &call) { add_ace(call, 1, true); });
 }
 
 }

@@ -80,7 +80,8 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 {
 	const uint32_t ansi_page = context.launch.ansi_code_page;
 	// Key handles come from the same space as every other handle, so CloseHandle and NtClose close them too.
-	hive.set_allocator([&objects = context.objects, &hive] { return objects.reserve([&hive](uint64_t key) { hive.close(key); }); });
+	hive.set_allocator([&objects = context.objects, &hive] { return objects.reserve([&hive](uint64_t key) { hive.close(key); }); },
+		[&objects = context.objects](uint64_t key) { objects.release_reserved(key); });
 	const size_t handle_width = context.process.mode() == NativeMode::x86 ? 4 : 8;
 	const auto text_of = [](ApiCall &call, uint64_t address, bool wide) {
 		if (!address)
@@ -739,6 +740,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 			unit = upper_case(unit);
 		return text;
 	};
+	registry.add("RtlUpcaseUnicodeChar", 1, [](ApiCall &call) { call.ret(upper_case(char16_t(call[0]))); });
 	registry.add("RtlCompareUnicodeString", 3, [name_of, upper_text](ApiCall &call) {
 		auto left = name_of(call, call[0]), right = name_of(call, call[1]);
 		if (call.u32(2) & 0xff) {
@@ -848,6 +850,13 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		case 0xc0000023U: call.ret(122); break;
 		case 0x80000005U: call.ret(234); break;
 		case 0xc0000008U: call.ret(6); break;
+		case 0x80000006U: call.ret(18); break;
+		case 0xc000000fU: call.ret(2); break;
+		case 0xc0000103U: call.ret(267); break;
+		case 0xc0000003U: call.ret(87); break;
+		case 0xc00000bbU: call.ret(50); break;
+		case 0xc0000004U: call.ret(24); break;
+		case 0xc0000005U: call.ret(998); break;
 		default: call.ret(317); break;
 		}
 	});
@@ -858,11 +867,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		call.ret(hive.remove_tree(call[0], call[1] ? view(call[0], text_of(call, call[1], false)) : std::u16string()));
 	});
 	registry.add("RegDeleteKeyExW", 4, [&hive, text_of, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], true), call.u32(2)))); });
-	registry.add("RegCloseKey", 1, [&hive, &context](ApiCall &call) {
-		const auto status = hive.close(call[0]);
-		context.objects.release_reserved(call[0]);
-		call.ret(status);
-	});
+	registry.add("RegCloseKey", 1, [&hive](ApiCall &call) { call.ret(hive.close(call[0])); });
 	registry.add("RegFlushKey", 1, [](ApiCall &call) { call.ret(0); });
 	// Predefined keys are resolved for each operation; no cached handles need invalidating.
 	registry.add("RegDisablePredefinedCache", 0, [](ApiCall &call) { call.ret(0); });
@@ -949,6 +954,47 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		call.ret(0);
 	};
 	registry.add("RegGetValueW", 7, [get_value](ApiCall &call) { get_value(call, true); });
+	// RegQueryValue, from 16-bit Windows: the unnamed value of a subkey, always as text; a key without one reads as the empty text.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "RegQueryValueW" : "RegQueryValueA", 4, [&hive, &context, text_of, view, ansi_page, wide](ApiCall &call) {
+			uint64_t key = call[0];
+			uint64_t opened = 0;
+			const auto subkey = call[1] ? text_of(call, call[1], wide) : std::u16string{};
+			if (!subkey.empty()) {
+				const auto status = hive.open(key, view(key, subkey, 0), opened);
+				if (status) {
+					call.ret(status);
+					return;
+				}
+				key = opened;
+			}
+			uint32_t type = 0;
+			std::vector<uint8_t> data;
+			const auto status = hive.query(key, u"", type, data);
+			if (opened) {
+				hive.close(opened);
+				context.objects.release_reserved(opened);
+			}
+			if (status && status != 2) {
+				call.ret(status);
+				return;
+			}
+			if (status || !is_text(type)) data.assign(wide ? 2 : 1, 0);
+			else if (!wide) data = to_ansi_bytes(data, ansi_page);
+			if (!call[2]) {
+				if (call[3]) call.store<uint32_t>(call[3], uint32_t(data.size()));
+				call.ret(0);
+				return;
+			}
+			const uint32_t capacity = call[3] ? call.load<uint32_t>(call[3]) : 0;
+			if (call[3]) call.store<uint32_t>(call[3], uint32_t(data.size()));
+			if (data.size() > capacity) {
+				call.ret(error_more_data);
+				return;
+			}
+			call.write(call[2], data);
+			call.ret(0);
+		});
 	registry.add("RegGetValueA", 7, [get_value](ApiCall &call) { get_value(call, false); });
 	// RegSetKeyValue creates the subkey when it is missing, then writes the value as RegSetValueEx does.
 	for (const bool wide : {true, false})

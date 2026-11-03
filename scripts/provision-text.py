@@ -1,56 +1,126 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
-import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
+import urllib.request
 
-from component_licenses import mark_modified
+
+FONT_PACKAGE = "http://archive.ubuntu.com/ubuntu/pool/main/f/fonts-liberation/fonts-liberation_2.1.5-3build1_all.deb"
+FONT_PACKAGE_SHA256 = "47f156bc945cfc69cf2f2a0c19b8c82b67a685738d3846673462de6a73266e1b"
+FONTS = {
+    "LiberationSans-Regular.ttf": "075e71be4c58beda172ecb574a799308f04c3d054c6a5b7434954d3b0f1b28d8",
+    "LiberationMono-Regular.ttf": "d18235f1e874771f4eaec3ddd6ddb4db849d334bdc6930c5c2185d9344834e62",
+    "LiberationSerif-Regular.ttf": "350f4ffd773cae53560c63dca3d89a5070595614fde12f772bf43feb63d81064",
+}
+SKIA_REPOSITORY = "https://skia.googlesource.com/skia.git"
+SKIA_COMMIT = "a21aae83d6e4e3da284100a30f0a5eafc443b60f"
+SKIA_ARGUMENTS = """is_official_build = true
+is_debug = false
+cc = "clang"
+cxx = "clang++"
+skia_enable_ganesh = false
+skia_enable_graphite = false
+skia_enable_pdf = false
+skia_enable_skottie = false
+skia_enable_svg = false
+skia_enable_tools = false
+skia_use_partition_alloc = false
+skia_use_gl = false
+skia_use_x11 = false
+skia_use_fontconfig = false
+skia_use_freetype = true
+skia_use_harfbuzz = false
+skia_use_icu = false
+skia_use_expat = false
+skia_use_piex = false
+skia_use_wuffs = false
+skia_use_libjpeg_turbo_decode = false
+skia_use_libjpeg_turbo_encode = false
+skia_use_libpng_decode = false
+skia_use_libpng_encode = false
+skia_use_libwebp_decode = false
+skia_use_libwebp_encode = false
+skia_use_zlib = false
+skia_use_perfetto = false
+skia_enable_fontmgr_empty = true
+skia_enable_fontmgr_custom_empty = true
+skia_use_system_freetype2 = true
+"""
+
+
+def ar_member(archive, prefix):
+    at = 8
+    while at + 60 <= len(archive):
+        name = archive[at:at + 16].decode().strip()
+        size = int(archive[at + 48:at + 58].decode())
+        if name.startswith(prefix):
+            return name, archive[at + 60:at + 60 + size]
+        at += 60 + size + (size & 1)
+    raise RuntimeError(f"the font package has no {prefix} member")
+
+
+def provision_fonts(output):
+    fonts = output / "fonts"
+    fonts.mkdir(exist_ok=True)
+    package = output / "fonts-liberation.deb"
+    if not package.exists():
+        partial = package.with_suffix(".part")
+        urllib.request.urlretrieve(FONT_PACKAGE, partial)
+        partial.replace(package)
+    data = package.read_bytes()
+    if hashlib.sha256(data).hexdigest() != FONT_PACKAGE_SHA256:
+        raise RuntimeError("font package checksum differs; delete it to download it again")
+    name, payload = ar_member(data, "data.tar")
+    tarball = output / name
+    tarball.write_bytes(payload)
+    subprocess.run(["tar", "-xf", tarball, "-C", fonts, "--strip-components=6", "--wildcards", "*/Liberation*-Regular.ttf"], check=True)
+    tarball.unlink()
+    for font, digest in FONTS.items():
+        if hashlib.sha256((fonts / font).read_bytes()).hexdigest() != digest:
+            raise RuntimeError(f"font checksum differs: {font}")
+    return fonts
+
+
+def provision_skia(output, jobs):
+    source = output / "skia"
+    if not source.exists():
+        subprocess.run(["git", "init", "-q", source], check=True)
+        subprocess.run(["git", "-C", source, "fetch", "-q", "--depth=1", SKIA_REPOSITORY, SKIA_COMMIT], check=True)
+        subprocess.run(["git", "-C", source, "checkout", "-q", "FETCH_HEAD"], check=True)
+        subprocess.run([sys.executable, "tools/git-sync-deps"], cwd=source, check=True)
+    subprocess.run([sys.executable, "bin/fetch-gn"], cwd=source, check=True)
+    subprocess.run([sys.executable, "bin/fetch-ninja"], cwd=source, check=True)
+    build = output / "cpu-fonts"
+    build.mkdir(exist_ok=True)
+    (build / "args.gn").write_text(SKIA_ARGUMENTS)
+    subprocess.run([source / "bin/gn", "gen", build], cwd=source, check=True)
+    subprocess.run([source / "third_party/ninja/ninja", "-C", build, f"-j{jobs}", "skia"], check=True)
+    return source, build / "libskia.a"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build the selected ReactOS guest text-layout component")
+    parser = argparse.ArgumentParser(description="Provide the pinned Liberation fonts and the CPU build of Skia that text in guest windows needs")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--fonts-only", action="store_true", help="only the fonts, as Skia takes a long time to build")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    source = Path(__file__).resolve().parents[1] / "native/upstream/reactos-text"
-    provenance = json.loads((source / "provenance.json").read_text())
-    for name, digest in provenance["local_files"].items():
-        if hashlib.sha256((source / name).read_bytes()).hexdigest() != digest:
-            raise RuntimeError(f"selected text source checksum differs: {name}")
-    env = dict(os.environ, TMPDIR=str(output), TMP=str(output), TEMP=str(output))
-    commands = []
-
-    def run(command):
-        result = subprocess.run(command, env=env, capture_output=True, text=True)
-        commands.append(dict(command=command, returncode=result.returncode, stdout=result.stdout, stderr=result.stderr))
-        (output / "commands.json").write_text(json.dumps(commands, indent=2) + "\n")
-        if result.returncode:
-            raise RuntimeError(result.stderr or result.stdout)
-        return result.stdout
-
-    patched = output / "text.c"
-    run(["patch", "--batch", "--output", str(patched), str(source / "reactos-rtl-text.c"), str(source / "failure-propagation.patch")])
-    worker = output / "layout.c"
-    run(["patch", "--batch", "--output", str(worker), str(patched), str(source / "layout-contracts.patch")])
-    mark_modified(worker)
-    patched.unlink()
-    component = output / "raven-text.dll"
-    run(["x86_64-w64-mingw32-gcc", "-O2", "-DNDEBUG", "-D__REACTOS__", "-D_CRTBLD",
-         "-ffunction-sections", "-fdata-sections", "-fno-builtin", "-shared", "-nostdlib",
-         "-Wl,--entry,0,--image-base,0x1db000000,--gc-sections,--no-insert-timestamp,--out-implib," + str(output / "raven-text.a"),
-         "-I" + str(source), str(worker), *[str(source / n) for n in
-         ("wrapper.c", "memcpy.c", "memmove.c", "wcslen.c", "wcschr.c", "wcsrchr.c")],
-         "-o", str(component), "-luser32", "-lgdi32", "-lkernel32", "-lgcc"])
-    imports = run(["x86_64-w64-mingw32-objdump", "-p", str(component)])
-    (output / "imports.txt").write_text(imports)
-    provenance.update(component_sha256=hashlib.sha256(component.read_bytes()).hexdigest(),
-                      patched_sha256=hashlib.sha256(worker.read_bytes()).hexdigest())
-    (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
-    print(component)
+    for tool in ("tar", "git", "clang", "clang++"):
+        if not shutil.which(tool):
+            raise RuntimeError(f"required tool is missing: {tool}")
+    fonts = provision_fonts(output)
+    if args.fonts_only:
+        print(f"configure Raven with -DRAVEN_FONT_DIRECTORY={fonts}")
+        return
+    source, library = provision_skia(output, args.jobs)
+    print(f"configure Raven with -DRAVEN_SKIA_SOURCE={source} -DRAVEN_SKIA_LIBRARY={library} -DRAVEN_FONT_DIRECTORY={fonts}")
 
 
 if __name__ == "__main__":
+    os.umask(0o022)
     main()

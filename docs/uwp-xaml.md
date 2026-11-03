@@ -938,7 +938,7 @@ built for both.
 
 #### Application ABI and activation (started 2026-10-28)
 
-`scripts/generate-winrt-header.py` reads a winmd and emits the C declarations an
+`scripts/generate-xaml-header.py` reads a winmd and emits the C declarations an
 interface needs: the IID from the `Guid` attribute, the vtable in metadata order
 after the IInspectable methods, and one slot per method. The ABI slot count is
 the declared parameter count plus one when the logical return type is not void
@@ -948,7 +948,7 @@ the order stays unchanged. It requires `dnfile`:
 
 ```sh
 python3 -m pip install --target /tmp/winmd-lib dnfile
-PYTHONPATH=/tmp/winmd-lib python3 scripts/generate-winrt-header.py \
+PYTHONPATH=/tmp/winmd-lib python3 scripts/generate-xaml-header.py \
   --winmd /path/to/WinMetadata/Windows.UI.Xaml.winmd --namespace Windows.UI.Xaml \
   --types IApplication,IApplication2,IApplication3,IApplicationStatics,IApplicationFactory \
   --out native/upstream/raven-xaml/windows_ui_xaml_application.h
@@ -1092,7 +1092,7 @@ and that is the wall the runtime now reaches.
 Application-defined XAML types now resolve the way a real application provides them.
 
 - `windows_ui_xaml_markup.h` is generated from the same winmd
-  (`scripts/generate-winrt-header.py`, types `IXamlMetadataProvider`,
+  (`scripts/generate-xaml-header.py`, types `IXamlMetadataProvider`,
   `IXamlType`, `IXamlType2`, `IXamlMember`). The metadata declares
   `IXamlMetadataProvider` with `GetXamlType` twice — the first overload takes
   the interop `TypeName`, the second (emitted as `GetXamlType2`) takes the full
@@ -1958,7 +1958,7 @@ remain passing after the trial implementation was removed.
    Shapr3D.~~ Done: the hook is implemented and the runtime now continues past
    the optional component's absence.
 2. ~~WinRT header generation from `Windows.UI.Xaml.winmd` for `IApplication`.~~
-   Done: `scripts/generate-winrt-header.py`, the generated header,
+   Done: `scripts/generate-xaml-header.py`, the generated header,
    `Windows.UI.Xaml.Application` activation and the two x64/x86 tests.
 3. ~~Register `Windows.ApplicationModel.Resources.Core.ResourceContext` and
    `Windows.System.MemoryManager` with tests.~~ Done.

@@ -59,14 +59,15 @@ static std::vector<uint8_t> read_host_file(const std::filesystem::path &path)
 	return bytes;
 }
 
-// Additional kernel exports absent from the import libraries used to generate the public lists.
-static constexpr std::array<std::string_view, 52> names{
+// Additional kernel exports absent from the import libraries used to generate the public lists; the PathCch functions
+// live in kernelbase.dll on Windows and are not in the import libraries the public lists come from.
+static constexpr std::array<std::string_view, 53> names{
 	"CloseHandle","CreateEventA","CreateEventW","EnumDynamicTimeZoneInformation","ExitProcess",
 	"FindResourceA", "FindResourceExA", "FindResourceExW", "FindResourceW", "FreeLibrary",
 	"GetACP", "GetCommandLineA", "GetCommandLineW", "GetCurrentProcessId", "GetCurrentThreadId", "GetDynamicTimeZoneInformationEffectiveYears", "GetFileType", "GetLastError", "GetModuleHandleA",
 	"GetModuleHandleW", "GetProcAddress", "GetProcessHeap", "GetStartupInfoA", "GetStartupInfoW", "GetStdHandle", "HeapAlloc", "HeapCreate", "HeapDestroy", "HeapFree", "HeapReAlloc", "HeapSize",
 	"LoadLibraryA", "LoadLibraryW", "LoadResource",
-	"LockResource", "MultiByteToWideChar", "PathCchCanonicalize", "PathCchCanonicalizeEx", "PathCchCombineEx", "PathCchSkipRoot", "RaiseException", "ResetEvent", "SetEvent", "SetLastError", "SizeofResource",
+	"LockResource", "MultiByteToWideChar", "PathCchCanonicalize", "PathCchCanonicalizeEx", "PathCchCombineEx", "PathCchRemoveFileSpec", "PathCchSkipRoot", "RaiseException", "ResetEvent", "SetEvent", "SetLastError", "SizeofResource",
 	"VirtualAlloc", "VirtualAllocFromApp", "VirtualFree", "VirtualProtect", "VirtualQuery", "WaitForSingleObject", "WriteFile"
 };
 
@@ -518,13 +519,13 @@ static const std::vector<uint8_t> &screen_device_caps_prelude()
 {
 	// mov r10,[pointer]; test r10,r10; jz slow; test rcx,rcx; jz slow; cmp edx,127; ja slow; the screen's context answers from the
 	// caps table; another context answers when the attribute table holds its slot (see dc_text_color_prelude) and the index does not
-	// depend on its bitmap: TECHNOLOGY from the slot's window flag (display for a window's context, 0 for a memory one), LOGPIXELSX and
-	// LOGPIXELSY 96, PLANES 1, SHADEBLENDCAPS 0, as device_caps answers them; anything else: jmp breakpoint. GDI+ asks these thousands of
-	// times while it paints.
+	// depend on its bitmap: TECHNOLOGY 1 (DT_RASDISPLAY, a memory context's too), LOGPIXELSX and LOGPIXELSY 96, PLANES 1, SHADEBLENDCAPS
+	// 0, as device_caps answers them; anything else: jmp breakpoint. GDI+ asks these thousands of times while it paints. The slot's
+	// window flag that TECHNOLOGY once read is left unreached (mov eax,[rax+0x18]; ret).
 	static const std::vector<uint8_t> code{
 		0x4c, 0x8b, 0x15, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x85, 0xd2, 0x74, 0x6f, 0x48, 0x85, 0xc9, 0x74, 0x6a, 0x83, 0xfa, 0x7f, 0x77, 0x65, 0x49, 0x3b,
 		0x8a, 0x00, 0x06, 0x00, 0x00, 0x74, 0x51, 0x4d, 0x8b, 0x9a, 0x48, 0x07, 0x00, 0x00, 0x4d, 0x85, 0xdb, 0x74, 0x50, 0x89, 0xc8, 0x25, 0xff, 0x03,
-		0x00, 0x00, 0xc1, 0xe0, 0x05, 0x49, 0x8d, 0x84, 0x03, 0x00, 0x10, 0x00, 0x00, 0x48, 0x3b, 0x08, 0x75, 0x39, 0x83, 0xfa, 0x02, 0x74, 0x16, 0x83,
+		0x00, 0x00, 0xc1, 0xe0, 0x05, 0x49, 0x8d, 0x84, 0x03, 0x00, 0x10, 0x00, 0x00, 0x48, 0x3b, 0x08, 0x75, 0x39, 0x83, 0xfa, 0x02, 0x74, 0x20, 0x83,
 		0xfa, 0x58, 0x74, 0x15, 0x83, 0xfa, 0x5a, 0x74, 0x10, 0x83, 0xfa, 0x0e, 0x74, 0x11, 0x83, 0xfa, 0x78, 0x74, 0x12, 0xeb, 0x1e, 0x8b, 0x40, 0x18,
 		0xc3, 0xb8, 0x60, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x31, 0xc0, 0xc3, 0x89, 0xd0, 0x41, 0x8b, 0x84, 0x82, 0x00, 0x04,
 		0x00, 0x00, 0xc3, 0xe9, 0x00, 0x00, 0x00, 0x00};
@@ -1175,7 +1176,7 @@ static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view
 		image[rva] == 0x4c && image[rva + 1] == 0x8b && image[rva + 2] == 0xd1 && image[rva + 3] == 0xb8)
 		return rva;
 	// A plain provider has no guest-side prelude in front of its trap.
-	if (rva < image.size() && (image[rva] == 0xcc || (module == "user32.dll" && image[rva] == 0x90)))
+	if (rva < image.size() && (image[rva] == 0xcc || (image[rva] == 0x90 && size_t(rva) + 15 < image.size() && image[rva + 14] == 0xcc)))
 		return rva;
 	if (const auto *prelude = block_prelude(module, name)) {
 		int32_t relative = 0;
@@ -1216,7 +1217,11 @@ uint64_t api_trap_address(const PEModule &provider, std::string_view module, std
 	const auto image = provider.loaded.data();
 	if (address < image.size() && image[address] == 0xcc)
 		return provider.loaded.base() + address;
-	return provider.loaded.base() + served_stub_rva(image, module, name, address) + fast_stub_trap_offset(module, name);
+	const uint32_t stub = served_stub_rva(image, module, name, address);
+	// A plain x64 slot keeps its breakpoint past the space hooking libraries overwrite.
+	if (!served_api(module, name) && size_t(stub) + 15 < image.size() && image[stub] == 0x90 && image[stub + 14] == 0xcc)
+		return provider.loaded.base() + stub + 14;
+	return provider.loaded.base() + stub + fast_stub_trap_offset(module, name);
 }
 
 // Offset of the slow-path breakpoint inside a fast or served stub.
@@ -1392,8 +1397,8 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 		const uint32_t service = x86 ? 0 : nt_service_number(name, exports[index]);
 		bytes[code] = 0xcc;
 		bytes[code + 1] = 0xc3;
-		// UI hooks copy an x64 entry preamble into a trampoline; keep the breakpoint beyond their 14-byte jump space.
-		if (!x86 && name == "user32.dll") {
+		// Hooking libraries copy an x64 entry preamble into a trampoline; keep the breakpoint beyond their 14-byte jump space.
+		if (!x86 && (fast_paths || name == "user32.dll")) {
 			std::fill_n(bytes.begin() + ptrdiff_t(code), 14, 0x90);
 			bytes[code + 14] = 0xcc;
 			bytes[code + 15] = 0xc3;
@@ -1529,9 +1534,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		!std::any_of(modules.all().begin(), modules.all().end(), [&](const auto &item) { return item.second.get() == &entry; }))
 		throw std::runtime_error("native process requires an executable graph and positive timeout");
 	for (const auto &[name,module]:modules.all()) validate_native_image(module->image,name);
+	// The system libraries are the runtime's, except those a copy in the program's folder may replace: those are looked for there first.
 	std::vector<std::string_view> native_modules{"kernel32.dll","kernelbase.dll","user32.dll","gdi32.dll","comctl32.dll","ntdll.dll"};
 	for (const auto library : system_library_names())
-		if (std::find(native_modules.begin(), native_modules.end(), library) == native_modules.end())
+		if (!program_may_replace(library) && std::find(native_modules.begin(), native_modules.end(), library) == native_modules.end())
 			native_modules.push_back(library);
 #ifdef RAVEN_OPENGL
 	// The bridge is the program's OpenGL unless the program brings its own opengl32.dll and the bridge was not asked for.
@@ -1575,6 +1581,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		"NtWriteFile", "NtQueryDirectoryFile", "ZwQueryDirectoryFile", "RtlNtStatusToDosError", "NtQueryObject", "NtMapViewOfSection", "NtUnmapViewOfSection",
 		"RtlAcquireSRWLockExclusive", "RtlAcquireSRWLockShared", "RtlWakeConditionVariable", "RtlWakeAllConditionVariable", "RtlWaitOnAddress",
 		"RtlWakeAddressSingle", "RtlWakeAddressAll",
+		// The processor a thread runs on.
+		"NtGetCurrentProcessorNumber", "NtGetCurrentProcessorNumberEx", "RtlGetCurrentProcessorNumber", "RtlGetCurrentProcessorNumberEx",
+		// The C runtime string functions ntdll exports.
+		"strlen", "strcmp", "strncmp",
+		// Cancelling one pending operation, which mio uses for its AFD polls.
+		"NtCancelIoFileEx",
+		// Opening files by their native names, which Rust's standard library and mio look up at run time.
+		"NtCreateFile", "NtOpenFile",
 		// What the runtime's own components import from ntdll, which they need whether a program loads them at start or later.
 		"DbgPrint", "NtCancelIoFile", "NtCreateSection", "NtFsControlFile", "NtReadFile", "RtlCreateUnicodeStringFromAsciiz", "RtlFreeHeap",
 		"RtlFreeUnicodeString", "RtlDllShutdownInProgress", "RtlGetVersion", "RtlIpv6AddressToStringExW", "RtlIpv6StringToAddressW", "RtlLengthSid", "RtlUnicodeToMultiByteN",
@@ -1610,6 +1624,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	for (const auto library : system_library_names())
 		if (std::find(system_modules.begin(), system_modules.end(), library) == system_modules.end())
 			system_modules.emplace_back(library);
+	ProgramLibraries program_libraries;
+	if (launch)
+		program_libraries = ProgramLibraries(launch->image_path, true);
 	// A number with no name known for it still gets an export, so a program that imports by that number binds, and the call it ends in names the number.
 	std::map<std::string, std::vector<std::pair<std::string_view, uint16_t>>> unknown_ordinals;
 	std::map<std::string, std::vector<std::string>> unknown_names;
@@ -1670,16 +1687,27 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			ordinals.insert(ordinals.end(), extra->second.begin(), extra->second.end());
 		PEModule *provider = nullptr;
 		const auto found = modules.all().find(name);
-		if (found != modules.all().end()) {
-			if (!found->second->runtime_api)
-				continue;
+		if (found != modules.all().end() && found->second->runtime_api) {
 			provider = found->second.get();
+		} else if (found != modules.all().end()) {
+			if (!program_may_replace(name))
+				continue;
+			const auto fallback = "system32-" + name;
+			if (!modules.all().contains(fallback)) {
+				const auto bytes = runtime_provider(name, 0x180000000ULL, symbols, false, {}, ordinals, guest_paths());
+				const auto base = provider_base(modules, PEImage(bytes).image_size);
+				provider = &modules.add(fallback, runtime_provider(name, base, symbols, false, {}, ordinals, guest_paths()), base);
+				provider->runtime_api = true;
+			}
 		} else {
+			const auto provider_key = program_libraries.contains(name) ? "system32-" + name : name;
 			const auto bytes = runtime_provider(name, 0x180000000ULL, symbols, false, {}, ordinals, guest_paths());
 			const auto base = provider_base(modules, PEImage(bytes).image_size);
-			provider = &modules.add(name, runtime_provider(name, base, symbols, false, {}, ordinals, guest_paths()), base);
+			provider = &modules.add(provider_key, runtime_provider(name, base, symbols, false, {}, ordinals, guest_paths()), base);
 			provider->runtime_api = true;
 		}
+		if (!provider)
+			continue;
 		// A guest component that implements part of a system library receives those calls directly instead of through a trap.
 		if (provider->runtime_api) {
 			struct Overlay { const char *library, *component, *prefix; };
@@ -1689,19 +1717,20 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				{"shlwapi.dll", "raven-shell.dll", "raven-shell."}, {"setupapi.dll", "raven-setupapi.dll", "raven-setupapi."},
 				{"ole32.dll", "raven-storage.dll", "raven-storage."}, {"combase.dll", "raven-shell.dll", "raven-shell."},
 				{"uiautomationcore.dll", "raven-shell.dll", "raven-shell."}, {"runtimeobject.dll", "raven-shell.dll", "raven-shell."},
+				{"api-ms-win-core-winrt-l1-1-0.dll", "raven-shell.dll", "raven-shell."},
 				// The heap, critical sections and the free paths of SRW locks and condition variables run in the guest RTL.
 				{"kernel32.dll", "raven-rtl.dll", "raven-rtl."}, {"kernelbase.dll", "raven-rtl.dll", "raven-rtl."},
-				// The generic AVL tables of ntdll; its heap stays with the host, which calls the guest RTL itself.
+				// The generic AVL tables and critical sections of ntdll; its heap stays with the host, which calls the guest RTL itself.
 				{"ntdll.dll", "raven-rtl.dll", "raven-rtl."}};
 			for (const auto &overlay_rule : overlays) {
 				if (name != overlay_rule.library)
 					continue;
-				const bool tables_only = name == "ntdll.dll";
+				const bool nt_only = name == "ntdll.dll";
 				const auto overlay = modules.all().find(overlay_rule.component);
 				if (overlay == modules.all().end() || overlay->second->runtime_api)
 					continue;
 				for (auto &symbol : provider->exports)
-					if (!symbol.names.empty() && (!tables_only || symbol.names.at(0).find("GenericTable") != std::string::npos) && std::any_of(overlay->second->exports.begin(), overlay->second->exports.end(), [&](const auto &candidate) {
+					if (!symbol.names.empty() && (!nt_only || symbol.names.at(0).find("GenericTable") != std::string::npos || symbol.names.at(0).find("CriticalSection") != std::string::npos) && std::any_of(overlay->second->exports.begin(), overlay->second->exports.end(), [&](const auto &candidate) {
 							return candidate.forwarder.empty() && std::find(candidate.names.begin(), candidate.names.end(), symbol.names.at(0)) != candidate.names.end();
 						}))
 						symbol.forwarder = overlay_rule.prefix + symbol.names.at(0);
@@ -1791,6 +1820,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	for (const auto &[address, name] : traps)
 		process.add_api_trap(address);
 	NativeEnvironment environment(process, entry.loaded.base(), uint32_t(::getpid()), 1);
+	const bool has_launch = launch.has_value();
 	if (!launch) {
 		NativeLaunch initial;
 		for (const char byte : entry.name) {
@@ -1813,6 +1843,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (launch->standard_fds[i]<0) continue;
 		const auto inherited=kernel_objects.inherit_file(launch->standard_fds[i]);
 		if (inherited.status) throw std::runtime_error("cannot inherit native standard file");
+		// The standard handles came from the creator by inheritance, so they are inheritable, as programs that pass them on in a
+		// handle list (PROC_THREAD_ATTRIBUTE_HANDLE_LIST) require.
+		kernel_objects.set_inherit(inherited.value,true);
 		standard_handles[i]=inherited.value;
 	}
 	environment.prepare_parameters(*launch,standard_handles);
@@ -1847,7 +1880,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	desktop.set_updated([&](uint64_t window) { windows.drawing(window); });
 #ifdef RAVEN_VULKAN
 	VulkanBridge vulkan(process, modules);
-	vulkan.set_surface_source({[&windows](uint64_t window) { return windows.host_surface(window); },
+	vulkan.set_surface_source({[&windows](uint64_t window) { return windows.host_surface(window,true); },
 		[&windows](uint64_t window) { windows.release_host_surface(window); },
 		[&windows](uint64_t window) { return windows.client_size(window); }, windows.host_platform()});
 #endif
@@ -1952,7 +1985,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			if (!service_name && found == traps.end())
 				return result;
 			const auto &api_name = service_name ? *service_name : found->second;
-			if (api_name == "ExitProcess") {
+			// ntdll's RtlExitUserProcess is the ExitProcess of programs that do without kernel32.
+			if (api_name == "ExitProcess" || api_name == "RtlExitUserProcess") {
 				const auto code=uint32_t(process.api_arguments(1)[0]);
 				process.abandon_call();
 				throw ProcessExit{code,result.instruction};
@@ -1986,6 +2020,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						std::cerr << " from " << module_name << '+' << std::hex << caller - module->loaded.base() << std::dec;
 				if (std::getenv("RAVEN_TRACE_STACK") && kernel_ptr && kernel_ptr->describe_stack)
 					std::cerr << " stack:" << kernel_ptr->describe_stack();
+				if (threads_ptr)
+					std::cerr << " on thread " << threads_ptr->current_id();
 				std::cerr << '\n';
 			}
 			if (const char *spec = std::getenv("RAVEN_STEP")) {
@@ -1994,6 +2030,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				const std::string text(spec);
 				const auto first = text.find(':'), second = text.find(':', first + 1);
 				if (first != text.npos && second != text.npos && api_name == text.substr(0, first) &&
+					(!trace_program || equal_fold(from_utf8(entry.name), from_utf8(trace_program))) &&
 					++seen[api_name] == std::stoi(text.substr(first + 1, second - first - 1)))
 					process.trace_instructions(size_t(std::stoul(text.substr(second + 1))), [&modules, &process](uint64_t rip) {
 						std::cerr << "step";
@@ -2099,6 +2136,19 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					} catch (...) {}
 					std::cerr << " name=" << text;
 				}
+				// A failed lookup says which export of which library was missing.
+				if (api_name == "GetProcAddress" && failure_arguments.size() > 1) {
+					for (const auto &[module_name, module] : modules.all())
+						if (module->loaded.base() == failure_arguments[0]) std::cerr << " module=" << module_name;
+					if (failure_arguments[1] > 0xffff) {
+						std::string text;
+						try {
+							const auto raw = process.read_memory(failure_arguments[1], 96);
+							for (size_t i = 0; i < raw.size() && raw[i]; ++i) text.push_back(char(raw[i]));
+						} catch (...) {}
+						std::cerr << " name=" << text;
+					}
+				}
 
 				for (const auto &[module_name, module] : modules.all()) {
 					const auto stack = process.read_memory(process.context().registers.rsp, 8);
@@ -2149,6 +2199,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	NativeThreads threads(process, environment, memory, &tls, deadline);
 	threads.set_runner(invoke);
 	module_api.set_call(invoke);
+	threads.default_stack_reserve = entry.image.stack_reserve;
 	threads_ptr = &threads;
 	// Other processes ask for handles of this one and send theirs; the scheduler answers them.
 	threads.add_service([&kernel_objects] { receive_handles(kernel_objects); });
@@ -2197,9 +2248,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				std::copy(bytes.begin(), bytes.end(), place);
 		}
 	} served_pointers;
-	for (const auto &[module_name, module] : modules.all()) {
+	for (const auto &[module_key, module] : modules.all()) {
 		if (!module->runtime_api)
 			continue;
+		const std::string_view module_name = module_key.starts_with("system32-") ? std::string_view(module_key).substr(9) : std::string_view(module_key);
 		for (const auto &symbol : module->exports) {
 			// The clock and the tick counts only read calibration; their pointers are safe while other threads run.
 			if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() &&
@@ -2242,22 +2294,26 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	}
 	// A thread inside a commit prelude must not lose the processor between taking a log slot and filling it: the prelude counts as a
 	// served stub for the scheduler, in two pieces as it is longer than one.
-	for (const auto &[module_name, module] : modules.all())
-		if (module->runtime_api)
+	for (const auto &[module_key, module] : modules.all())
+		if (module->runtime_api) {
+			const std::string_view module_name = module_key.starts_with("system32-") ? std::string_view(module_key).substr(9) : std::string_view(module_key);
 			for (const auto &symbol : module->exports)
 				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() && guest_commit_api(module_name, symbol.names.at(0)) &&
 					served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address)
 					for (const uint64_t piece : {uint64_t(0), uint64_t(served_trap)})
 						served_stubs.push_back(module->loaded.base() + symbol.address + piece);
+		}
 	// So must one between taking the screen context and reading which it is, or reading a window's record.
-	for (const auto &[module_name, module] : modules.all())
-		if (module->runtime_api)
+	for (const auto &[module_key, module] : modules.all())
+		if (module->runtime_api) {
+			const std::string_view module_name = module_key.starts_with("system32-") ? std::string_view(module_key).substr(9) : std::string_view(module_key);
 			for (const auto &symbol : module->exports)
 				if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() && (module_name == "user32.dll" || module_name == "ntdll.dll"))
 					if (const auto *prelude = block_prelude(module_name, symbol.names.at(0)); prelude && prelude != &screen_release_dc_prelude() &&
 						served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address)
 						for (uint64_t piece = 0; piece < prelude->size(); piece += served_stub_size)
 							served_stubs.push_back(module->loaded.base() + symbol.address + piece);
+		}
 	memory.set_commit_block(served_block);
 	windows.set_screen_block(served_block);
 	static_assert(focus_published == NativeWindows::focus_published && focus_window == NativeWindows::focus_window,
@@ -2394,11 +2450,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	register_bcrypt_api(api_registry, kernel);
 	register_process_info_api(api_registry, kernel);
 	register_font_service(api_registry, kernel);
+	register_shader_service(api_registry, kernel);
 	register_canvas_service(api_registry, kernel);
 	register_sync_api(api_registry, kernel);
 	register_thread_api(api_registry, kernel);
 	NativeObjectAPI::register_served(api_registry, kernel.objects);
 	register_text_api(api_registry, kernel);
+	register_console_api(api_registry, kernel);
 	register_memory_api(api_registry, kernel);
 	register_file_api(api_registry, kernel);
 	register_shlwapi_api(api_registry, kernel);
@@ -2440,7 +2498,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (tls_result.stop != NativeStop::returned)
 			return tls_result;
 		const uint64_t arguments[] = {module.loaded.base(), 0, reserved};
-		if ((module.image.characteristics & 0x2000) && module.image.entry) {
+		if ((module.image.characteristics & 0x2000) && module.image.entry && !module.image.il_only()) {
 			const auto result = invoke(module.loaded.base() + module.image.entry, arguments);
 			if (result.stop != NativeStop::returned)
 				return result;
@@ -2482,6 +2540,31 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		else if (found->second != UINT64_MAX)
 			++found->second;
 	};
+	// A library named by its path is in the process when the module of that file name came from that file. The libraries Raven
+	// serves itself live in the system folder, where GetModuleFileName reports them.
+	module_api.set_path_lookup([&](const std::string &name) -> uint64_t {
+		const auto slash = name.find_last_of("/\\");
+		auto identity = name.substr(slash == name.npos ? 0 : slash + 1);
+		for (auto &character : identity)
+			if (character >= 'A' && character <= 'Z')
+				character = static_cast<char>(character + ('a' - 'A'));
+		if (identity.find('.') == identity.npos)
+			identity += ".dll";
+		const auto found = modules.all().find(identity);
+		if (found == modules.all().end())
+			return 0;
+		const auto requested = paths.resolve(from_utf8(name));
+		if (!requested)
+			return 0;
+		std::error_code error;
+		const auto explicit_file = explicit_files.find(identity);
+		const auto file = explicit_file != explicit_files.end() ? explicit_file->second : found->second->file;
+		if (!file.empty())
+			return std::filesystem::equivalent(requested->host, file, error) ? found->second->loaded.base() : 0;
+		const auto system = paths.resolve(u"C:\\Windows\\System32\\" + from_utf8(identity));
+		return system && requested->host == system->host ? found->second->loaded.base() : 0;
+	});
+	kernel.module_named = [&](uint64_t address, bool wide) { return module_api.module_handle(address, wide); };
 	module_api.set_loader([&](std::string name) -> uint64_t {
 		await_loader();
 		// DONT_RESOLVE_DLL_REFERENCES maps the library alone: its imports are not followed and it is not started, so even an image of
@@ -2510,20 +2593,27 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				identity += ".dll";
 			// A library named by its path in the system directory is looked for as by its name, as Windows finds its own there.
 			auto folder = slash == name.npos ? std::string() : name.substr(0, slash);
-			for (auto &character : folder)
-				if (character >= 'A' && character <= 'Z')
+			for (auto &character : folder) {
+				if (character == '/')
+					character = '\\';
+				else if (character >= 'A' && character <= 'Z')
 					character = static_cast<char>(character + ('a' - 'A'));
-			const bool system_folder = folder == "c:\\windows\\system32" || folder == "c:\\windows\\syswow64";
-			if (!system_folder && !modules.all().contains(identity) && !apiset_host(identity).empty() == false) {
-				const auto resolved = paths.resolve(from_utf8(name));
-				if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host)) {
-					environment.set_last_error(126);
-					return 0;
-				}
-				// The file named now is the one to load, even where a library of the same name came from another folder before.
-				explicit_files.insert_or_assign(identity, resolved->host);
 			}
-			name = identity;
+			const bool system_folder = folder == "c:\\windows\\system32" || folder == "c:\\windows\\syswow64";
+			if (system_folder && modules.all().contains("system32-" + identity)) {
+				name = "system32-" + identity;
+			} else {
+				if (!system_folder && (program_may_replace(identity) || !modules.all().contains(identity)) && apiset_host(identity).empty()) {
+					const auto resolved = paths.resolve(from_utf8(name));
+					if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host)) {
+						environment.set_last_error(126);
+						return 0;
+					}
+					// The file named now is the one to load, even where a library of the same name came from another folder before.
+					explicit_files.insert_or_assign(identity, resolved->host);
+				}
+				name = identity;
+			}
 		}
 		for (auto &character : name) {
 			if (static_cast<unsigned char>(character) > 127) {
@@ -2539,6 +2629,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			name += ".dll";
 		if (const auto host = apiset_host(name); !host.empty())
 			name = host;
+		if ((flags & 0x1f00) == 0x800 && modules.all().contains("system32-" + name))
+			name = "system32-" + name;
 		const auto existing = modules.all().find(name);
 		// Other threads waited above, so a load already under way is this thread's own: a library starting up loads another, as
 		// Windows lets it. A library that is in the process already, even one the outer load has not started yet, is handed back.
@@ -2608,16 +2700,31 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			} else {
 				const auto system_names = system_library_names();
 				const bool system = std::find(system_names.begin(), system_names.end(), identity) != system_names.end();
-				if (!system && !activation_contexts().library_folder(identity)) {
+				if ((!system || (has_launch && program_may_replace(identity))) && !activation_contexts().library_folder(identity)) {
 					if (const auto found = paths.find_library(launch->image_path, from_utf8(identity), true, flags)) {
-						bytes = ModuleBytes::map(found->host);
-						origin = found->host;
-					} else if (flags & 0x1f00) {
+						bool system_copy = false;
+						if (system) {
+							auto dos_path = to_utf8(paths.dos(found->host));
+							for (auto &character : dos_path)
+								if (character >= 'A' && character <= 'Z')
+									character = static_cast<char>(character + ('a' - 'A'));
+							system_copy = dos_path.starts_with("c:\\windows\\system32\\") || dos_path.starts_with("c:\\windows\\syswow64\\");
+						}
+						if (!system_copy) {
+							bytes = ModuleBytes::map(found->host);
+							origin = found->host;
+						}
+					// A search of the system directory also finds what the runtime provides as part of it, DirectWrite among them.
+					} else if ((flags & 0x1f00) && !(flags & 0x800) && !system) {
 						throw LoadFailure{126};
 					}
 				}
-				if (!bytes)
+				if (!bytes && !(system && (flags & 0x1f00)))
 					if (auto read = source(identity)) bytes.emplace(std::move(*read));
+				if (!bytes && system) {
+					if (const auto fallback = modules.all().find("system32-" + identity); fallback != modules.all().end())
+						return *fallback->second;
+				}
 			}
 			// A library loaded by path finds its dependencies in its own directory, as LOAD_WITH_ALTERED_SEARCH_PATH and a DLL directory
 			// set to that folder do on Windows; programs that unpack themselves to a temporary folder rely on it.
@@ -2648,15 +2755,30 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			} catch (const std::runtime_error &) {
 				throw LoadFailure{193};
 			}
+			const bool only_mapped = unresolved && staged.empty();
+			// 64-bit Windows loads a library of managed code alone built for any CPU in its 64-bit form: the header is widened as for such
+			// a program, and the runtime that asked for it runs its code.
+			bool widened = false;
+			if (!parsed->is_64 && parsed->il_only() && !only_mapped && !as_data) {
+				const std::span<const uint8_t> view = *bytes;
+				std::vector<uint8_t> copy(view.begin(), view.end());
+				if (widen_il_only_image(copy)) {
+					bytes.emplace(std::move(copy));
+					parsed.emplace(*bytes);
+					widened = true;
+				}
+			}
 			// Reject unsupported initialization before publishing an image.
 			const PEImage &image = *parsed;
-			const bool only_mapped = unresolved && staged.empty();
 			// An image of the other width maps only as data, or when it holds managed code alone, as a 64-bit process maps the 32-bit form
 			// of a class library for the runtime; either stays apart from the libraries that run.
 			const bool apart = only_mapped && (as_data || (!image.is_64 && image.il_only()));
 			if (!image.is_64 && !apart)
 				throw LoadFailure{193};
-			if (!(image.characteristics & 0x2000) && !only_mapped)
+			// An image with no entry point maps and binds as a library even when it is not one, as the runtime loads a precompiled
+			// assembly built as a program: there is nothing of it to run.
+			const bool inert = image.is_64 && (!image.entry || widened);
+			if (!(image.characteristics & 0x2000) && !only_mapped && !inert)
 				throw LoadFailure{120};
 			if ((image.directories[13].address || image.directories[13].size) && !only_mapped)
 				for (const auto &descriptor : image.delay_imports())
@@ -2664,7 +2786,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						throw LoadFailure{120};
 			// Mixed managed and native code starts through its entry point like any library, which hands it to the runtime; an image
 			// of managed code alone is the runtime's to map, unless it is only mapped.
-			if (image.il_only() && !(unresolved && staged.empty()))
+			if (image.il_only() && !only_mapped && !inert)
 				throw LoadFailure{120};
 			staged.reserve(staged.size() + 1);
 			// A library read as data takes a name of its own, so that nothing loaded later resolves imports through it.
@@ -2762,7 +2884,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				if (unresolved && module == &root)
 					continue;
 				checked(notify_tls(*module, 1));
-				if (module->image.entry) {
+				// Managed code alone has no native entry to start: its entry is the runtime's.
+				if (module->image.entry && !module->image.il_only()) {
 					const uint64_t arguments[] = {module->loaded.base(), 1, 0};
 					const auto context = entry_contexts.find(module);
 					const auto thread = threads.current_id();
@@ -2849,7 +2972,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		const auto notify = [&](const PEModule &module) {
 			if (const auto stopped = notify_tls(module, reason); stopped.stop != NativeStop::returned)
 				throw stopped;
-			if ((module.image.characteristics & 0x2000) && module.image.entry && !module.runtime_api) {
+			if ((module.image.characteristics & 0x2000) && module.image.entry && !module.runtime_api && !module.image.il_only()) {
 				const uint64_t arguments[] = {module.loaded.base(), reason, 0};
 				const auto result = invoke(module.loaded.base() + module.image.entry, arguments);
 				if (result.stop != NativeStop::returned)
@@ -2908,7 +3031,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			const auto tls_result = notify_tls(*module, 1);
 			if (tls_result.stop != NativeStop::returned)
 				return tls_result;
-			if (!(module->image.characteristics & 0x2000) || !module->image.entry) {
+			if (!(module->image.characteristics & 0x2000) || !module->image.entry || module->image.il_only()) {
 				attached.push_back(module);
 				continue;
 			}

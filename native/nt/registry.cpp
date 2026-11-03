@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <fstream>
+#include <initializer_list>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace raven {
@@ -128,8 +130,9 @@ NativeRegistry::NativeRegistry(std::filesystem::path file) : file(std::move(file
 // hosts, meta host and strong names in mscoree, which programs and the Framework's own libraries create through COM, and the Task
 // Scheduler, which installers use to start a program once they finish, the accessibility annotation services of oleacc, which
 // programs create for their windows' controls, the MSXML 6.0 classes, which the XML component serves beside its own, the network list,
-// which programs ask whether they are online, and the package manager of the Windows Runtime. A hive that lacks them, a new one or one
-// made before they were registered, gets them.
+// which programs ask whether they are online, the package manager of the Windows Runtime, the factories of the packaging API, which
+// package managers read .appx and .msix packages with, and the background transfer manager of each BITS version, which bootstrappers
+// download through. A hive that lacks them, a new one or one made before they were registered, gets them.
 void NativeRegistry::register_runtime_classes()
 {
 	static constexpr std::pair<const char16_t *, const char16_t *> classes[] = {{u"{E5CB7A31-7512-11D2-89CE-0080C792E5D8}", u"mscoree.dll"},
@@ -141,7 +144,11 @@ void NativeRegistry::register_runtime_classes()
 		{u"{88D96A08-F192-11D4-A65F-0040963251E5}", u"msxml3.dll"}, {u"{88D96A0A-F192-11D4-A65F-0040963251E5}", u"msxml3.dll"},
 		{u"{88D96A0B-F192-11D4-A65F-0040963251E5}", u"msxml3.dll"}, {u"{88D96A0C-F192-11D4-A65F-0040963251E5}", u"msxml3.dll"},
 		{u"{88D96A0E-F192-11D4-A65F-0040963251E5}", u"msxml3.dll"}, {u"{88D96A0F-F192-11D4-A65F-0040963251E5}", u"msxml3.dll"},
-		{u"{88D96A11-F192-11D4-A65F-0040963251E5}", u"msxml3.dll"}, {u"{DCB00C01-570F-4A9B-8D69-199FDBA5723B}", u"raven-netlist.dll"}};
+		{u"{88D96A11-F192-11D4-A65F-0040963251E5}", u"msxml3.dll"}, {u"{DCB00C01-570F-4A9B-8D69-199FDBA5723B}", u"raven-netlist.dll"},
+		{u"{5842A140-FF9F-4166-8F5C-62F5B7B0C781}", u"raven-appx.dll"}, {u"{378E0446-5384-43B7-8877-E7DBDD883446}", u"raven-appx.dll"},
+		{u"{4991D34B-80A1-4291-83B6-3328366B9097}", u"raven-bits.dll"}, {u"{F087771F-D74F-4C1A-BB8A-E16ACA9124EA}", u"raven-bits.dll"},
+		{u"{6D18AD12-BDE3-4393-B311-099C346E6DF9}", u"raven-bits.dll"}, {u"{03CA98D6-FF5D-49B8-ABC6-03DD84127020}", u"raven-bits.dll"},
+		{u"{659CDEA7-489E-11D9-A9CD-000D56965251}", u"raven-bits.dll"}};
 	register_animation_classes();
 	const auto store = [&](uint64_t key, const char16_t *name, std::u16string_view value) {
 		std::vector<uint8_t> data;
@@ -165,6 +172,28 @@ void NativeRegistry::register_runtime_classes()
 			store(key, u"ThreadingModel", u"Both");
 			close(key);
 		}
+	// The transfer manager is a local service on Windows, which programs ask for as a local server: its classes name the service's
+	// application, and the application names the service, which tells COM to serve them in the process.
+	static constexpr const char16_t *bits_application = u"{69AD4AEE-51BE-439B-A92C-86AE490E8B30}";
+	const std::u16string application = std::u16string(u"AppID\\") + bits_application;
+	if (!keys.contains(fold(u"HKEY_CLASSES_ROOT\\" + application))) {
+		for (const bool wow : {false, true})
+			for (const auto &[clsid, library] : classes) {
+				uint64_t key = 0;
+				uint32_t disposition = 0;
+				if (std::u16string_view(library) != u"raven-bits.dll" ||
+					create(0x80000000ULL, std::u16string(wow ? u"Wow6432Node\\CLSID\\" : u"CLSID\\") + clsid, key, disposition))
+					continue;
+				store(key, u"AppID", bits_application);
+				close(key);
+			}
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		if (!create(0x80000000ULL, application, key, disposition)) {
+			store(key, u"LocalService", u"BITS");
+			close(key);
+		}
+	}
 	// Scripts create the scheduler, and programs the MSXML 6.0 classes, by name.
 	static constexpr std::pair<const char16_t *, const char16_t *> names[] = {{u"Schedule.Service", u"{0F87369F-A4E5-4CFC-BD3E-73E6154572DD}"},
 		{u"Msxml2.DOMDocument.6.0", u"{88D96A05-F192-11D4-A65F-0040963251E5}"}, {u"Msxml2.FreeThreadedDOMDocument.6.0", u"{88D96A06-F192-11D4-A65F-0040963251E5}"},
@@ -184,10 +213,20 @@ void NativeRegistry::register_runtime_classes()
 		}
 	}
 	// The Windows Runtime classes the runtime brings, in-process (activation type 0) and callable from any apartment (threading 0):
-	// installers ask the package manager whether a packaged version of what they install is present, and a XAML application starts
-	// from the Application class and the core window of its UI thread.
+	// installers ask the package manager whether a packaged version of what they install is present, Office asks the UI settings
+	// for the theme's colours and the text scale while it starts, along with the network, the device's profile, the system's accounts
+	// and the application model; programs ask the analytics information which Windows they run on and make HTTP requests to the URIs
+	// they go to; a XAML application starts from the Application class and the core window of its UI thread.
 	static constexpr std::pair<const char16_t *, const char16_t *> runtime_classes[] = {
 		{u"Windows.Management.Deployment.PackageManager", u"raven-deployment.dll"},
+		{u"Windows.UI.ViewManagement.UISettings", u"raven-uisettings.dll"},
+		{u"Windows.Globalization.Language", u"raven-twinapi.dll"},
+		{u"Windows.System.Profile.RetailInfo", u"raven-twinapi.dll"}, {u"Windows.System.Profile.SharedModeSettings", u"raven-twinapi.dll"},
+		{u"Windows.System.Profile.AnalyticsInfo", u"raven-twinapi.dll"},
+		{u"Windows.Networking.Connectivity.NetworkInformation", u"raven-twinapi.dll"},
+		{u"Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator", u"raven-twinapi.dll"},
+		{u"Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest", u"raven-twinapi.dll"},
+		{u"Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager", u"raven-twinapi.dll"},
 		{u"Windows.Devices.Input.PointerDevice", u"raven-xaml.dll"},
 		{u"Windows.UI.Core.CoreCursor", u"raven-xaml.dll"},
 		{u"Windows.UI.Core.CoreWindow", u"raven-xaml.dll"},
@@ -220,7 +259,11 @@ void NativeRegistry::register_runtime_classes()
 		{u"Windows.ApplicationModel.Resources.Core.ResourceContext", u"raven-xaml.dll"},
 		{u"Windows.System.MemoryManager", u"raven-xaml.dll"},
 		{u"Windows.ApplicationModel.Core.CoreApplication", u"raven-xaml.dll"},
-		{u"Windows.System.DispatcherQueue", u"raven-xaml.dll"}};
+		{u"Windows.System.DispatcherQueue", u"raven-xaml.dll"},
+		{u"Windows.Web.Http.HttpClient", u"raven-web.dll"},
+		{u"Windows.Web.Http.HttpMethod", u"raven-web.dll"}, {u"Windows.Web.Http.HttpRequestMessage", u"raven-web.dll"},
+		{u"Windows.Web.Http.HttpResponseMessage", u"raven-web.dll"}, {u"Windows.Web.Http.Filters.HttpBaseProtocolFilter", u"raven-web.dll"},
+		{u"Windows.Web.Http.Headers.HttpDateOrDeltaHeaderValue", u"raven-web.dll"}};
 	for (const bool wow : {false, true})
 		for (const auto &[name, library] : runtime_classes) {
 			const std::u16string path = std::u16string(wow ? u"SOFTWARE\\Wow6432Node" : u"SOFTWARE") +
@@ -394,6 +437,10 @@ void NativeRegistry::seed()
 		// DirectX 9.0c, which Windows 10 reports as its DirectX version and the DirectX redistributable checks before it installs.
 		const auto directx = root + u"\\Microsoft\\DirectX";
 		text(directx.c_str(), u"Version", u"4.09.00.0904");
+		// Internet Explorer 11, a part of Windows 10 whose version installers read as a requirement.
+		const auto explorer = root + u"\\Microsoft\\Internet Explorer";
+		text(explorer.c_str(), u"Version", u"9.11.19041.2364");
+		text(explorer.c_str(), u"svcVersion", u"11.0.19041.2364");
 		uint64_t key = 0;
 		uint32_t disposition = 0;
 		if (!create(0x80000002ULL, directx, key, disposition)) {
@@ -415,6 +462,24 @@ void NativeRegistry::seed()
 		uint32_t disposition = 0;
 		if (!create(0x80000002ULL, service, key, disposition)) {
 			fill(key, u"ImagePath", 2, bytes_of(u"%systemroot%\\system32\\msiexec.exe /V"));
+			close(key);
+		}
+	}
+	// Services that every Windows has and that installers look for; nothing runs them here, so starting one fails as a missing file does.
+	for (const auto &[name, display, image] : std::initializer_list<std::tuple<std::u16string, std::u16string, std::u16string>>{
+		{u"wuauserv", u"Windows Update", u"%systemroot%\\system32\\svchost.exe -k netsvcs -p"},
+		{u"TrustedInstaller", u"Windows Modules Installer", u"%SystemRoot%\\servicing\\TrustedInstaller.exe"},
+		{u"BITS", u"Background Intelligent Transfer Service", u"%SystemRoot%\\System32\\svchost.exe -k netsvcs -p"}}) {
+		const auto service = u"SYSTEM\\CurrentControlSet\\Services\\" + name;
+		text(service.c_str(), u"DisplayName", display);
+		text(service.c_str(), u"ObjectName", u"LocalSystem");
+		number(service.c_str(), u"Type", 0x20);
+		number(service.c_str(), u"Start", 3);
+		number(service.c_str(), u"ErrorControl", 1);
+		uint64_t key = 0;
+		uint32_t disposition = 0;
+		if (!create(0x80000002ULL, service, key, disposition)) {
+			fill(key, u"ImagePath", 2, bytes_of(image));
 			close(key);
 		}
 	}
@@ -450,6 +515,21 @@ bool NativeRegistry::resolve(uint64_t parent, std::u16string_view path, std::u16
 		display += tail;
 		folded += u'\\';
 		folded += fold(tail);
+	}
+	// The same keys under their other names: the classes of the machine and of the user are the classes root, and the user's own
+	// hive under HKEY_USERS is the current user.
+	static const std::pair<std::u16string_view, std::u16string_view> aliases[] = {
+		{u"hkey_local_machine\\software\\classes", u"HKEY_CLASSES_ROOT"},
+		{u"hkey_current_user\\software\\classes", u"HKEY_CLASSES_ROOT"},
+		{u"hkey_users\\s-1-5-21-1000-1000-1000-1000_classes", u"HKEY_CLASSES_ROOT"},
+		{u"hkey_users\\s-1-5-21-1000-1000-1000-1000", u"HKEY_CURRENT_USER"}};
+	for (const auto &[spelling, target] : aliases) {
+		const auto alias = fold(spelling);
+		if (folded.starts_with(alias) && (folded.size() == alias.size() || folded[alias.size()] == u'\\')) {
+			folded = fold(std::u16string(target)) + folded.substr(alias.size());
+			display = std::u16string(target) + display.substr(alias.size());
+			break;
+		}
 	}
 	return true;
 }
@@ -508,7 +588,11 @@ uint32_t NativeRegistry::close(uint64_t key)
 {
 	if (predefined(key))
 		return 0;
-	return open_keys.erase(key) ? 0 : bad_handle;
+	if (!open_keys.erase(key))
+		return bad_handle;
+	if (release)
+		release(key);
+	return 0;
 }
 
 uint32_t NativeRegistry::query(uint64_t key, std::u16string_view name, uint32_t &type, std::vector<uint8_t> &data) const

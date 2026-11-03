@@ -46,6 +46,9 @@ struct GuestThread {
 		std::vector<uint64_t> arguments;
 	};
 	std::deque<Apc> apcs;
+	// Alerts: NtAlertThread's ends the thread's alertable native wait; NtAlertThreadByThreadId's ends its NtWaitForAlertByThreadId, or
+	// the next one. Each is taken by the wait it ends.
+	bool alerted = false, alerted_by_id = false;
 	int priority = 0;
 	std::shared_ptr<AccessToken> impersonation;
 	// Pipes to the processes that hold a handle to this thread: each gets the exit code when the thread ends.
@@ -90,6 +93,8 @@ public:
 		std::chrono::steady_clock::time_point deadline);
 	~NativeThreads();
 	void set_runner(std::function<NativeResult(uint64_t, std::span<const uint64_t>)> invoke) { run = std::move(invoke); }
+	// The stack a thread reserves when its creator names only what to commit: the program's SizeOfStackReserve.
+	uint64_t default_stack_reserve = 1024 * 1024;
 	// Called in a new thread before it starts (reason 2) and after it ends (reason 3): TLS callbacks and DllMain notifications.
 	void set_notifier(std::function<void(uint32_t)> notify) { notifier = std::move(notify); }
 	// From here on a guest runs until it calls the runtime: the process is ending and nothing else should be scheduled behind its back.

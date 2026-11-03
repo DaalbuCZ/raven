@@ -74,6 +74,25 @@ static UINT wic_depth(IWICBitmap *wic)
 /* The headers leave this one out. */
 DEFINE_GUID(IID_ID2D1HwndRenderTarget, 0x2cd90698, 0x12e2, 0x11dc, 0x9f, 0xed, 0x00, 0x11, 0x43, 0xa0, 0x55, 0xf9);
 
+/* A refused interface goes to the trace by its GUID, so a program that needs one more interface shows which. */
+static HRESULT no_interface(REFIID iid)
+{
+	static const char digits[] = "0123456789abcdef";
+	static const BYTE order[16] = {3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15};
+	char text[64] = "d2d1: no interface ";
+	size_t at = 19;
+	const BYTE *bytes = (const BYTE *)iid;
+	for (size_t index = 0; index < 16; ++index) {
+		if (index == 4 || index == 6 || index == 8 || index == 10)
+			text[at++] = '-';
+		text[at++] = digits[bytes[order[index]] >> 4];
+		text[at++] = digits[bytes[order[index]] & 15];
+	}
+	text[at] = 0;
+	RavenTrace(text);
+	return E_NOINTERFACE;
+}
+
 static BOOL same_guid(const GUID *a, const GUID *b)
 {
 	return memcmp(a, b, sizeof(GUID)) == 0;
@@ -622,7 +641,7 @@ static HRESULT STDMETHODCALLTYPE object_QueryInterface(void *iface, REFIID riid,
 		return S_OK;
 	}
 	*out = NULL;
-	return E_NOINTERFACE;
+	return no_interface(riid);
 }
 
 static ULONG STDMETHODCALLTYPE object_AddRef(void *iface)
@@ -1337,6 +1356,10 @@ struct bitmap {
 	UINT32 mapped_pitch;
 	D2D1_MAP_OPTIONS map_options;
 	ID2D1ColorContext *color_context;
+	/* For a bitmap over a Direct3D texture: whether Direct2D draws into it, so that its own pixels are the newer ones, and the frame
+	 * in which the texture's pixels were last read. */
+	BOOL targeted;
+	LONG read_frame;
 };
 
 static void bitmap_destroy(struct object *base)
@@ -1721,6 +1744,53 @@ static D2D1_SIZE_F *STDMETHODCALLTYPE layer_GetSize(void *iface, D2D1_SIZE_F *si
 static void **layer_table;
 static const GUID *const layer_iids[] = {&IID_ID2D1Resource, &IID_ID2D1Layer};
 
+/* ---- meshes: the triangles a tessellation sink writes, each a closed figure of one path that a target fills ---- */
+struct mesh {
+	struct object base;
+	struct path path;
+};
+
+struct tessellation {
+	struct object base;
+	struct mesh *mesh;
+};
+
+static void mesh_destroy(struct object *base) { path_free(&((struct mesh *)base)->path); }
+static void tessellation_destroy(struct object *base) { object_Release(((struct tessellation *)base)->mesh); }
+
+static void STDMETHODCALLTYPE tessellation_AddTriangles(void *iface, const D2D1_TRIANGLE *triangles, UINT32 count)
+{
+	struct mesh *mesh = ((struct tessellation *)iface)->mesh;
+	UINT32 index;
+	for (index = 0; index < count; ++index) {
+		path_move(&mesh->path, triangles[index].point1);
+		path_line(&mesh->path, triangles[index].point2);
+		path_line(&mesh->path, triangles[index].point3);
+		path_close(&mesh->path);
+	}
+}
+
+static HRESULT STDMETHODCALLTYPE tessellation_Close(void *iface) { return S_OK; }
+
+static void *tessellation_table[] = {(void *)object_QueryInterface, (void *)object_AddRef, (void *)object_Release, (void *)tessellation_AddTriangles,
+	(void *)tessellation_Close};
+static const GUID *const tessellation_iids[] = {&IID_ID2D1TessellationSink};
+
+static HRESULT STDMETHODCALLTYPE mesh_Open(void *iface, ID2D1TessellationSink **out)
+{
+	struct tessellation *sink = ALLOC(sizeof(*sink));
+	if (!sink)
+		return E_OUTOFMEMORY;
+	object_init(&sink->base, tessellation_table, tessellation_destroy, tessellation_iids, 1, NULL);
+	sink->mesh = iface;
+	object_AddRef(iface);
+	*out = (ID2D1TessellationSink *)sink;
+	return S_OK;
+}
+
+static void *mesh_table[] = {(void *)object_QueryInterface, (void *)object_AddRef, (void *)object_Release, (void *)object_GetFactory, (void *)mesh_Open};
+static const GUID *const mesh_iids[] = {&IID_ID2D1Resource, &IID_ID2D1Mesh};
+
 struct state_block {
 	struct object base;
 	D2D1_DRAWING_STATE_DESCRIPTION1 description;
@@ -1932,7 +2002,7 @@ static HRESULT STDMETHODCALLTYPE target_QueryInterface(void *iface, REFIID riid,
 		found = &self->gdi;
 	if (!found) {
 		*out = NULL;
-		return E_NOINTERFACE;
+		return no_interface(riid);
 	}
 	InterlockedIncrement(&self->refs);
 	*out = found;
@@ -2171,12 +2241,87 @@ static void STDMETHODCALLTYPE context_DrawGeometryRealization(void *iface, ID2D1
 }
 
 /* A bitmap into a destination rectangle (by default its size in device-independent pixels) from a part of it (by default all). */
+/* Drawing begins a new frame; a texture is read at most once in each. */
+static LONG frame_number;
+
+/* A bitmap over a Direct3D texture that the program fills itself, with its device or with a copy, is drawn with the texture's pixels:
+ * they come through a staging copy into the bitmap's host surface. Formats without four bytes a pixel other than A8 are left as they
+ * are. */
+static void read_texture(struct bitmap *bitmap)
+{
+	ID3D11Texture2D *texture = NULL, *staging = NULL;
+	ID3D11Device *device = NULL;
+	ID3D11DeviceContext *context = NULL;
+	D3D11_TEXTURE2D_DESC desc;
+	D3D11_MAPPED_SUBRESOURCE mapped;
+	BYTE *pixels = NULL;
+	UINT32 row, column;
+	const LONG frame = frame_number;
+	if (bitmap->targeted || bitmap->read_frame == frame)
+		return;
+	bitmap->read_frame = frame;
+	if (FAILED(IDXGISurface_QueryInterface(bitmap->dxgi, &IID_ID3D11Texture2D, (void **)&texture)))
+		return;
+	ID3D11Texture2D_GetDesc(texture, &desc);
+	if (desc.SampleDesc.Count != 1 || desc.Width != bitmap->pixels.width || desc.Height != bitmap->pixels.height
+		|| (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB && desc.Format != DXGI_FORMAT_B8G8R8X8_UNORM
+			&& desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB && desc.Format != DXGI_FORMAT_A8_UNORM))
+		goto done;
+	ID3D11Texture2D_GetDevice(texture, &device);
+	if (!device)
+		goto done;
+	ID3D11Device_GetImmediateContext(device, &context);
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.Usage = D3D11_USAGE_STAGING;
+	desc.BindFlags = 0;
+	desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	desc.MiscFlags = 0;
+	if (!context || FAILED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging)))
+		goto done;
+	ID3D11DeviceContext_CopySubresourceRegion(context, (ID3D11Resource *)staging, 0, 0, 0, 0, (ID3D11Resource *)texture, 0, NULL);
+	if (FAILED(ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped)))
+		goto done;
+	if ((pixels = ALLOC((size_t)desc.Width * desc.Height * 4))) {
+		for (row = 0; row < desc.Height; ++row) {
+			const BYTE *from = (const BYTE *)mapped.pData + (size_t)row * mapped.RowPitch;
+			BYTE *to = pixels + (size_t)row * desc.Width * 4;
+			if (desc.Format == DXGI_FORMAT_A8_UNORM)
+				/* An alpha-only bitmap draws as black of that coverage. */
+				for (column = 0; column < desc.Width; ++column)
+					to[column * 4 + 3] = from[column];
+			else if (desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+				for (column = 0; column < desc.Width; ++column) {
+					to[column * 4] = from[column * 4 + 2];
+					to[column * 4 + 1] = from[column * 4 + 1];
+					to[column * 4 + 2] = from[column * 4];
+					to[column * 4 + 3] = from[column * 4 + 3];
+				}
+			else
+				memcpy(to, from, (size_t)desc.Width * 4);
+		}
+		RavenCanvasPixels(bitmap->surface, 0, 0, desc.Width, desc.Height, pixels, desc.Width * 4, 1);
+		FREE(pixels);
+	}
+	ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
+done:
+	if (staging)
+		ID3D11Texture2D_Release(staging);
+	if (context)
+		ID3D11DeviceContext_Release(context);
+	if (device)
+		ID3D11Device_Release(device);
+	ID3D11Texture2D_Release(texture);
+}
+
 static void draw_bitmap(struct target *self, struct bitmap *bitmap, const D2D1_RECT_F *destination, float opacity, UINT32 interpolation,
 	const D2D1_RECT_F *source)
 {
 	struct command command;
 	if (!bitmap)
 		return;
+	if (bitmap->dxgi)
+		read_texture(bitmap);
 	command_start(self, &command, OP_DRAW_BITMAP);
 	command.bitmap = bitmap->surface;
 	command.opacity = opacity;
@@ -2615,6 +2760,7 @@ static void STDMETHODCALLTYPE target_BeginDraw(void *iface)
 	struct target *self = target_of(iface);
 	self->drawing = TRUE;
 	self->error = S_OK;
+	InterlockedIncrement(&frame_number);
 	if (self->kind == TARGET_DC && self->dc && self->bitmap)
 		read_bound_dc(self);
 	if (self->kind == TARGET_WIC && self->wic)
@@ -2952,6 +3098,24 @@ static HRESULT STDMETHODCALLTYPE target_CreateLayer(void *iface, const D2D1_SIZE
 	return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE target_CreateMesh(void *iface, ID2D1Mesh **out)
+{
+	struct mesh *mesh = ALLOC(sizeof(*mesh));
+	if (!mesh)
+		return E_OUTOFMEMORY;
+	object_init(&mesh->base, mesh_table, mesh_destroy, mesh_iids, 2, target_of(iface)->factory);
+	/* Triangles that share an edge, whichever way each turns, fill their union. */
+	mesh->path.fill = D2D1_FILL_MODE_WINDING;
+	*out = (ID2D1Mesh *)mesh;
+	return S_OK;
+}
+
+static void STDMETHODCALLTYPE target_FillMesh(void *iface, ID2D1Mesh *mesh, ID2D1Brush *brush)
+{
+	if (mesh)
+		draw_path(target_of(iface), &((struct mesh *)mesh)->path, brush, FALSE, 0, NULL);
+}
+
 static struct target *make_target(IUnknown *factory, int kind, const D2D1_RENDER_TARGET_PROPERTIES *properties);
 
 static HRESULT STDMETHODCALLTYPE target_CreateCompatibleRenderTarget(void *iface, const D2D1_SIZE_F *size, const D2D1_SIZE_U *pixel_size,
@@ -3106,7 +3270,7 @@ static HRESULT STDMETHODCALLTYPE renderer_QueryInterface(IDWriteTextRenderer *if
 		return S_OK;
 	}
 	*out = NULL;
-	return E_NOINTERFACE;
+	return no_interface(riid);
 }
 static ULONG STDMETHODCALLTYPE renderer_AddRef(IDWriteTextRenderer *iface) { return 2; }
 static ULONG STDMETHODCALLTYPE renderer_Release(IDWriteTextRenderer *iface) { return 1; }
@@ -3311,6 +3475,7 @@ static void STDMETHODCALLTYPE context_SetTarget(void *iface, ID2D1Image *image)
 		object_Release(self->bitmap);
 	self->bitmap = (struct bitmap *)bitmap;
 	if (bitmap) {
+		self->bitmap->targeted = TRUE;
 		self->format = self->bitmap->format;
 		self->dpi_x = self->bitmap->dpi_x;
 		self->dpi_y = self->bitmap->dpi_y;
@@ -3775,7 +3940,7 @@ static HRESULT STDMETHODCALLTYPE effect_QueryInterface(void *iface, REFIID riid,
 	}
 	*out = found;
 	if (!found)
-		return E_NOINTERFACE;
+		return no_interface(riid);
 	InterlockedIncrement(&self->base.refs);
 	return S_OK;
 }
@@ -4049,7 +4214,7 @@ static HRESULT STDMETHODCALLTYPE factory_QueryInterface(void *iface, REFIID riid
 		found = &self->multithread;
 	if (!found) {
 		*out = NULL;
-		return E_NOINTERFACE;
+		return no_interface(riid);
 	}
 	InterlockedIncrement(&self->refs);
 	*out = found;
@@ -4271,6 +4436,7 @@ static HRESULT STDMETHODCALLTYPE factory_CreateDxgiSurfaceRenderTarget(void *ifa
 		target_Release(target);
 		return hr;
 	}
+	bitmap->targeted = TRUE;
 	target->bitmap = bitmap;
 	*out = (ID2D1RenderTarget *)target;
 	return S_OK;
@@ -4348,6 +4514,8 @@ static void set_target(void **table)
 	table[ID2D1DeviceContext5_CreateRadialGradientBrush_slot] = (void *)target_CreateRadialGradientBrush;
 	table[ID2D1DeviceContext5_CreateCompatibleRenderTarget_slot] = (void *)target_CreateCompatibleRenderTarget;
 	table[ID2D1DeviceContext5_CreateLayer_slot] = (void *)target_CreateLayer;
+	table[ID2D1DeviceContext5_CreateMesh_slot] = (void *)target_CreateMesh;
+	table[ID2D1DeviceContext5_FillMesh_slot] = (void *)target_FillMesh;
 	table[ID2D1DeviceContext5_DrawLine_slot] = (void *)target_DrawLine;
 	table[ID2D1DeviceContext5_DrawRectangle_slot] = (void *)target_DrawRectangle;
 	table[ID2D1DeviceContext5_FillRectangle_slot] = (void *)target_FillRectangle;
@@ -4424,22 +4592,31 @@ static void set_context(void **table)
 	table[ID2D1DeviceContext5_PushLayer_86_slot] = (void *)target_PushLayer1;
 }
 
+/* A render target's table: set_target fills every slot of a device context, so it holds them all, past those of its own interface. */
+static void **make_target_table(void *const *stubs, size_t count)
+{
+	void **table = ALLOC(ID2D1DeviceContext5_methods * sizeof(void *));
+	memcpy(table, ID2D1DeviceContext5_table, ID2D1DeviceContext5_methods * sizeof(void *));
+	memcpy(table, stubs, count * sizeof(void *));
+	return table;
+}
+
 static void build_tables(void)
 {
 	build_geometry_tables();
 	build_resource_tables();
-	hwnd_table = make_table(ID2D1HwndRenderTarget_table, ID2D1HwndRenderTarget_methods);
+	hwnd_table = make_target_table(ID2D1HwndRenderTarget_table, ID2D1HwndRenderTarget_methods);
 	set_target(hwnd_table);
 	hwnd_table[ID2D1HwndRenderTarget_CheckWindowState_slot] = (void *)hwnd_CheckWindowState;
 	hwnd_table[ID2D1HwndRenderTarget_Resize_slot] = (void *)hwnd_Resize;
 	hwnd_table[ID2D1HwndRenderTarget_GetHwnd_slot] = (void *)hwnd_GetHwnd;
-	dcrt_table = make_table(ID2D1DCRenderTarget_table, ID2D1DCRenderTarget_methods);
+	dcrt_table = make_target_table(ID2D1DCRenderTarget_table, ID2D1DCRenderTarget_methods);
 	set_target(dcrt_table);
 	dcrt_table[ID2D1DCRenderTarget_BindDC_slot] = (void *)dcrt_BindDC;
-	bitmaprt_table = make_table(ID2D1BitmapRenderTarget_table, ID2D1BitmapRenderTarget_methods);
+	bitmaprt_table = make_target_table(ID2D1BitmapRenderTarget_table, ID2D1BitmapRenderTarget_methods);
 	set_target(bitmaprt_table);
 	bitmaprt_table[ID2D1BitmapRenderTarget_GetBitmap_slot] = (void *)bitmaprt_GetBitmap;
-	rt_table = make_table(ID2D1DCRenderTarget_table, ID2D1DCRenderTarget_methods);
+	rt_table = make_target_table(ID2D1DCRenderTarget_table, ID2D1DCRenderTarget_methods);
 	set_target(rt_table);
 	context_table = make_table(ID2D1DeviceContext5_table, ID2D1DeviceContext5_methods);
 	set_context(context_table);

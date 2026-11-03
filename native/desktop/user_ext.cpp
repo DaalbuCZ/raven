@@ -246,10 +246,18 @@ void NativeWindows::track_pointer(uint64_t window)
 void NativeWindows::register_ext_api(ApiRegistry &registry)
 {
 	// ---- DPI: one 96 dpi screen ----
+	// AR_NOSENSOR: the output of a desktop session never rotates.
+	registry.add("GetAutoRotationState", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.ret(0);
+			return;
+		}
+		call.store<uint32_t>(call[0], 0x10);
+		call.ret(1);
+	});
 	registry.add("GetDpiForSystem", 0, [](ApiCall &call) { call.ret(96); });
 	registry.add("GetDpiForWindow", 1, [](ApiCall &call) { call.ret(96); });
 	registry.add("GetSystemDpiForProcess", 1, [](ApiCall &call) { call.ret(96); });
-	registry.add("GetSystemMetricsForDpi", 2, [](ApiCall &call) { call.ret(0); });
 	registry.add("GetMessagePos", 0, [this](ApiCall &call) { call.ret(uint32_t(uint16_t(cursor_x)) | (uint32_t(uint16_t(cursor_y)) << 16)); });
 	registry.add("mouse_event", 5, [](ApiCall &call) { call.ret(0); });
 	registry.add("DragDetect", 3, [](ApiCall &call) { call.ret(0); });
@@ -566,7 +574,23 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		call.write(call[0], std::span<const uint8_t>(vk_state.data(), vk_state.size()));
 		call.ret(1);
 	});
-	registry.add("SetKeyboardState", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetKeyboardState", 1, [this](ApiCall &call) {
+		const auto bytes = call.read(call[0], vk_state.size());
+		std::copy(bytes.begin(), bytes.end(), vk_state.begin());
+		call.ret(1);
+	});
+	for (const bool extended : {false, true}) {
+		registry.add(extended ? "GetClassInfoExA" : "GetClassInfoA", 3, [this, extended](ApiCall &call) {
+			const uint64_t name = call[1];
+			const uint64_t args[] = {call[0], name, call[2]};
+			try {
+				const uint16_t id = name && name <= UINT16_MAX ? atom(name, call[0]) : objects.find_class(call[0], call.narrow(name));
+				call.ret(fill_class_info(id, extended, args));
+			} catch (uint32_t error) {
+				call.fail(error);
+			}
+		});
+	}
 	registry.add("MapVirtualKeyW", 2, [](ApiCall &call) {
 		const uint32_t code = call.u32(0), type = call.u32(1);
 		if (type == 0 || type == 4) {
@@ -599,7 +623,8 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 			call.ret(key_characters(code).first ? std::toupper(key_characters(code).first) : 0);
 		}
 	});
-	registry.add("VkKeyScanW", 1, [](ApiCall &call) {
+	// There is one keyboard layout, whichever layout VkKeyScanEx names.
+	const auto key_scan = [](ApiCall &call) {
 		const char16_t c = char16_t(call.u32(0));
 		for (uint32_t vk = 8; vk < 0xe0; ++vk) {
 			const auto pair = key_characters(vk);
@@ -613,7 +638,9 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 			}
 		}
 		call.ret(0xffff);
-	});
+	};
+	registry.add("VkKeyScanW", 1, key_scan);
+	registry.add("VkKeyScanExW", 2, key_scan);
 	registry.add("GetKeyNameTextW", 3, [](ApiCall &call) {
 		const uint32_t scan = (call.u32(0) >> 16) & 0xff;
 		const bool extended = call.u32(0) & (1U << 24);
@@ -1002,50 +1029,67 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 	registry.add("RegisterHotKey", 4, [](ApiCall &call) { call.ret(1); });
 	registry.add("UnregisterHotKey", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("SystemParametersInfoA", 4, [](ApiCall &call) { call.ret(1); });
-	registry.add("SystemParametersInfoW", 4, [this](ApiCall &call) {
-		const uint32_t action = call.u32(0), parameter = call.u32(1);
-		const uint64_t pointer = call[2];
-		const auto &screen = objects.nonclient_metrics();
+	// The metrics that carry fonts, laid out for a DPI: NONCLIENTMETRICSW (sizes, then the caption, small caption, menu, status and
+	// message fonts), the icon title LOGFONTW and ICONMETRICSW (size, horizontal and vertical spacing, wrap flag, font). False for any
+	// other action.
+	const auto font_metrics = [](ApiCall &call, uint32_t action, uint32_t parameter, uint64_t pointer, uint32_t dpi) {
+		const auto scale = [dpi](int32_t value) { return int32_t((int64_t(value) * dpi + 48) / 96); };
 		switch (action) {
 		case 0x29: {
-			// NONCLIENTMETRICSW: sizes, then caption, small caption, menu, status and message fonts.
 			const uint32_t size = parameter ? parameter : call.load<uint32_t>(pointer);
 			std::vector<uint8_t> bytes(std::max<size_t>(size, 504), 0);
 			const auto put32 = [&](size_t at, int32_t value) { std::memcpy(bytes.data() + at, &value, 4); };
 			put32(0, int32_t(size));
-			put32(4, 1);
-			put32(8, 17); put32(12, 17);
-			put32(16, 18); put32(20, 19);
-			write_logfont(bytes, 24, -12, 400);
-			put32(116, 17); put32(120, 19);
-			write_logfont(bytes, 124, -12, 400);
-			put32(216, 18); put32(220, 19);
-			write_logfont(bytes, 224, -12, 400);
-			write_logfont(bytes, 316, -12, 400);
-			write_logfont(bytes, 408, -12, 400);
+			put32(4, scale(1));
+			put32(8, scale(17)); put32(12, scale(17));
+			put32(16, scale(18)); put32(20, scale(19));
+			write_logfont(bytes, 24, scale(-12), 400);
+			put32(116, scale(17)); put32(120, scale(19));
+			write_logfont(bytes, 124, scale(-12), 400);
+			put32(216, scale(18)); put32(220, scale(19));
+			write_logfont(bytes, 224, scale(-12), 400);
+			write_logfont(bytes, 316, scale(-12), 400);
+			write_logfont(bytes, 408, scale(-12), 400);
 			if (size > 500)
-				put32(500, 4);
+				put32(500, scale(4));
 			call.write(pointer, std::span<const uint8_t>(bytes.data(), std::min<size_t>(size, bytes.size())));
-			call.ret(1);
-			return;
+			return true;
 		}
 		case 0x1f: {
 			std::vector<uint8_t> bytes(92, 0);
-			write_logfont(bytes, 0, -12, 400);
+			write_logfont(bytes, 0, scale(-12), 400);
 			call.write(pointer, bytes);
-			call.ret(1);
-			return;
+			return true;
 		}
 		case 0x2d: {
-			// ICONMETRICS: size, horizontal and vertical spacing, wrap flag, font.
 			std::vector<uint8_t> bytes(108, 0);
-			const int32_t values[] = {108, 75, 75, 1};
+			const int32_t values[] = {108, scale(75), scale(75), 1};
 			std::memcpy(bytes.data(), values, 16);
-			write_logfont(bytes, 16, -12, 400);
+			write_logfont(bytes, 16, scale(-12), 400);
 			call.write(pointer, bytes);
+			return true;
+		}
+		default:
+			return false;
+		}
+	};
+	// SystemParametersInfoForDpi(action, parameter, data, update, dpi) answers only the font metrics, scaled for the DPI it names.
+	registry.add("SystemParametersInfoForDpi", 5, [font_metrics](ApiCall &call) {
+		if (!call[2] || !call.u32(4) || !font_metrics(call, call.u32(0), call.u32(1), call[2], call.u32(4))) {
+			call.fail(87);
+			return;
+		}
+		call.ret(1);
+	});
+	registry.add("SystemParametersInfoW", 4, [this, font_metrics](ApiCall &call) {
+		const uint32_t action = call.u32(0), parameter = call.u32(1);
+		const uint64_t pointer = call[2];
+		const auto &screen = objects.nonclient_metrics();
+		if (font_metrics(call, action, parameter, pointer, 96)) {
 			call.ret(1);
 			return;
 		}
+		switch (action) {
 		case 0x30: {
 			const int32_t rect[] = {0, 0, screen.screen_x, screen.screen_y};
 			call.write(pointer, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(rect), 16));
@@ -1070,6 +1114,28 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		case 0x1022: case 0x1026: case 0x1042: answer(0); return;
 		case 0x0a: case 0x0d: answer(500); return;
 		case 0x0b: answer(0); return;
+		// SPI_GETHIGHCONTRAST and SPI_GETANIMATION fill structures whose first field is their size: no high contrast, no minimize animation.
+		case 0x42:
+			if (pointer) {
+				// HIGHCONTRASTW ends in a pointer, four bytes in a 32-bit program, to a scheme name that Windows always supplies.
+				if (!high_contrast_scheme)
+					high_contrast_scheme = process.map_memory(4096, PROT_READ | PROT_WRITE);
+				call.store<uint32_t>(pointer + 4, 0);
+				call.store_pointer(pointer + 8, high_contrast_scheme);
+			}
+			call.ret(1);
+			return;
+		case 0x48:
+			if (pointer)
+				call.store<uint32_t>(pointer + 4, 0);
+			call.ret(1);
+			return;
+		// No screen reader, no menu animation, the drop shadow family off.
+		case 0x46: case 0x1002: case 0x103e: answer(0); return;
+		case 0x66: answer(400); return;
+		case 0x2006: answer(1); return;
+		case 0x200a: answer(2); return;
+		case 0x200c: answer(1400); return;
 		default:
 			call.ret(1);
 		}

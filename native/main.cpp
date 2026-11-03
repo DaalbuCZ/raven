@@ -46,7 +46,7 @@ static std::vector<uint8_t> read_file(const char *path)
 {
 	std::ifstream file(path, std::ios::binary | std::ios::ate);
 	if (!file)
-		throw std::runtime_error("cannot open PE file");
+		throw std::runtime_error(std::string("cannot open PE file: ")+path);
 	const auto size = file.tellg();
 	if (size < 0 || size > 1024 * 1024 * 1024)
 		throw std::runtime_error("PE file exceeds inspection size limit");
@@ -182,34 +182,30 @@ int main(int argc, char **argv)
 	const bool run_process = mode == "--run-process";
 	int first_file=3;
 	auto timeout=std::chrono::milliseconds(5000);
+	bool timeout_given=false;
 	bool wayland=false,x11=false;
-	if (run_process && argc>3 && std::string_view(argv[3]).starts_with("--timeout-ms=")) {
-		const std::string_view value=std::string_view(argv[3]).substr(13);
-		uint64_t milliseconds=0;
-		const auto parsed=std::from_chars(value.data(),value.data()+value.size(),milliseconds);
-		if (parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || milliseconds<1 || milliseconds>86400000) {
-			std::cerr << "raven: native timeout must be 1..86400000 milliseconds\n";
-			return 2;
-		}
-		timeout=std::chrono::milliseconds(milliseconds);
-		first_file=4;
-	}
-	if (run_process && argc>first_file && std::string_view(argv[first_file])=="--desktop=wayland") {
-		wayland=true; ++first_file;
-	} else if (run_process && argc>first_file && std::string_view(argv[first_file])=="--desktop=x11") {
-		x11=true; ++first_file;
-	}
 	bool inherited_stdio=false;
-	if (run_process && argc>first_file && std::string_view(argv[first_file])=="--stdio=inherit") {
-		inherited_stdio=true; ++first_file;
-	}
 	// A program started by another one carries the command line and the directory its parent chose.
 	std::optional<std::string> command_line_text, directory_text;
 	int environment_fd=-1,suspended_fd=-1,inherit_fd=-1,handle_channel_fd=-1,guest_error_fd=2;
 	bool elevated=false,noninteractive=false;
 	for (bool more=run_process;more && argc>first_file;) {
 		const std::string_view option=argv[first_file];
-		if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
+		if (option.starts_with("--timeout-ms=")) {
+			const std::string_view value=option.substr(13);
+			uint64_t milliseconds=0;
+			const auto parsed=std::from_chars(value.data(),value.data()+value.size(),milliseconds);
+			if (parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || milliseconds<1 || milliseconds>86400000) {
+				std::cerr << "raven: native timeout must be 1..86400000 milliseconds\n";
+				return 2;
+			}
+			timeout=std::chrono::milliseconds(milliseconds);
+			timeout_given=true;
+		}
+		else if (option=="--desktop=wayland") { wayland=true; x11=false; }
+		else if (option=="--desktop=x11") { x11=true; wayland=false; }
+		else if (option=="--stdio=inherit") inherited_stdio=true;
+		else if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
 		else if (option.starts_with("--directory=")) directory_text=std::string(option.substr(12));
 		else if (option.starts_with("--environment-fd=")) environment_fd=std::atoi(std::string(option.substr(17)).c_str());
 		else if (option.starts_with("--suspended-fd=")) {
@@ -221,10 +217,13 @@ int main(int argc, char **argv)
 		else if (option.starts_with("--diagnostics-fd=")) {
 			// The runtime's own messages go where the parent runtime writes its own; the program's standard error moves out of their way
 			// to a descriptor of its own, so nothing the runtime says ever lands in a pipe the program reads.
+			// RAVEN_TRACE_FILE already gave this process a file of its own, which the parent's descriptor would replace.
 			const int diagnostics=std::atoi(std::string(option.substr(17)).c_str());
-			const int moved=::fcntl(2,F_DUPFD_CLOEXEC,64);
-			if (moved>=0 && ::dup2(diagnostics,2)==2) guest_error_fd=moved;
-			else if (moved>=0) ::close(moved);
+			if (!std::getenv("RAVEN_TRACE_FILE")) {
+				const int moved=::fcntl(2,F_DUPFD_CLOEXEC,64);
+				if (moved>=0 && ::dup2(diagnostics,2)==2) guest_error_fd=moved;
+				else if (moved>=0) ::close(moved);
+			}
 			::close(diagnostics);
 		}
 #ifdef RAVEN_NATIVE_CPU
@@ -238,13 +237,14 @@ int main(int argc, char **argv)
 		else more=false;
 		if (more) ++first_file;
 	}
-	if (run_process) {
-		// What programs it starts inherit: how long they may run and which window system they use.
+	// What programs it starts inherit: how long they may run and which window system they use.
+	const auto pass_options=[&] {
 		std::string options="--timeout-ms="+std::to_string(timeout.count());
 		if (wayland) options+=" --desktop=wayland";
 		if (x11) options+=" --desktop=x11";
 		setenv("RAVEN_CHILD_OPTIONS",options.c_str(),1);
-	}
+	};
+	if (run_process) pass_options();
 	const bool bind_imports = mode == "--bind-imports";
 	int last_file=argc;
 	if (run_process)
@@ -310,8 +310,9 @@ int main(int argc, char **argv)
 					{
 						const auto runtime = std::filesystem::read_symlink("/proc/self/exe").parent_path();
 						for (const auto &[from, folder] : {std::pair{runtime, "system32"}, std::pair{runtime / "x86", "syswow64"}})
-							for (const char *program : {"msiexec.exe", "regsvr32.exe", "control.exe", "dism.exe", "fondue.exe", "regedit.exe", "mscoree.dll", "riched20.dll",
-									"msftedit.dll", "l_intl.nls"}) {
+							for (const char *program : {"cmd.exe", "msiexec.exe", "regsvr32.exe", "control.exe", "dism.exe", "fondue.exe", "regedit.exe", "mscoree.dll", "riched20.dll",
+									"msftedit.dll", "l_intl.nls", "find.exe", "findstr.exe", "more.com", "sort.exe", "where.exe", "xcopy.exe", "attrib.exe",
+									"timeout.exe", "choice.exe", "whoami.exe", "hostname.exe", "tasklist.exe", "taskkill.exe", "reg.exe", "rundll32.exe"}) {
 								std::error_code error;
 								// The 64-bit Registry Editor lives in the Windows folder itself.
 								const bool windows_folder = std::string_view(program) == "regedit.exe" && std::string_view(folder) == "system32";
@@ -326,7 +327,7 @@ int main(int argc, char **argv)
 							}
 						// The classes the runtime's components serve are registered in the prefix, as Windows ships them registered: regsvr32 runs
 						// for each width when the components changed since the prefix last registered them. The runs themselves skip this step.
-						const char *servers[] = {"msxml3.dll", "windowscodecs.dll", "mlang.dll", "propsys.dll"};
+						const char *servers[] = {"oleaut32.dll", "msxml3.dll", "windowscodecs.dll", "mlang.dll", "propsys.dll"};
 						std::string stamp;
 						for (const auto &from : {runtime, runtime / "x86"})
 							for (const char *server : servers) {
@@ -352,6 +353,9 @@ int main(int argc, char **argv)
 									const pid_t child = ::fork();
 									if (child == 0) {
 										::setenv("RAVEN_PREFIX_SETUP", "1", 1);
+										// Setup is quiet: only a failure says anything, on standard error.
+										if (const int quiet = ::open("/dev/null", O_WRONLY | O_CLOEXEC); quiet >= 0)
+											::dup2(quiet, 1);
 										const std::string self = std::filesystem::read_symlink("/proc/self/exe").string(), path = program.string();
 										::execl(self.c_str(), self.c_str(), "--run-process", "--execution=native", "--timeout-ms=60000", path.c_str(), "--", "/s",
 											server, static_cast<char *>(nullptr));
@@ -391,7 +395,8 @@ int main(int argc, char **argv)
 								manifest.assign(reinterpret_cast<const char *>(bytes.data()), bytes.size());
 								break;
 							}
-						raven::activation_contexts().prepare(prefix.root() / "drive_c" / "windows" / "WinSxS" / "Manifests", entry->image.is_64, manifest);
+						raven::activation_contexts().prepare(prefix.root() / "drive_c" / "windows" / "WinSxS" / "Manifests", entry->image.is_64, manifest,
+							std::filesystem::absolute(argv[first_file]).parent_path());
 					}
 					// A library of the other width is passed over, as the Windows loader goes on searching past it.
 					const auto find_file = [&](const std::filesystem::path &folder, std::string_view name) {
@@ -418,6 +423,9 @@ int main(int argc, char **argv)
 						}
 						return selected;
 					};
+					// The last places the standard search order looks, the current directory and the folders of PATH, as host folders; they are
+					// known once the program's launch is (below), before its libraries are loaded.
+					std::vector<std::filesystem::path> later_folders;
 					// The components for 32-bit programs are the same libraries built for 32 bits, in a directory beside the runtime.
 					const auto component_directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "" : "x86");
 					const auto source = [&](std::string_view name) -> std::optional<raven::ModuleBytes> {
@@ -459,11 +467,18 @@ int main(int argc, char **argv)
 							if (std::filesystem::exists(component))
 								return read_module(component.c_str());
 						}
-						// The Direct3D libraries a Windows installation provides come from RAVEN_D3D_DIRECTORY (a DXVK build of the program's width)
-						// or from beside the runtime.
-						if (!selected && (name=="dxgi.dll" || name=="d3d11.dll" || name=="d3d10core.dll" || name=="d3d10_1.dll" || name=="d3d9.dll" || name=="d3d8.dll")) {
+						// The Direct3D libraries a Windows installation provides come from RAVEN_D3D_DIRECTORY (one or more directories separated by
+						// colons, such as a DXVK build and a vkd3d-proton build of the program's width) or from beside the runtime.
+						if (!selected && (name=="dxgi.dll" || name=="d3d11.dll" || name=="d3d10core.dll" || name=="d3d10_1.dll" || name=="d3d9.dll" || name=="d3d8.dll" ||
+							name=="d3d12.dll" || name=="d3d12core.dll")) {
 							std::vector<std::filesystem::path> places;
-							if (const char *directory = std::getenv("RAVEN_D3D_DIRECTORY")) places.emplace_back(directory);
+							if (const char *directories = std::getenv("RAVEN_D3D_DIRECTORY"))
+								for (std::string_view rest = directories; !rest.empty();) {
+									const auto colon = rest.find(':');
+									if (const auto part = rest.substr(0, colon); !part.empty())
+										places.emplace_back(std::string(part));
+									rest = colon == rest.npos ? std::string_view() : rest.substr(colon + 1);
+								}
 							places.emplace_back(std::filesystem::read_symlink("/proc/self/exe").parent_path());
 							for (const auto &place : places)
 								if (std::filesystem::exists(place / name))
@@ -476,8 +491,12 @@ int main(int argc, char **argv)
 						// Then the system directory, where installers put the libraries programs share. The system's own libraries are the
 						// runtime's whatever files there carry their names.
 						const auto system_names = raven::system_library_names();
-						if (!selected && std::find(system_names.begin(), system_names.end(), name) == system_names.end())
+						if (!selected && std::find(system_names.begin(), system_names.end(), name) == system_names.end()) {
 							selected = find_file(system_directory, name);
+							for (const auto &folder : later_folders)
+								if (!selected)
+									selected = find_file(folder, name);
+						}
 						if (!selected)
 							return std::nullopt;
 						return read_module(selected->c_str());
@@ -532,8 +551,10 @@ int main(int argc, char **argv)
 						}
 						return names;
 					}();
-					// A .NET program reaches every system library through its runtime, which loads them as it needs them: it gets every component.
-					const bool managed = entry->image.directories[14].address && entry->image.directories[14].size;
+					// A .NET program reaches every system library through its runtime, which loads them as it needs them, and rundll32 and regsvr32 run a
+					// library they know nothing about: they get every component.
+					const bool managed = (entry->image.directories[14].address && entry->image.directories[14].size) ||
+						std::filesystem::path(argv[first_file]).filename() == "rundll32.exe" || std::filesystem::path(argv[first_file]).filename() == "regsvr32.exe";
 					const auto imports_any = [&](std::initializer_list<const char *> libraries) {
 						return managed || std::any_of(libraries.begin(), libraries.end(), [&](const char *library) {
 							const std::string_view wanted(library);
@@ -575,8 +596,8 @@ int main(int argc, char **argv)
 					load_component("raven-user32.dll", {"user32.dll"});
 					// The shell component serves every graphical program, as libraries it loads later, such as a setup program's engine, import the
 					// shell, the setup API and the dialogs that the program itself may not. A program that imports automation creates classes
-					// through COM too, even when it loads ole32 only later. The Windows Runtime is served by the same component, so a program
-					// that imports the runtime contracts, combase or runtimeobject gets it whether or not it also imports the shell.
+					// through COM too, even when it loads ole32 only later; one that imports the Windows Runtime's activation and strings
+					// (combase, runtimeobject, their API sets) activates its classes through the component.
 					load_component("raven-shell.dll", {"comdlg32.dll", "ole32.dll", "oleaut32.dll", "shell32.dll", "shlwapi.dll", "user32.dll",
 						"combase.dll", "runtimeobject.dll", "api-ms-win-core-winrt-*", "api-ms-win-ro-*"});
 					// The setup API component: setup information files, file queues and cabinets, for the programs that import it and for
@@ -642,6 +663,27 @@ int main(int argc, char **argv)
 							std::u16string block(bytes.size()/2,u'\0');
 							std::memcpy(block.data(),bytes.data(),block.size()*2);
 							launch->environment=std::move(block);
+						}
+						{
+							std::vector<std::u16string> folders{launch->directory.empty() ? std::u16string(u"C:\\") : launch->directory};
+							const char *guest_path = std::getenv("RAVEN_GUEST_PATH");
+							const auto value = launch->environment ? raven::NativePaths::environment_value(*launch->environment, u"PATH") :
+								guest_path ? std::optional<std::u16string>(raven::from_utf8(guest_path)) : std::nullopt;
+							if (value)
+								for (auto &folder : raven::NativePaths::path_folders(*value))
+									folders.push_back(std::move(folder));
+							for (const auto &folder : folders)
+								if (const auto resolved = paths.resolve(folder); resolved && resolved->exists)
+									later_folders.push_back(resolved->host);
+						}
+						// A console program started from a terminal has the terminal for its console, as Windows gives a console program the
+						// console it was started from, and runs for as long as it is used.
+						if (!inherited_stdio && handle_channel_fd<0 && entry->image.subsystem==3 && (::isatty(0) || ::isatty(1))) {
+							inherited_stdio=true;
+							if (!timeout_given) {
+								timeout=std::chrono::milliseconds(86400000);
+								pass_options();
+							}
 						}
 						if (inherited_stdio) launch->standard_fds={0,1,guest_error_fd};
 					}

@@ -85,7 +85,13 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 	const auto window_long = [this](ApiCall &call, bool write, bool wide) {
 		auto *window = objects.window(call[0]);
 		if (!window) {
-			call.fail(1400);
+			// Another process may read the styles of a window, never change them from here.
+			const int32_t asked = call.i32(1);
+			const auto traits = !write && (asked == -16 || asked == -20) ? foreign_window_traits(call[0]) : std::nullopt;
+			if (traits)
+				call.ret(asked == -16 ? traits->style : traits->ex_style);
+			else
+				call.fail(1400);
 			return;
 		}
 		const int32_t index = call.i32(1);
@@ -180,6 +186,8 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 					std::memcpy(bytes.data() + 4, &next, 4);
 					process.write_memory(scratch, bytes);
 					send(call[0], 0x7d, index_word, scratch);
+					if (const auto *changed_window = objects.window(call[0]))
+						publish_window_traits(call[0], {changed_window->style, changed_window->ex_style, objects.window_class(changed_window->class_id)->name});
 					if (objects.window(call[0]) && objects.window_visible(call[0])) {
 						invalidate_tree(call[0], true);
 						drawing(call[0]);
@@ -379,6 +387,20 @@ void NativeWindows::register_long_api(ApiRegistry &registry)
 		call.ret(1);
 	});
 	registry.add("GetSystemMetrics", 1, [this](ApiCall &call) { call.ret(system_metric(objects.nonclient_metrics(), call.i32(0))); });
+	// The metrics at another DPI: sizes of interface parts scale from the 96 dpi screen, counts, flags and screen sizes do not.
+	registry.add("GetSystemMetricsForDpi", 2, [this](ApiCall &call) {
+		const int32_t index = call.i32(0);
+		const uint32_t dpi = call.u32(1);
+		if (!dpi) {
+			call.fail(87);
+			return;
+		}
+		constexpr int32_t sizes[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 20, 21, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 45, 46, 47,
+			48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 68, 69, 71, 72, 83, 84, 92};
+		const auto value = int32_t(system_metric(objects.nonclient_metrics(), index));
+		const bool size = std::find(std::begin(sizes), std::end(sizes), index) != std::end(sizes);
+		call.ret(uint32_t(size && dpi != 96 ? int32_t((int64_t(value) * dpi + 48) / 96) : value));
+	});
 }
 
 }

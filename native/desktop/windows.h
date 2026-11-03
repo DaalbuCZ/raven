@@ -27,7 +27,9 @@ public:
 	void set_call(std::function<NativeResult(uint64_t,std::span<const uint64_t>)> invoke);
 	void set_presentation(DesktopPresentation presentation);
 	// A host surface over the client area of a window for a graphics driver to present into, and its release; null when the host shows no such window.
-	std::optional<HostSurface> host_surface(uint64_t window);
+	// The surface a graphics driver renders to for the window; a hidden window gets one only when asked for (hidden), as an OpenGL
+	// surface nothing shows would block the program's buffer swaps.
+	std::optional<HostSurface> host_surface(uint64_t window,bool hidden=false);
 	void release_host_surface(uint64_t window);
 	void *host_display() const { return presentation.host_display ? presentation.host_display() : nullptr; }
 	HostPlatform host_platform() const { return presentation.platform; }
@@ -234,11 +236,12 @@ private:
 	bool focus_leaving=false;
 	std::chrono::steady_clock::time_point focus_left{};
 	void settle_focus_leave(bool now);
-	// Roots whose host window carries a surface handed to a graphics driver: such a window must survive a resize.
-	std::set<uint64_t> hosting_surface;
-	// Where in its root's host window each driver surface was last placed (window, x, y, width, height), so that a frame moving or
-	// resizing the client area takes the surface along.
-	std::map<uint64_t,std::array<int64_t,5>> hosted_areas;
+	// The windows whose surface was handed to a graphics driver, by the root they were last placed in, so that a frame moving or
+	// resizing a client area, or showing or hiding a window, takes the surface along.
+	std::map<uint64_t,uint64_t> hosted_windows;
+	// Whether a window of the root carries a driver's surface: its host window must survive a resize.
+	bool hosts_surface(uint64_t root) const;
+	std::optional<HostSurface> place_hosted(uint64_t window);
 	void place_host_surface(uint64_t root);
 	// Whether nothing has been drawn into the window's client area yet: its surface still holds only zeros or what erasing it left,
 	// or there is none.
@@ -402,6 +405,8 @@ private:
 	// Persistent guest scratch memory for API handlers that need to pass structures to guest callbacks.
 	uint64_t scratch_base=0;
 	size_t scratch_used=0;
+	// The empty high contrast scheme name SPI_GETHIGHCONTRAST points programs at; it stays valid for the life of the process.
+	uint64_t high_contrast_scheme=0;
 	uint64_t scratch_allocate(size_t size);
 	// Shows, hides, minimizes, maximizes or restores a window; returns whether it was visible before.
 	bool show_window(uint64_t window,uint32_t command);
@@ -456,6 +461,7 @@ private:
 	DesktopRect update_rect(uint64_t window,uint64_t address);
 	struct PaintStart { uint64_t dc; DesktopRect rect; bool erase; };
 	PaintStart start_paint(uint64_t window);
+	void finish_paint(uint64_t window);
 	// WM_NCPAINT for a child with a border, and the window whose WM_NCPAINT is being sent, with whether it reached the default handling.
 	void paint_frame(uint64_t window);
 	uint64_t framing = 0;
@@ -464,6 +470,7 @@ private:
 	std::u16string window_text(uint64_t address);
 	uint64_t copy_window_text(uint64_t window,uint64_t output,uint64_t capacity);
 	uint16_t atom(uint64_t name, uint64_t instance);
+	uint64_t fill_class_info(uint16_t id,bool extended,std::span<const uint64_t> args);
 	uint64_t send(uint64_t window, uint32_t message, uint64_t wparam, uint64_t lparam);
 	uint64_t create(std::span<const uint64_t> arguments);
 	uint64_t map_points(uint64_t from,uint64_t to,uint64_t points,uint32_t count);

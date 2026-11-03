@@ -85,13 +85,18 @@ std::shared_ptr<ProcessObject> start_program(KernelContext &context, const std::
 			if (!extension)
 				candidates.push_back(path + u".exe");
 		};
+		// CreateProcess looks in the caller's folder, the current folder, the system folders, the Windows folder and then the folders
+		// of PATH.
 		if (qualified) {
 			add(name);
 		} else {
 			add(own_directory + u"\\" + name);
 			add(paths.current() + u"\\" + name);
 			add(u"C:\\Windows\\System32\\" + name);
+			add(u"C:\\Windows\\System\\" + name);
 			add(u"C:\\Windows\\" + name);
+			for (const auto &folder : paths.search_folders())
+				add(folder + u"\\" + name);
 		}
 		for (const auto &candidate : candidates)
 			if (const auto resolved = paths.resolve(candidate); resolved && resolved->exists && std::filesystem::is_regular_file(resolved->host))
@@ -106,16 +111,32 @@ std::shared_ptr<ProcessObject> start_program(KernelContext &context, const std::
 		error = 2;
 		return nullptr;
 	}
-	char magic[2] = {};
-	std::ifstream file(image->host, std::ios::binary);
-	file.read(magic, 2);
-	if (magic[0] != 'M' || magic[1] != 'Z') {
-		error = 193;
-		return nullptr;
+	auto program = image->host;
+	auto command_line = line.empty() ? u"\"" + names.front() + u"\"" : line;
+	// A batch file runs in the command processor, which CreateProcess starts with the whole command line as `cmd /c "..."`; the
+	// system folder resolves to SysWOW64 for a 32-bit program, as its cmd.exe is the 32-bit one there.
+	const auto extension = program.extension().u16string();
+	if (equal_fold(extension, u".bat") || equal_fold(extension, u".cmd")) {
+		const std::u16string processor = u"C:\\Windows\\System32\\cmd.exe";
+		const auto interpreter = paths.resolve(processor);
+		if (!interpreter || !interpreter->exists) {
+			error = 2;
+			return nullptr;
+		}
+		program = interpreter->host;
+		command_line = processor + u" /c \"" + command_line + u"\"";
+	} else {
+		char magic[2] = {};
+		std::ifstream file(program, std::ios::binary);
+		file.read(magic, 2);
+		if (magic[0] != 'M' || magic[1] != 'Z') {
+			error = 193;
+			return nullptr;
+		}
 	}
 	ChildLaunch launch;
-	launch.image = image->host;
-	launch.command_line = line.empty() ? u"\"" + names.front() + u"\"" : line;
+	launch.image = program;
+	launch.command_line = command_line;
 	launch.directory = directory.empty() ? paths.current() : directory;
 	std::copy(std::begin(standard), std::end(standard), launch.standard);
 	launch.environment = environment;
@@ -318,13 +339,16 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 				inherited.push_back(std::move(record));
 			}
 		}
-		// The child starts with the environment the caller names, or with the one the caller has now.
+		// The child starts with the environment the caller names, or with the one the caller has now. The block is read a page at a
+		// time, so one that ends just before unmapped memory is still read whole.
 		std::u16string environment;
 		if (call[6]) {
 			const bool wide_block = call.u32(5) & create_unicode_environment;
 			for (uint64_t at = call[6]; environment.size() < 1 << 20;) {
-				const auto chunk = call.read(at, 4096);
-				at += 4096;
+				const size_t room = 4096 - at % 4096;
+				// Whole characters only; a wide character that straddles the page is read across it.
+				const auto chunk = call.read(at, !wide_block ? room : room >= 2 ? room & ~size_t(1) : 2);
+				at += chunk.size();
 				bool done = false;
 				for (size_t index = 0; index + 1 < chunk.size() + (wide_block ? 0 : 1) && !done; index += wide_block ? 2 : 1) {
 					const char16_t unit = wide_block ? char16_t(chunk[index] | chunk[index + 1] << 8) : char16_t(chunk[index]);

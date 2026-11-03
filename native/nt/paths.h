@@ -49,8 +49,27 @@ public:
 	// The roots of the virtual application packages installed in the prefix, asked for when a path is missing: a file such a package
 	// keeps under its Root\VFS folder appears at the place it stands for, as the App-V file system shows it to the package's programs.
 	void set_package_roots(std::function<std::vector<std::u16string>()> source) { package_roots = std::move(source); }
+	// The program's PATH as it is now, which the standard library search ends with.
+	void set_search_path(std::function<std::u16string()> source) { search_path = std::move(source); }
+	// The folders of the program's PATH as it is now, where the standard searches for programs and libraries end.
+	std::vector<std::u16string> search_folders() const { return search_path ? path_folders(search_path()) : std::vector<std::u16string>(); }
+	// The folders of a PATH value: separated by semicolons, empty entries skipped, surrounding quotes removed.
+	static std::vector<std::u16string> path_folders(std::u16string_view value);
+	// The value of a variable in an environment block ("NAME=VALUE" entries each ended by a zero), the name compared without case.
+	static std::optional<std::u16string> environment_value(std::u16string_view block, std::u16string_view name);
 	// True for the DOS device names that are not files (NUL, CON, ...), optionally behind \\.\ or \\?\.
 	static bool device(std::u16string_view path);
+	// The volume a drive is, by its \\?\Volume{GUID}\ name: the GUID is made from the drive letter, so a drive is the same volume
+	// every time. A path may start with that name instead of the drive.
+	static std::u16string volume_name(char16_t letter);
+	// The volume's device, \Device\HarddiskVolumeN: drive C is the first volume and the drives after it follow in letter order (A and B
+	// come last), so each letter has its own number every time.
+	static std::u16string volume_device(char16_t letter);
+	// A Win32 path in the NT namespace as the object manager names files: a drive path on its volume's device, a UNC path on the
+	// network redirector's (\Device\Mup), a folder without its closing backslash unless it is a volume's root; empty for anything else.
+	static std::u16string device_path(std::u16string_view dos);
+	// The drives the prefix has, one bit for each letter from A: C: and Z: always, and any other letter with a folder behind it.
+	uint32_t drives() const;
 
 private:
 	const NativePrefix &prefix;
@@ -58,6 +77,7 @@ private:
 	std::optional<std::u16string> dll_folder;
 	bool wow64 = false, redirecting = true;
 	std::function<std::vector<std::u16string>()> package_roots;
+	std::function<std::u16string()> search_path;
 	std::optional<std::filesystem::path> drive_root(char16_t letter) const;
 	std::optional<Resolved> resolve_direct(const std::u16string &path) const;
 	std::optional<Resolved> resolve_virtual(const std::u16string &path) const;

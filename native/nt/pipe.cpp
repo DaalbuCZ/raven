@@ -150,7 +150,9 @@ int attempt(KernelContext &context, PipeObject &pipe, Transfer &transfer, uint32
 			bytes = part;
 			if (part < message.size()) {
 				pipe.carry.assign(message.begin() + ptrdiff_t(part), message.end());
-				error = error_more_data;
+				// Only a handle that reads messages hears that one did not fit: in byte mode the rest is simply the next bytes.
+				if (pipe.read_messages)
+					error = error_more_data;
 			}
 			return 0;
 		}
@@ -263,7 +265,7 @@ Started start_overlapped(KernelContext &context, size_t width, const std::shared
 		if (!finished)
 			return false;
 		state.pending.erase(std::remove(state.pending.begin(), state.pending.end(), io), state.pending.end());
-		finish_io(context, port, key, overlapped, width, error, bytes, !native, event);
+		finish_io(context, pipe ? pipe->port : port, pipe ? pipe->key : key, overlapped, width, error, bytes, !native, event);
 		return true;
 	}, pipe->descriptor, short(shared->reading ? POLLIN : POLLOUT));
 	return {true, 0, 0};
@@ -273,6 +275,7 @@ std::shared_ptr<PipeObject> make_client(int descriptor, uint32_t access, uint32_
 {
 	auto pipe = std::make_shared<PipeObject>(descriptor, access, flags);
 	pipe->connected = true;
+	// A client starts in byte read mode whatever the pipe's type, until SetNamedPipeHandleState says otherwise.
 	pipe->message_mode = type == SOCK_SEQPACKET;
 	pipe->name = name;
 	return pipe;
@@ -529,6 +532,7 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 		pipe->server = true;
 		pipe->listener = listener;
 		pipe->message_mode = message;
+		pipe->read_messages = message && (type & 2);
 		pipe->name = *name;
 		pipe->inherit = inheritable_handle(call, call[7]);
 		++listener->instances;
@@ -586,7 +590,8 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 			else if (!ensure_pipe_connected(*pipe))
 				return false;
 			state.pending.erase(std::remove(state.pending.begin(), state.pending.end(), io), state.pending.end());
-			finish_io(context, port, key, overlapped, width, error, 0);
+			// The port is the one bound when the operation ends: a program may bind it after starting the wait.
+			finish_io(context, pipe ? pipe->port : port, pipe ? pipe->key : key, overlapped, width, error, 0);
 			return true;
 		}, pipe->listener ? pipe->listener->descriptor : -1, short(POLLIN));
 		call.fail(error_io_pending);
@@ -623,7 +628,7 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		if (call[1])
-			pipe->message_mode = pipe->message_mode && (call.load<uint32_t>(call[1]) & 2);
+			pipe->read_messages = pipe->message_mode && (call.load<uint32_t>(call[1]) & 2);
 		call.ret(1);
 	});
 	registry.add("GetNamedPipeInfo", 5, [pipe_of](ApiCall &call) {
@@ -649,7 +654,7 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		if (call[1])
-			call.store<uint32_t>(call[1], pipe->message_mode ? 2 : 0);
+			call.store<uint32_t>(call[1], pipe->read_messages ? 2 : 0);
 		if (call[2])
 			call.store<uint32_t>(call[2], pipe->listener ? pipe->listener->instances : 1);
 		if (call[3])
@@ -675,6 +680,25 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("GetNamedPipeClientProcessId", 2, peer_process);
 	registry.add("GetNamedPipeServerProcessId", 2, peer_process);
+	// Every client of a Raven pipe runs as the same user, so the server thread takes the identity of its own logon at the impersonation
+	// level a client grants unless it asks otherwise.
+	registry.add("ImpersonateNamedPipeClient", 1, [&context, pipe_of](ApiCall &call) {
+		const auto pipe = pipe_of(call[0]);
+		if (!pipe || !pipe->server) {
+			call.fail(6);
+			return;
+		}
+		ensure_pipe_connected(*pipe);
+		if (!pipe->connected) {
+			call.fail(1368);
+			return;
+		}
+		auto token = std::make_shared<AccessToken>(*context.process_token);
+		token->set_type(2);
+		token->set_impersonation_level(2);
+		context.threads.current().impersonation = std::move(token);
+		call.ret(1);
+	});
 	// A transaction writes a request and reads the answer in one call.
 	const auto transact = [&context](ApiCall &call, const std::shared_ptr<PipeObject> &pipe, uint64_t request, uint32_t request_size, uint64_t answer, uint32_t answer_size, uint64_t counted) {
 		ensure_pipe_connected(*pipe);
@@ -796,18 +820,20 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.ret(1);
 	};
+	// The flags are a UCHAR: only the low byte of the argument word is the caller's.
 	registry.add("SetFileCompletionNotificationModes", 2, [&context](ApiCall &call) {
-		if (!(call.u32(1) & ~3U) && set_socket_completion_modes(context.objects, call[0], call.u32(1))) {
+		const uint32_t modes = uint8_t(call[1]);
+		if (!(modes & ~3U) && set_socket_completion_modes(context.objects, call[0], modes)) {
 			call.ret(1);
 			return;
 		}
 		const auto file = context.objects.object_as<FileObject>(call[0]);
-		if (!file || (call.u32(1) & ~3U)) {
+		if (!file || (modes & ~3U)) {
 			call.fail(file ? error_invalid_parameter : 6);
 			return;
 		}
-		file->skip_port_on_success = call.u32(1) & 1;
-		file->skip_event_on_success = call.u32(1) & 2;
+		file->skip_port_on_success = modes & 1;
+		file->skip_event_on_success = modes & 2;
 		call.ret(1);
 	});
 	registry.add("CancelIoEx", 2, [cancel](ApiCall &call) { cancel(call, call[0], call[1], true); });
@@ -815,6 +841,15 @@ void register_pipe_api(ApiRegistry &registry, KernelContext &context)
 	const auto native_cancel = [&context, pipe_of](ApiCall &call, uint64_t handle, uint64_t status_block, uint64_t outcome) {
 		const auto pipe = pipe_of(handle);
 		if (!pipe) {
+			// An AFD endpoint's polls end as cancelled, with their completions.
+			if (const auto found = afd_cancel(context, handle, status_block)) {
+				if (outcome) {
+					put_word(context.process, outcome, 0, call.pointer_width());
+					put_word(context.process, outcome + call.pointer_width(), 0, call.pointer_width());
+				}
+				call.ret(*found || !status_block ? 0 : 0xc0000225U);
+				return;
+			}
 			call.ret(0xc0000008U);
 			return;
 		}

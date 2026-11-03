@@ -9,6 +9,7 @@
 #include "completion_port.h"
 #include "pipe.h"
 #include "threads.h"
+#include <optional>
 #include <string>
 #include "pe/module_set.h"
 
@@ -52,6 +53,8 @@ struct KernelContext {
 	std::function<uint32_t(uint32_t,uint32_t,bool)> queue_status;
 	// Takes a reference on the loaded module at this base, or pins it for the life of the process (GetModuleHandleEx).
 	std::function<void(uint64_t, bool)> reference_module;
+	// The loaded module a guest string names, by name or by path, as GetModuleHandle finds it (zero, with the last error set, if none).
+	std::function<uint64_t(uint64_t, bool)> module_named;
 	// The environment variables the program has now, as the block a new process receives (set by the system handlers).
 	std::function<std::u16string()> environment_block;
 	// Started operations that finish later, such as overlapped socket transfers.
@@ -81,6 +84,12 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context);
 void register_thread_api(ApiRegistry &registry, KernelContext &context);
 void register_memory_api(ApiRegistry &registry, KernelContext &context);
 void register_text_api(ApiRegistry &registry, KernelContext &context);
+// The console functions over the host terminal.
+void register_console_api(ApiRegistry &registry, KernelContext &context);
+// ReadFile on the console's input: a line, or typed characters, as ReadConsoleA reads them. False for any other handle.
+bool read_console_file(KernelContext &context, ApiCall &call);
+// CreateFile of CONIN$, CONOUT$ or CON: the host terminal. False when the name is another device or no terminal is there.
+bool open_console_device(KernelContext &context, ApiCall &call, std::u16string_view name, uint32_t access, bool inheritable);
 void register_process_api(ApiRegistry &registry, KernelContext &context);
 void register_security_api(ApiRegistry &registry, KernelContext &context);
 // The Schannel TLS client of SSPI over the host's OpenSSL.
@@ -89,8 +98,16 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context);
 void register_winsock_api(ApiRegistry &registry, KernelContext &context);
 // WinINet's synchronous HTTP client over host sockets and the host's OpenSSL.
 void register_wininet_api(ApiRegistry &registry, KernelContext &context);
-// SetFileCompletionNotificationModes for a socket handle; false when the handle is not a socket.
+// SetFileCompletionNotificationModes for a socket handle or an AFD endpoint; false when the handle is neither.
 bool set_socket_completion_modes(NativeObjects &objects, uint64_t handle, uint32_t modes);
+// AFD, the socket driver's device (winsock_api.cpp): an endpoint opened as \Device\Afd\<name>, which reports socket readiness
+// through IOCTL_AFD_POLL.
+std::shared_ptr<KernelObject> make_afd_endpoint();
+// NtDeviceIoControlFile on an AFD endpoint; false when the handle is not one.
+bool afd_device_control(KernelContext &context, ApiCall &call);
+// Cancels an endpoint's polls, every one or the one with this IO_STATUS_BLOCK: nothing when the handle is not an endpoint, else
+// whether a poll was found.
+std::optional<bool> afd_cancel(KernelContext &context, uint64_t handle, uint64_t status_block);
 void register_host_api(ApiRegistry &registry, KernelContext &context);
 void register_job_api(ApiRegistry &registry, KernelContext &context);
 // winmm wave output through the host sound server.
@@ -100,6 +117,19 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context);
 void register_crypt32_api(ApiRegistry &registry, KernelContext &context);
 void register_bcrypt_api(ApiRegistry &registry, KernelContext &context);
 void register_font_service(ApiRegistry &registry, KernelContext &context);
+// The HLSL compiler behind d3dcompiler_47.dll: requests from the guest component, results read back in parts.
+void register_shader_service(ApiRegistry &registry, KernelContext &context);
+// An installed font family as GDI enumerates it: the face closest to regular, and the scripts and code pages its OS/2 table claims.
+struct InstalledFamily {
+	std::u16string name;
+	uint32_t weight = 400;
+	bool italic = false;
+	bool fixed = false;
+	uint32_t unicode_ranges[4]{};
+	uint32_t code_pages[2]{};
+};
+// The families of the fonts installed in the prefix, in name order; none without FreeType.
+std::vector<InstalledFamily> installed_font_families();
 void register_canvas_service(ApiRegistry &registry, KernelContext &context);
 // Starts the program an application name or command line names, looked up the way Windows does; null with the Windows error otherwise.
 std::shared_ptr<class ProcessObject> start_program(KernelContext &context, const std::u16string &application, const std::u16string &line,

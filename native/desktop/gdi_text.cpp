@@ -1,5 +1,6 @@
 #include "api.h"
 #include "gdi.h"
+#include "nt/kernel_context.h"
 #include "nt/text.h"
 
 #include <algorithm>
@@ -48,6 +49,126 @@ std::u16string widen(const ApiCall &call, uint64_t address, int32_t count, bool 
 	}
 	const auto bytes = call.read(address, size_t(count));
 	return from_ansi(std::string(bytes.begin(), bytes.end()), 1252);
+}
+
+// The families GDI enumerates: the usual Windows faces the bundled fonts stand for, then every family installed in the prefix.
+std::vector<InstalledFamily> enumerable_families()
+{
+	static const char16_t *const usual[] = {u"Arial", u"Courier New", u"Times New Roman", u"MS Shell Dlg", u"MS Sans Serif", u"Tahoma",
+		u"Segoe UI", u"Verdana", u"Lucida Console", u"Consolas", u"Microsoft Sans Serif"};
+	std::vector<InstalledFamily> families;
+	for (const auto *name : usual) {
+		InstalledFamily family{name};
+		const std::u16string_view view(name);
+		family.fixed = view == u"Courier New" || view == u"Lucida Console" || view == u"Consolas";
+		family.unicode_ranges[0] = 3;
+		family.code_pages[0] = 1;
+		families.push_back(family);
+	}
+	for (auto &installed : installed_font_families())
+		if (std::none_of(families.begin(), families.end(), [&](const InstalledFamily &family) { return equal_fold(family.name, installed.name); }))
+			families.push_back(std::move(installed));
+	return families;
+}
+
+// The LOGFONT of an enumerated family and the NEWTEXTMETRICEX that follows the ENUMLOGFONTEX at metrics: the ANSI forms keep characters
+// in bytes, so their fields after tmLastChar sit four bytes earlier. Sizes are those of a 12-pixel em.
+void describe_family(std::vector<uint8_t> &record, size_t metrics, const InstalledFamily &family, bool ansi, uint8_t charset)
+{
+	const auto put = [&](size_t at, int32_t value) { std::memcpy(record.data() + at, &value, 4); };
+	const int32_t weight = int32_t(family.weight);
+	// The LOGFONT of a TrueType face as the enumeration gives it: the cell height and average width of the metrics below, stroke
+	// output and clip precision and proof quality.
+	put(0, 16);
+	put(4, 7);
+	put(16, weight);
+	record[20] = family.italic;
+	record[23] = charset;
+	record[24] = 3;
+	record[25] = 2;
+	record[26] = 1;
+	record[27] = family.fixed ? 0x31 : 0x22;
+	put(metrics, 16);
+	put(metrics + 4, 13);
+	put(metrics + 8, 3);
+	put(metrics + 12, 4);
+	put(metrics + 20, 7);
+	put(metrics + 24, family.fixed ? 7 : 16);
+	put(metrics + 28, weight);
+	put(metrics + 36, 96);
+	put(metrics + 40, 96);
+	size_t at = metrics + 44;
+	if (ansi) {
+		record[at] = 0x20;
+		record[at + 1] = 0xff;
+		record[at + 2] = 0x1f;
+		record[at + 3] = 0x20;
+		at += 4;
+	} else {
+		const uint16_t characters[] = {0x20, 0xfffc, 0x1f, 0x20};
+		std::memcpy(record.data() + at, characters, sizeof characters);
+		at += 8;
+	}
+	record[at] = family.italic;
+	// TMPF_TRUETYPE | TMPF_VECTOR, and the bit Windows sets for a variable pitch, under the family kind.
+	record[at + 3] = uint8_t((family.fixed ? 0x06 : 0x07) | (family.fixed ? 0x30 : 0x20));
+	record[at + 4] = charset;
+	at += 8;
+	put(at, (family.weight >= 600 ? 0x20 : 0) | (family.italic ? 0x01 : 0) | (family.weight < 600 && !family.italic ? 0x40 : 0));
+	put(at + 4, 2048);
+	put(at + 8, 2355);
+	put(at + 12, 900);
+	for (size_t i = 0; i < 4; ++i)
+		put(at + 16 + i * 4, int32_t(family.unicode_ranges[i]));
+	put(at + 32, int32_t(family.code_pages[0]));
+	put(at + 36, int32_t(family.code_pages[1]));
+}
+
+std::u16string_view style_of(const InstalledFamily &family)
+{
+	if (family.weight >= 600)
+		return family.italic ? u"Bold Italic" : u"Bold";
+	return family.italic ? u"Italic" : u"Regular";
+}
+
+// The character sets a face covers, from the code page bits of its OS/2 table in the order TranslateCharsetInfo gives them, each with
+// the script name EnumFontFamiliesEx reports. A symbol font has the symbol set alone; a face that claims none is Western.
+struct FontScript {
+	uint8_t charset;
+	const char16_t *script;
+};
+
+std::vector<FontScript> scripts_of(const InstalledFamily &family)
+{
+	static const struct { int bit; FontScript script; } bits[] = {
+		{0, {0, u"Western"}}, {1, {238, u"Central European"}}, {2, {204, u"Cyrillic"}}, {3, {161, u"Greek"}}, {4, {162, u"Turkish"}},
+		{5, {177, u"Hebrew"}}, {6, {178, u"Arabic"}}, {7, {186, u"Baltic"}}, {8, {163, u"Vietnamese"}}, {16, {222, u"Thai"}},
+		{17, {128, u"Japanese"}}, {18, {134, u"CHINESE_GB2312"}}, {19, {129, u"Hangul"}}, {20, {136, u"CHINESE_BIG5"}},
+		{21, {130, u"Hangul(Johab)"}}};
+	if (family.code_pages[0] & 0x80000000U)
+		return {{2, u"Symbol"}};
+	std::vector<FontScript> scripts;
+	for (const auto &entry : bits)
+		if (family.code_pages[0] & (1U << entry.bit))
+			scripts.push_back(entry.script);
+	if (scripts.empty())
+		scripts.push_back({0, u"Western"});
+	return scripts;
+}
+
+// The reserved last argument of EnumFontFamiliesEx, which callers pass as zero, carries this when EnumFontFamilies forwards to it.
+constexpr uint64_t once_marker = 0x52564e31;
+
+// The records EnumFontFamiliesEx hands out for a family: one per character set it covers when DEFAULT_CHARSET (or no LOGFONT) asks
+// for any, the one for the set asked for otherwise, and the first alone for the older EnumFontFamilies, which lists a family once.
+std::vector<FontScript> enumerated_scripts(const InstalledFamily &family, int charset, bool once)
+{
+	auto scripts = scripts_of(family);
+	if (once)
+		scripts.resize(1);
+	else if (charset != 1)
+		std::erase_if(scripts, [&](const FontScript &script) { return script.charset != charset; });
+	return scripts;
 }
 
 }
@@ -326,7 +447,7 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			bytes[at + 1] = font.definition[21];
 			bytes[at + 2] = font.definition[22];
 			bytes[at + 3] = info.pitch;
-			bytes[at + 4] = font.definition[23];
+			bytes[at + 4] = font.definition[23] == 1 ? 0 : font.definition[23];
 			call.write(call[1], bytes);
 			call.ret(1);
 		});
@@ -353,15 +474,14 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 						character = char16_t(character + 32);
 				return text;
 			};
-			static const char16_t *const families[] = {u"Arial", u"Courier New", u"Times New Roman", u"MS Sans Serif", u"Tahoma", u"Segoe UI",
-				u"Verdana", u"Lucida Console", u"Consolas", u"Microsoft Sans Serif"};
 			if (lower(face) == u"ms shell dlg")
 				face = u"Microsoft Sans Serif";
 			else if (lower(face) == u"ms shell dlg 2")
 				face = u"Tahoma";
 			else {
-				const auto found = std::find_if(std::begin(families), std::end(families), [&](const char16_t *family) { return lower(family) == lower(face); });
-				face = found == std::end(families) ? u"Arial" : *found;
+				const auto families = enumerable_families();
+				const auto found = std::find_if(families.begin(), families.end(), [&](const InstalledFamily &family) { return lower(family.name) == lower(face); });
+				face = found == families.end() ? u"Arial" : found->name;
 			}
 			if (!call[2]) {
 				call.ret(face.size() + 1);
@@ -375,6 +495,112 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			face.resize(std::min(face.size(), size_t(count - 1)));
 			call.put_wide(call[2], face, face.size() + 1);
 			call.ret(face.size() + 1);
+		});
+	});
+	// GetTextCharsetInfo(dc, FONTSIGNATURE, flags): the character set of the selected font, and the scripts and code pages its OS/2 table
+	// claims; a face the system does not enumerate stands in for the default face, which covers Latin.
+	// What a font covers is known by the blocks its OS/2 table claims, the first of which are listed here.
+	registry.add("GetFontUnicodeRanges", 2, [=, this](ApiCall &call) {
+		guarded(call, 0, [&] {
+			static constexpr struct { int bit; uint16_t first, last; } blocks[] = {
+				{0, 0x20, 0x7e}, {1, 0xa0, 0xff}, {2, 0x100, 0x17f}, {3, 0x180, 0x24f}, {7, 0x370, 0x3ff}, {9, 0x400, 0x4ff}, {11, 0x590, 0x5ff}, {13, 0x600, 0x6ff},
+				{24, 0xe00, 0xe7f}, {31, 0x2000, 0x206f}, {33, 0x20a0, 0x20cf}, {49, 0x3040, 0x309f}, {50, 0x30a0, 0x30ff}, {56, 0xac00, 0xd7a3}, {59, 0x4e00, 0x9fff},
+			};
+			auto &dc = require_dc(call, 0);
+			const auto &font = selected_font(dc);
+			std::u16string face;
+			for (size_t at = 28; at + 1 < font.definition.size() && at < 28 + 64; at += 2) {
+				const char16_t character = char16_t(font.definition[at] | font.definition[at + 1] << 8);
+				if (!character)
+					break;
+				face.push_back(character);
+			}
+			InstalledFamily family{face};
+			family.unicode_ranges[0] = 3;
+			const auto families = enumerable_families();
+			if (const auto found = std::find_if(families.begin(), families.end(), [&](const InstalledFamily &item) { return equal_fold(item.name, face); });
+				found != families.end())
+				family = *found;
+			std::vector<uint8_t> set(16, 0);
+			uint32_t ranges = 0, glyphs = 0;
+			for (const auto &block : blocks) {
+				if (!(family.unicode_ranges[block.bit / 32] >> (block.bit % 32) & 1))
+					continue;
+				const uint16_t count = uint16_t(block.last - block.first + 1);
+				set.push_back(uint8_t(block.first));
+				set.push_back(uint8_t(block.first >> 8));
+				set.push_back(uint8_t(count));
+				set.push_back(uint8_t(count >> 8));
+				glyphs += count;
+				++ranges;
+			}
+			const uint32_t size = uint32_t(set.size());
+			std::memcpy(set.data(), &size, 4);
+			std::memcpy(set.data() + 8, &glyphs, 4);
+			std::memcpy(set.data() + 12, &ranges, 4);
+			if (call[1])
+				call.write(call[1], set);
+			call.ret(size);
+		});
+	});
+	registry.add("TranslateCharsetInfo", 3, [](ApiCall &call) {
+		// In the order of the code page bits of a font signature; the last bit is the symbol set.
+		static constexpr struct { uint32_t charset, code_page; int bit; } sets[] = {
+			{0, 1252, 0}, {238, 1250, 1}, {204, 1251, 2}, {161, 1253, 3}, {162, 1254, 4}, {177, 1255, 5}, {178, 1256, 6}, {186, 1257, 7},
+			{163, 1258, 8}, {222, 874, 16}, {128, 932, 17}, {134, 936, 18}, {129, 949, 19}, {136, 950, 20}, {130, 1361, 21}, {2, 42, 31},
+		};
+		const uint32_t kind = call.u32(2);
+		const uint32_t mask = kind == 3 && call[0] ? call.load<uint32_t>(call[0]) : 0;
+		const auto found = std::find_if(std::begin(sets), std::end(sets), [&](const auto &set) {
+			if (kind == 1) return set.charset == uint32_t(call[0]);
+			if (kind == 2) return set.code_page == uint32_t(call[0]);
+			return (mask >> set.bit & 1) != 0;
+		});
+		if (found == std::end(sets) || !call[1]) {
+			call.ret(0);
+			return;
+		}
+		std::vector<uint8_t> info(32, 0);
+		std::memcpy(info.data(), &found->charset, 4);
+		std::memcpy(info.data() + 4, &found->code_page, 4);
+		const uint32_t bit = 1U << found->bit;
+		std::memcpy(info.data() + 24, &bit, 4);
+		call.write(call[1], info);
+		call.ret(1);
+	});
+	// LOGFONT holds the character set past its numbers and three flag bytes; asking for the default answers ANSI.
+	registry.add("GetTextCharset", 1, [=, this](ApiCall &call) {
+		guarded(call, 1, [&] {
+			const uint8_t charset = selected_font(require_dc(call, 0)).definition[23];
+			call.ret(charset == 1 ? 0 : charset);
+		});
+	});
+	registry.add("GetTextCharsetInfo", 3, [=, this](ApiCall &call) {
+		guarded(call, 1, [&] {
+			auto &dc = require_dc(call, 0);
+			const auto &font = selected_font(dc);
+			std::u16string face;
+			for (size_t at = 28; at + 1 < font.definition.size() && at < 28 + 64; at += 2) {
+				const char16_t character = char16_t(font.definition[at] | font.definition[at + 1] << 8);
+				if (!character)
+					break;
+				face.push_back(character);
+			}
+			InstalledFamily family{face};
+			family.unicode_ranges[0] = 3;
+			family.code_pages[0] = 1;
+			const auto families = enumerable_families();
+			if (const auto found = std::find_if(families.begin(), families.end(), [&](const InstalledFamily &item) { return equal_fold(item.name, face); });
+				found != families.end())
+				family = *found;
+			if (call[1]) {
+				std::vector<uint8_t> signature(24, 0);
+				std::memcpy(signature.data(), family.unicode_ranges, 16);
+				std::memcpy(signature.data() + 16, family.code_pages, 8);
+				call.write(call[1], signature);
+			}
+			// DEFAULT_CHARSET is realized as the ANSI set; any other request comes back as asked.
+			call.ret(font.definition[23] == 1 ? 0 : font.definition[23]);
 		});
 	});
 	// GetGlyphOutlineW(dc, character, format, GLYPHMETRICS, size, buffer, MAT2): the metrics of a character of the selected font and its
@@ -505,7 +731,7 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			const uint16_t characters[4] = {info.first, info.last, info.default_character, info.break_character};
 			std::memcpy(bytes.data() + 48, characters, 8);
 			bytes[56] = font.definition[20]; bytes[57] = font.definition[21]; bytes[58] = font.definition[22]; bytes[59] = info.pitch;
-			bytes[60] = font.definition[23];
+			bytes[60] = font.definition[23] == 1 ? 0 : font.definition[23];
 			const int32_t em = std::max<int32_t>(info.height - info.internal_leading, 1);
 			put32(76, (weight >= 700 ? 0x20 : 0) | (font.definition[20] ? 1 : 0) | 0x40);
 			const uint32_t design_em = objects.text().logical_units_per_em(font.definition);
@@ -531,7 +757,8 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		});
 	});
 	registry.add("GetTextMetricsA", 2, [=](ApiCall &call) { text_metrics(call, true); });
-	registry.add("GetCharWidthW", 4, [=, this](ApiCall &call) {
+	for (const auto *name : {"GetCharWidthW", "GetCharWidth32W"})
+	registry.add(name, 4, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			auto &dc = require_dc(call, 0);
 			const auto &font = selected_font(dc);
@@ -705,14 +932,15 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			call.ret(add_font(definition));
 		});
 	});
-	// The bundled families stand for the common Windows faces; callers see the usual names.
+	// The bundled families stand for the common Windows faces, and the fonts installed in the prefix follow under their own names.
 	registry.add("EnumFontFamiliesExW", 5, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			require_dc(call, 0);
-			static const char16_t *families[] = {u"Arial", u"Courier New", u"Times New Roman", u"MS Shell Dlg", u"MS Sans Serif", u"Tahoma",
-				u"Segoe UI", u"Verdana", u"Lucida Console", u"Consolas", u"Microsoft Sans Serif"};
+			const auto families = enumerable_families();
 			std::u16string wanted;
+			int charset = 1;
 			if (call[1]) {
+				charset = call.read(call[1] + 23, 1)[0];
 				const auto bytes = call.read(call[1] + 28, 64);
 				for (size_t i = 0; i < 32; ++i) {
 					const char16_t c = char16_t(bytes[i * 2] | (bytes[i * 2 + 1] << 8));
@@ -725,7 +953,7 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 				call.ret(0);
 				return;
 			}
-			// A process without a way to call back into its code, as 32-bit programs are here, enumerates no family rather than fail.
+			// A process without a way to call back into its code enumerates no family rather than fail.
 			if (!invoke) {
 				call.ret(1);
 				return;
@@ -740,35 +968,33 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			const auto scratch_size = uint64_t(4096);
 			const auto scratch = process.map_memory(scratch_size, PROT_READ | PROT_WRITE);
 			try {
-				for (const auto *family : families) {
-					if (!wanted.empty() && lower(family) != lower(wanted))
+				for (const auto &family : families) {
+					if (!wanted.empty() && lower(family.name) != lower(wanted))
 						continue;
-					// ENUMLOGFONTEXW (LOGFONTW, full name, style, script) followed by NEWTEXTMETRICEXW.
-					std::vector<uint8_t> record(512, 0);
-					int32_t height = -12;
-					std::memcpy(record.data(), &height, 4);
-					const int32_t weight = 400;
-					std::memcpy(record.data() + 16, &weight, 4);
-					record[23] = 0;
-					record[27] = std::u16string_view(family) == u"Courier New" || std::u16string_view(family) == u"Lucida Console" || std::u16string_view(family) == u"Consolas" ? 0x31 : 0x22;
-					for (size_t i = 0; i < std::char_traits<char16_t>::length(family) && i < 31; ++i) {
-						record[28 + i * 2] = uint8_t(family[i]);
-						record[29 + i * 2] = uint8_t(family[i] >> 8);
-						record[92 + i * 2] = uint8_t(family[i]);
-						record[93 + i * 2] = uint8_t(family[i] >> 8);
+					for (const auto &script : enumerated_scripts(family, charset, call[4] == once_marker)) {
+						// ENUMLOGFONTEXW (LOGFONTW, full name, style, script) followed by NEWTEXTMETRICEXW.
+						std::vector<uint8_t> record(512, 0);
+						describe_family(record, 348, family, false, script.charset);
+						const auto put_text = [&](size_t at, std::u16string_view text, size_t limit) {
+							for (size_t i = 0; i < std::min(text.size(), limit); ++i) {
+								record[at + i * 2] = uint8_t(text[i]);
+								record[at + i * 2 + 1] = uint8_t(text[i] >> 8);
+							}
+						};
+						put_text(28, family.name, 31);
+						put_text(92, family.name, 63);
+						put_text(92 + 128, style_of(family), 31);
+						put_text(92 + 192, script.script, 31);
+						call.write(scratch, record);
+						const uint64_t arguments[] = {scratch, scratch + 348, 4, call[3]};
+						const auto outcome = invoke(call[2], arguments);
+						if (outcome.stop != NativeStop::returned)
+							throw outcome;
+						result = outcome.value;
+						if (!uint32_t(outcome.value))
+							break;
 					}
-					const char16_t style[] = u"Regular", script[] = u"Western";
-					for (size_t i = 0; i < 7; ++i) {
-						record[92 + 128 + i * 2] = uint8_t(style[i]);
-						record[92 + 192 + i * 2] = uint8_t(script[i]);
-					}
-					call.write(scratch, record);
-					const uint64_t arguments[] = {scratch, scratch + 348, 4, call[3]};
-					const auto outcome = invoke(call[2], arguments);
-					if (outcome.stop != NativeStop::returned)
-						throw outcome;
-					result = outcome.value;
-					if (!uint32_t(outcome.value))
+					if (!uint32_t(result))
 						break;
 				}
 			} catch (...) {
@@ -802,7 +1028,7 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			const auto block = process.map_memory(4096, PROT_READ | PROT_WRITE);
 			try {
 				call.write(block, logical);
-				ApiCall inner(call.process, call.environment, {call[0], block, call[2], call[3], 0});
+				ApiCall inner(call.process, call.environment, {call[0], block, call[2], call[3], once_marker});
 				extended->second(inner);
 				process.unmap_memory(block);
 				call.ret(inner.result);
@@ -820,10 +1046,11 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 	registry.add("EnumFontFamiliesExA", 5, [=, this](ApiCall &call) {
 		guarded(call, 0, [&] {
 			require_dc(call, 0);
-			static const char *families[] = {"Arial", "Courier New", "Times New Roman", "MS Shell Dlg", "MS Sans Serif", "Tahoma",
-				"Segoe UI", "Verdana", "Lucida Console", "Consolas", "Microsoft Sans Serif"};
+			const auto families = enumerable_families();
 			std::string wanted;
+			int charset = 1;
 			if (call[1]) {
+				charset = call.read(call[1] + 23, 1)[0];
 				const auto bytes = call.read(call[1] + 28, 32);
 				for (size_t i = 0; i < 32 && bytes[i]; ++i)
 					wanted.push_back(char(bytes[i]));
@@ -841,26 +1068,30 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			uint64_t result = 1;
 			const auto scratch = process.map_memory(4096, PROT_READ | PROT_WRITE);
 			try {
-				for (const auto *family : families) {
-					if (!wanted.empty() && lower(family) != lower(wanted))
+				for (const auto &family : families) {
+					const auto name = to_ansi(family.name, 1252);
+					if (!wanted.empty() && lower(name) != lower(wanted))
 						continue;
-					std::vector<uint8_t> record(512, 0);
-					const int32_t height = -12, weight = 400;
-					std::memcpy(record.data(), &height, 4);
-					std::memcpy(record.data() + 16, &weight, 4);
-					const std::string_view name(family);
-					record[27] = name == "Courier New" || name == "Lucida Console" || name == "Consolas" ? 0x31 : 0x22;
-					std::memcpy(record.data() + 28, family, std::min<size_t>(name.size(), 31));
-					std::memcpy(record.data() + 60, family, std::min<size_t>(name.size(), 63));
-					std::memcpy(record.data() + 124, "Regular", 7);
-					std::memcpy(record.data() + 156, "Western", 7);
-					call.write(scratch, record);
-					const uint64_t arguments[] = {scratch, scratch + 256, 4, call[3]};
-					const auto outcome = invoke(call[2], arguments);
-					if (outcome.stop != NativeStop::returned)
-						throw outcome;
-					result = outcome.value;
-					if (!uint32_t(outcome.value))
+					for (const auto &script : enumerated_scripts(family, charset, call[4] == once_marker)) {
+						// ENUMLOGFONTEXA (LOGFONTA, full name, style, script) followed by NEWTEXTMETRICEXA.
+						std::vector<uint8_t> record(512, 0);
+						describe_family(record, 256, family, true, script.charset);
+						const auto style = to_ansi(style_of(family), 1252);
+						const auto script_name = to_ansi(script.script, 1252);
+						std::memcpy(record.data() + 28, name.data(), std::min<size_t>(name.size(), 31));
+						std::memcpy(record.data() + 60, name.data(), std::min<size_t>(name.size(), 63));
+						std::memcpy(record.data() + 124, style.data(), std::min<size_t>(style.size(), 31));
+						std::memcpy(record.data() + 156, script_name.data(), std::min<size_t>(script_name.size(), 31));
+						call.write(scratch, record);
+						const uint64_t arguments[] = {scratch, scratch + 256, 4, call[3]};
+						const auto outcome = invoke(call[2], arguments);
+						if (outcome.stop != NativeStop::returned)
+							throw outcome;
+						result = outcome.value;
+						if (!uint32_t(outcome.value))
+							break;
+					}
+					if (!uint32_t(result))
 						break;
 				}
 			} catch (...) {
@@ -1062,6 +1293,48 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 			call.store<int32_t>(call[6], 1);
 		call.ret(0);
 	});
+	// ScriptItemizeOpenType: the same items, with the one item's OpenType script tag in its own array.
+	registry.add("ScriptItemizeOpenType", 8, [](ApiCall &call) {
+		const int32_t count = call.i32(1), capacity = call.i32(2);
+		if (!call[0] || count <= 0 || !call[5] || !call[6]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		if (capacity < 2) {
+			call.ret(0x8007000eU);
+			return;
+		}
+		const std::vector<uint8_t> items(16, 0);
+		call.write(call[5], items);
+		call.store<int32_t>(call[5] + 8, count);
+		call.store<uint32_t>(call[6], 0x544c4644);
+		if (call[7])
+			call.store<int32_t>(call[7], 1);
+		call.ret(0);
+	});
+	// ScriptGetFontLanguageTags(dc, cache, analysis, script tag, capacity, tags, count): the default language.
+	registry.add("ScriptGetFontLanguageTags", 7, [](ApiCall &call) {
+		if (!call[5] || !call[6] || call.i32(4) < 1) {
+			call.ret(0x80070057U);
+			return;
+		}
+		call.store<uint32_t>(call[5], 0x746c6664);
+		call.store<int32_t>(call[6], 1);
+		call.ret(0);
+	});
+	// Fonts come from the system's own list here: a private font that exists counts as added, and its faces stay out of the list.
+	registry.add("AddFontResourceExW", 3, [](ApiCall &call) { call.ret(call[0] ? 1 : 0); });
+	registry.add("RemoveFontResourceExW", 3, [](ApiCall &call) { call.ret(call[0] ? 1 : 0); });
+	// ScriptGetFontScriptTags(dc, cache, analysis, capacity, tags, count): the default script serves every font's text here.
+	registry.add("ScriptGetFontScriptTags", 6, [](ApiCall &call) {
+		if (!call[4] || !call[5] || call.i32(3) < 1) {
+			call.ret(0x80070057U);
+			return;
+		}
+		call.store<uint32_t>(call[4], 0x544c4644);
+		call.store<int32_t>(call[5], 1);
+		call.ret(0);
+	});
 	// ScriptShape(dc, cache, text, count, glyph capacity, analysis, glyphs, clusters, visual attributes, glyph count).
 	registry.add("ScriptShape", 10, [=](ApiCall &call) {
 		const int32_t count = call.i32(3), capacity = call.i32(4);
@@ -1245,6 +1518,74 @@ void NativeDesktop::register_text_api(ApiRegistry &registry)
 		}
 		dc->text_color = saved_text;
 		dc->text_align = saved_align;
+		call.ret(0);
+	});
+	// ScriptGetProperties(table, count): the properties of the scripts ScriptItemize names, which is the one neutral script: no language,
+	// the ANSI character set and simple text. The table stays for the life of the process, as Uniscribe's does.
+	auto script_table = std::make_shared<uint64_t>(0);
+	// SCRIPT_FONTPROPERTIES: glyphs here are the characters themselves, and no font offers a kashida.
+	registry.add("ScriptGetFontProperties", 3, [](ApiCall &call) {
+		if (!call[2] || call.load<int32_t>(call[2]) != 16) {
+			call.ret(0x80070057U);
+			return;
+		}
+		call.store<uint16_t>(call[2] + 4, 0x20);
+		call.store<uint16_t>(call[2] + 6, 0);
+		call.store<uint16_t>(call[2] + 8, 0);
+		call.store<uint16_t>(call[2] + 10, 0xffff);
+		call.store<int32_t>(call[2] + 12, 0);
+		call.ret(0);
+	});
+	// No national digit shapes: the control and state a default run starts from.
+	registry.add("ScriptApplyDigitSubstitution", 3, [](ApiCall &call) {
+		if (!call[1] || !call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		call.store<uint32_t>(call[1], 0);
+		call.store<uint16_t>(call[2], 0);
+		call.ret(0);
+	});
+	registry.add("ScriptGetProperties", 2, [=, this](ApiCall &call) {
+		if (!call[0] && !call[1]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		if (!*script_table) {
+			const auto block = process.map_memory(4096, PROT_READ | PROT_WRITE);
+			if (!block) {
+				call.ret(0x8007000eU);
+				return;
+			}
+			// The array of pointers, then the eight bytes of SCRIPT_PROPERTIES the pointer names.
+			const uint64_t properties = block + 16;
+			call.write(properties, std::vector<uint8_t>(8, 0));
+			if (call.pointer_width() == 8)
+				call.store<uint64_t>(block, properties);
+			else
+				call.store<uint32_t>(block, uint32_t(properties));
+			*script_table = block;
+		}
+		if (call[0])
+			call.store_pointer(call[0], *script_table);
+		if (call[1])
+			call.store<int32_t>(call[1], 1);
+		call.ret(0);
+	});
+	// ScriptRecordDigitSubstitution(locale, SCRIPT_DIGITSUBSTITUTE): the locale's own language for national and traditional digits, and
+	// no substitution, as the locales Raven reports set it.
+	registry.add("ScriptRecordDigitSubstitution", 2, [](ApiCall &call) {
+		if (!call[1]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const uint32_t locale = call.u32(0);
+		// The default locales stand for US English; a locale's primary language is the low ten bits of its language.
+		const uint16_t language = uint16_t((locale == 0 || locale == 0x400 || locale == 0x800 || locale == 0x7f ? 0x409 : locale) & 0x3ff);
+		const uint32_t languages = uint32_t(language) | uint32_t(language) << 16;
+		call.store<uint32_t>(call[1], languages);
+		call.store<uint32_t>(call[1] + 4, 1);
+		call.store<uint32_t>(call[1] + 8, 0);
 		call.ret(0);
 	});
 	// Word and character stops for plain text: every character is a cursor stop and a word starts after white space.

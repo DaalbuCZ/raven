@@ -1,19 +1,17 @@
 # CP1252 data
 
-The unchanged `txt2nls.cpp` and `c_1252.txt` come from ReactOS revision
-`dacf2a6c47fa562799f9c8a41ab6d5c558556558`, at `sdk/tools/txt2nls/main.cpp`
-and `media/nls/src/c_1252.txt`. The source archive SHA-256 is
+The unchanged `c_1252.txt` comes from ReactOS revision
+`dacf2a6c47fa562799f9c8a41ab6d5c558556558`, at `media/nls/src/c_1252.txt`. The source archive SHA-256 is
 `5373bbbb60541cb2a49e0acb53360e1218d4f5d56c31f9187b341b9fc16daa69`.
-The tool retains its GPL-2.0-or-later notice and COPYING. ReactOS identifies
+ReactOS identifies
 Microsoft's Windows Supported Code Page Data Files as the text data's origin.
 The same table is published as Unicode's `WindowsBestFit/bestfit1252.txt`.
 Every byte matches after CRLF-to-LF conversion. `data-provenance.json` records
 the URLs and hashes; [Unicode-3.0.txt](../../../LICENSES/Unicode-3.0.txt) preserves
 the applicable data license. Unicode's Terms of Use cover data files under
 `https://www.unicode.org/Public/` unless a specific exception is indicated.
-This records the table's terms separately from the GPL converter's license.
 
-The tool runs only during the build. Its generated NLS file must match
+Raven's `native/nt/nls_tables.cpp` runs only during the build. Its generated NLS file must match
 `e2634ee32da7977d762d2d45be2053309ee718572a7d8bb0034180dc1b0b6b76` before
 the qualified 65536-byte Unicode-to-CP1252 and 256-entry byte-to-Unicode tables
 are embedded. Raven's conversion
@@ -29,6 +27,15 @@ ReactOS revision and archive, at `media/nls/src`. Each matches Unicode's
 `single-byte-provenance.json` records the URLs and hashes under the same
 Unicode-3.0 terms. CP874 is left out because its ReactOS copy differs from the
 Unicode file.
+
+## OEM code pages
+
+`CP437.TXT` and `CP850.TXT`, the OEM pages a console uses, are Unicode's
+`MAPPINGS/VENDORS/MICSFT/PC` tables, unchanged. Unicode publishes no best-fit
+table for them, so they carry only the byte-to-character table; every byte maps
+to the same character as in ReactOS's `c_437.txt` and `c_850.txt` at the
+revision above. A character converts back only to its own byte: there is no best
+fit for these two pages, and a character they lack becomes the default `?`.
 
 `sbcs.cmake` reads each text at build time into its 256-entry byte table and its
 best-fit table, sorted by character; the build checks every input hash first.

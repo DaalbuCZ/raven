@@ -14,10 +14,7 @@
 #define WINVER 0x0601
 #define _WIN32_WINNT 0x0601
 #include <windows.h>
-/* The FDI structures are packed to four bytes, as in the Windows SDK and the cabinet library; MinGW's header leaves them aligned. */
-#include <pshpack4.h>
 #include <fdi.h>
-#include <poppack.h>
 
 /* FDI seeks from the start, the position or the end, as the C library's fseek does. */
 enum { SEEK_SET, SEEK_CUR, SEEK_END };
@@ -400,11 +397,29 @@ static int split(WCHAR *line, WCHAR **arguments, int capacity)
 	return count;
 }
 
+/* There is no component store to service. The one update that is answered is the one the .NET Framework's setup asks for on older
+   Windows, whose only payload is d3dcompiler_47.dll, which this system already has as its own. Any other package is refused. */
+static DWORD add_package(const WCHAR *package)
+{
+	if (!exists(package)) {
+		say(L"Error: 2\r\n\r\nThe package was not found.\r\n");
+		return ERROR_FILE_NOT_FOUND;
+	}
+	while (*package && !starts_with(package, L"KB4019990"))
+		++package;
+	if (!*package) {
+		say(L"Error: 50\r\n\r\nInstalling this package is not supported.\r\n");
+		return ERROR_NOT_SUPPORTED;
+	}
+	say(L"The operation completed successfully.\r\n");
+	return 0;
+}
+
 static DWORD dism(WCHAR *line)
 {
 	WCHAR *arguments[32];
-	const WCHAR *feature = NULL, *source = NULL;
-	BOOL online = FALSE, enable = FALSE, info = FALSE, list = FALSE;
+	const WCHAR *feature = NULL, *source = NULL, *package = NULL;
+	BOOL online = FALSE, enable = FALSE, info = FALSE, list = FALSE, add = FALSE;
 	const int count = split(line, arguments, 32);
 	int index;
 	BOOL wow64 = FALSE;
@@ -420,11 +435,17 @@ static DWORD dism(WCHAR *line)
 			info = TRUE;
 		else if (same(argument, L"/Get-Features"))
 			list = TRUE;
+		else if (same(argument, L"/Add-Package"))
+			add = TRUE;
+		else if (starts_with(argument, L"/PackagePath:"))
+			package = argument + 13;
 		else if (starts_with(argument, L"/FeatureName:"))
 			feature = argument + 13;
 		else if (starts_with(argument, L"/Source:"))
 			source = argument + 8;
 	}
+	if (online && add && package)
+		return add_package(package);
 	if (!online || (!enable && !info && !list)) {
 		say(L"Error: 87\r\n\r\nOnly /Online with /Enable-Feature, /Get-FeatureInfo or /Get-Features is known here.\r\n");
 		return ERROR_INVALID_PARAMETER;

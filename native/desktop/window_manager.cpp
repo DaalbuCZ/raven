@@ -453,18 +453,21 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 	});
 	registry.add("SetParent", 2, [this](ApiCall &call) {
 		auto *window = objects.window(call[0]);
-		if (!window || (call[1] && !objects.window(call[1]))) {
+		// HWND_MESSAGE takes the window off the desktop: it stays a top-level window that only receives messages.
+		const bool message_only = call[1] == UINT64_MAX - 2 || call[1] == 0xfffffffdULL;
+		const uint64_t target = message_only ? 0 : call[1];
+		if (!window || (target && !objects.window(target))) {
 			call.fail(1400);
 			return;
 		}
-		if (call[1] == call[0] || objects.is_child(call[0], call[1])) {
+		if (target == call[0] || objects.is_child(call[0], target)) {
 			call.fail(87);
 			return;
 		}
 		const auto previous = window->parent;
 		const auto *old_parent = previous ? objects.window(previous) : nullptr;
 		const int32_t old_x = old_parent ? old_parent->x : 0, old_y = old_parent ? old_parent->y : 0;
-		const auto *new_parent = call[1] ? objects.window(call[1]) : nullptr;
+		const auto *new_parent = target ? objects.window(target) : nullptr;
 		const int32_t new_x = new_parent ? new_parent->x : 0, new_y = new_parent ? new_parent->y : 0;
 		// Surfaces belong to the root a window draws on, so a move between roots drops every surface of the subtree.
 		const auto drop_surfaces = [&](auto &&self, uint64_t node) -> void {
@@ -474,13 +477,14 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 			if (auto *record = objects.window(node))
 				record->bitmap = record->dc = 0;
 		};
-		if (previous != call[1])
+		if (previous != target || message_only)
 			drop_surfaces(drop_surfaces, call[0]);
 		window = objects.window(call[0]);
-		window->parent = call[1];
-		window->shown_on = !call[1] && previous ? objects.window_root(previous) : 0;
-		if (call[1]) window->style = (window->style & ~0x80000000U) | 0x40000000U;
+		window->parent = target;
+		window->shown_on = !target && previous ? objects.window_root(previous) : 0;
+		if (target) window->style = (window->style & ~0x80000000U) | 0x40000000U;
 		else window->style = (window->style & ~0x40000000U) | 0x80000000U;
+		if (message_only) window->style &= ~0x10000000U;
 		shift_window(call[0], new_x - old_x, new_y - old_y);
 		objects.restack(call[0], true);
 		objects.update_window_dcs(call[0]);
@@ -570,6 +574,12 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 	registry.add("AttachThreadInput", 3, [](ApiCall &call) { call.ret(1); });
 	registry.add("GetWindowThreadProcessId", 2, [this](ApiCall &call) {
 		if (!objects.window(call[0])) {
+			// A window of another process: its creating thread stays with the owner, whose first thread stands for it.
+			if (const auto owner = foreign_window_owner(call[0])) {
+				if (call[1]) call.store<uint32_t>(call[1], *owner);
+				call.ret(*owner);
+				return;
+			}
 			call.fail(1400);
 			return;
 		}
@@ -916,6 +926,13 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 	});
 	// Layered window attributes are kept per window for GetLayeredWindowAttributes; the compositor draws windows opaque.
 	auto layered = std::make_shared<std::map<uint64_t, std::array<uint32_t, 3>>>();
+	registry.add("UpdateLayeredWindow", 9, [this](ApiCall &call) {
+		if (!objects.window(call[0])) {
+			call.fail(1400);
+			return;
+		}
+		call.ret(1);
+	});
 	registry.add("SetLayeredWindowAttributes", 4, [this, layered](ApiCall &call) {
 		if (!objects.window(call[0])) {
 			call.fail(1400);
@@ -936,6 +953,35 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		call.ret(1);
 	});
 	// Of the attributes the compositor keeps for a window, the dark frame changes what is drawn; the others are accepted and ignored.
+	// The attributes a program reads to place its own caption: the composition is on, nothing is cloaked, the frame is the window
+	// and the caption buttons sit in its top right corner, in window coordinates. Others are refused, as for an unknown attribute.
+	registry.add("DwmGetWindowAttribute", 4, [this](ApiCall &call) {
+		const auto *window = objects.window(call[0]);
+		if (!window) {
+			call.ret(0x80070006U);
+			return;
+		}
+		const uint32_t attribute = call.u32(1), size = call.u32(3);
+		const auto rect = [&](int32_t left, int32_t top, int32_t right, int32_t bottom) {
+			const int32_t values[] = {left, top, right, bottom};
+			call.write(call[2], std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(values), sizeof(values)));
+			call.ret(0);
+		};
+		if (attribute == 1 && size >= 4) {
+			call.store<uint32_t>(call[2], 1);
+			call.ret(0);
+		} else if (attribute == 14 && size >= 4) {
+			call.store<uint32_t>(call[2], 0);
+			call.ret(0);
+		} else if (attribute == 5 && size >= 16) {
+			constexpr int32_t buttons_width = 138, buttons_height = 30;
+			rect(std::max(window->width - buttons_width, 0), 0, window->width, buttons_height);
+		} else if (attribute == 9 && size >= 16) {
+			rect(window->x, window->y, window->x + window->width, window->y + window->height);
+		} else {
+			call.ret(0x80070057U);
+		}
+	});
 	registry.add("DwmSetWindowAttribute", 4, [this](ApiCall &call) {
 		auto *window = objects.window(call[0]);
 		if (!window) {

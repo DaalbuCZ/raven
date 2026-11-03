@@ -97,7 +97,7 @@ void ActivationContexts::attach(KernelContext &context)
 	// The program's own manifest, resource 1 of type RT_MANIFEST, is the context in effect when no other is active.
 	const auto &image = context.entry;
 	const auto directory = image.image.directories[2];
-	if (!directory.address || !directory.size || directory.size > 16 * 1024 * 1024)
+	if (!directory.address || !directory.size || directory.size > image.image.image_size)
 		return;
 	try {
 		const auto resources = read_resources(directory, context.process.read_memory(image.loaded.base() + directory.address, directory.size),
@@ -213,6 +213,20 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::parse(std::strin
 std::optional<ActivationContexts::Assembly> ActivationContexts::resolve(const Assembly &identity) const
 {
 	std::error_code error;
+	// A private assembly (no public key token) lives with the program, as Windows looks for it: <name>.manifest in the program's
+	// folder, then <name>\<name>.manifest; its files are beside its manifest.
+	if (identity.token.empty() && !identity.name.empty() && !application.empty())
+		for (const auto &place : {application / (identity.name + ".manifest"), application / identity.name / (identity.name + ".manifest")}) {
+			if (!std::filesystem::is_regular_file(place, error))
+				continue;
+			std::ifstream input(place, std::ios::binary);
+			const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+			auto candidate = parse(bytes, false);
+			if (!candidate || lowered(candidate->name) != lowered(identity.name))
+				continue;
+			candidate->folder = place.parent_path().string();
+			return candidate;
+		}
 	if (manifests.empty() || identity.name.empty() || !std::filesystem::is_directory(manifests, error))
 		return std::nullopt;
 	const std::string architecture = identity.architecture.empty() || identity.architecture == "*" ? (wide_process ? "amd64" : "x86") : identity.architecture;
@@ -238,11 +252,19 @@ std::optional<ActivationContexts::Assembly> ActivationContexts::resolve(const As
 	return best;
 }
 
-void ActivationContexts::prepare(const std::filesystem::path &store, bool wide, std::string_view program_manifest)
+void ActivationContexts::prepare(const std::filesystem::path &store, bool wide, std::string_view program_manifest,
+	const std::filesystem::path &application_folder)
 {
 	manifests = store;
 	wide_process = wide;
+	application = application_folder;
 	program = program_manifest.empty() ? std::nullopt : parse(program_manifest, false);
+}
+
+std::filesystem::path ActivationContexts::folder_of(const Assembly &assembly) const
+{
+	const std::filesystem::path folder(assembly.folder);
+	return folder.is_absolute() ? folder : manifests.parent_path() / folder;
 }
 
 const ActivationContexts::Assembly *ActivationContexts::declaring(const Assembly &root, std::string_view name, uint32_t &index) const
@@ -269,14 +291,14 @@ std::optional<std::filesystem::path> ActivationContexts::library_folder(std::str
 	}
 	uint32_t index = 1;
 	if (const auto *assembly = root ? declaring(*root, name, index) : nullptr)
-		return manifests.parent_path() / assembly->folder;
+		return folder_of(*assembly);
 	return std::nullopt;
 }
 
 std::optional<ActivationContexts::Assembly> ActivationContexts::module_manifest(const PEImage &image) const
 {
 	const auto directory = image.directories[2];
-	if (!directory.address || !directory.size || directory.size > 16 * 1024 * 1024)
+	if (!directory.address || !directory.size || directory.size > image.image_size)
 		return std::nullopt;
 	try {
 		for (const auto &resource : read_resources(directory, image.file_span(directory.address, directory.size), image.image_size))
@@ -293,7 +315,7 @@ std::optional<std::filesystem::path> ActivationContexts::assembly_folder(const A
 {
 	uint32_t index = 1;
 	if (const auto *assembly = declaring(root, name, index))
-		return manifests.parent_path() / assembly->folder;
+		return folder_of(*assembly);
 	return std::nullopt;
 }
 
@@ -310,9 +332,9 @@ void ActivationContexts::set_compatibility_layer(std::u16string_view layers)
 {
 	// The layers are names separated by spaces, after an optional "~" or "!"; the first that names a version of Windows decides.
 	static const std::pair<std::string_view, Version> versions[] = {{"WIN2000", {5, 0, 2195}}, {"WINXP", {5, 1, 2600}},
-		{"WINXPSP1", {5, 1, 2600}}, {"WINXPSP2", {5, 1, 2600}}, {"WINXPSP3", {5, 1, 2600}}, {"WINSRV03SP1", {5, 2, 3790}},
-		{"WINSRV03SP2", {5, 2, 3790}}, {"VISTARTM", {6, 0, 6000}}, {"VISTASP1", {6, 0, 6001}}, {"VISTASP2", {6, 0, 6002}},
-		{"WIN7RTM", {6, 1, 7600}}, {"WIN7SP1", {6, 1, 7601}}, {"WIN8RTM", {6, 2, 9200}}, {"WIN81RTM", {6, 3, 9600}}};
+		{"WINXPSP1", {5, 1, 2600, 1}}, {"WINXPSP2", {5, 1, 2600, 2}}, {"WINXPSP3", {5, 1, 2600, 3}}, {"WINSRV03SP1", {5, 2, 3790, 1}},
+		{"WINSRV03SP2", {5, 2, 3790, 2}}, {"VISTARTM", {6, 0, 6000}}, {"VISTASP1", {6, 0, 6001, 1}}, {"VISTASP2", {6, 0, 6002, 2}},
+		{"WIN7RTM", {6, 1, 7600}}, {"WIN7SP1", {6, 1, 7601, 1}}, {"WIN8RTM", {6, 2, 9200}}, {"WIN81RTM", {6, 3, 9600}}};
 	std::string name;
 	const auto decide = [&] {
 		for (const auto &[layer, version] : versions)

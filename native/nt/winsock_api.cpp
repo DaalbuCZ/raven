@@ -242,8 +242,183 @@ struct TcpEntry {
 };
 
 // Linux socket states in /proc/net/tcp order and the MIB_TCP_STATE values Windows reports for them.
+// The AFD endpoint: \Device\Afd opened as a file, whose IOCTL_AFD_POLL waits until any of the sockets named becomes ready for one
+// of the events asked for. This is the readiness poll the event loops of mio (and so Tokio), wepoll and libuv are built on; its
+// structures are the ones those open-source projects define. A poll pends in the reactor and finishes as overlapped I/O does: the
+// output records and the IO_STATUS_BLOCK, the event, and a packet with the APC context for the completion port the endpoint belongs to.
+class AfdEndpoint : public KernelObject {
+public:
+	std::u16string_view type_name() const override { return u"File"; }
+	int signaled(uint32_t) const override { return 1; }
+	struct Poll {
+		uint64_t status_block = 0;
+		bool cancelled = false, done = false;
+	};
+	std::shared_ptr<CompletionPort> port;
+	uint64_t key = 0;
+	std::vector<std::shared_ptr<Poll>> polls;
+};
+
+std::shared_ptr<KernelObject> make_afd_endpoint() { return std::make_shared<AfdEndpoint>(); }
+
+namespace {
+
+// AFD_POLL_* events.
+constexpr uint32_t afd_receive = 0x1, afd_receive_expedited = 0x2, afd_send = 0x4, afd_disconnect = 0x8, afd_abort = 0x10,
+	afd_local_close = 0x20, afd_accept = 0x80, afd_connect_fail = 0x100;
+
+// What a host poll result means in AFD's events for this socket.
+uint32_t afd_events(SocketObject &socket, short ready)
+{
+	uint32_t events = 0;
+	if (ready & POLLIN) {
+		int listening = 0;
+		socklen_t length = sizeof(listening);
+		::getsockopt(socket.descriptor, SOL_SOCKET, SO_ACCEPTCONN, &listening, &length);
+		events |= listening ? afd_accept : afd_receive;
+	}
+	if (ready & POLLPRI)
+		events |= afd_receive_expedited;
+	if (ready & POLLERR)
+		events |= socket.connecting ? afd_connect_fail : afd_abort;
+	else if (ready & POLLOUT) {
+		events |= afd_send;
+		socket.connecting = false;
+	}
+	if (ready & (POLLRDHUP | POLLHUP))
+		events |= afd_disconnect;
+	return events;
+}
+
+}
+
+bool afd_device_control(KernelContext &context, ApiCall &call)
+{
+	const auto endpoint = context.objects.object_as<AfdEndpoint>(call[0]);
+	if (!endpoint)
+		return false;
+	constexpr uint32_t ioctl_afd_poll = 0x12024, status_pending = 0x103, status_cancelled = 0xc0000120U;
+	if (call.u32(5) != ioctl_afd_poll) {
+		call.ret(0xc0000010U);
+		return true;
+	}
+	// AFD_POLL_INFO: the timeout, the count of handles, the exclusive flag, then one record per socket: its handle, the events, a status.
+	const size_t width = call.pointer_width(), record = width + 8, header = 16;
+	const uint64_t input = call[6], output = call[8], status_block = call[4];
+	if (!input || !output || !status_block || call[2]) {
+		call.ret(call[2] ? 0xc00000bbU : 0xc000000dU);
+		return true;
+	}
+	const uint32_t count = call.load<uint32_t>(input + 8);
+	if (!count || call.u32(7) < header + count * record || call.u32(9) < header + count * record) {
+		call.ret(0xc000000dU);
+		return true;
+	}
+	struct Watched {
+		uint64_t handle;
+		uint32_t events;
+		std::shared_ptr<SocketObject> socket;
+	};
+	std::vector<Watched> watched;
+	for (uint32_t index = 0; index < count; ++index) {
+		const uint64_t at = input + header + index * record;
+		const uint64_t handle = width == 8 ? call.load<uint64_t>(at) : call.load<uint32_t>(at);
+		const auto socket = context.objects.object_as<SocketObject>(handle);
+		if (!socket) {
+			call.ret(0xc0000008U);
+			return true;
+		}
+		watched.push_back({handle, call.load<uint32_t>(at + width), socket});
+	}
+	// The timeout: zero to look once, negative for an interval in 100-nanosecond units, the largest value for none; a positive value
+	// is a system time.
+	const int64_t timeout = call.load<int64_t>(input);
+	const auto now_ticks = [] {
+		using namespace std::chrono;
+		return int64_t(duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count() / 100) + 116444736000000000LL;
+	};
+	const int64_t deadline = timeout == INT64_MAX ? INT64_MAX : timeout < 0 ? now_ticks() - timeout : timeout;
+	const uint32_t exclusive = call.load<uint32_t>(input + 12);
+	auto poll = std::make_shared<AfdEndpoint::Poll>();
+	poll->status_block = status_block;
+	endpoint->polls.push_back(poll);
+	auto &process = context.process;
+	auto &objects = context.objects;
+	const uint64_t event = call[1], apc_context = call[3];
+	const auto put = [&process](uint64_t address, uint64_t value, size_t size) {
+		process.write_memory(address, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&value), size));
+	};
+	put(status_block, status_pending, width);
+	put(status_block + width, 0, width);
+	const auto attempt = [=, &process, &objects, endpoint = std::weak_ptr<AfdEndpoint>(endpoint)]() {
+		const auto owner = endpoint.lock();
+		if (poll->done)
+			return true;
+		std::vector<pollfd> descriptors;
+		for (const auto &item : watched)
+			descriptors.push_back({item.socket->closed ? -1 : item.socket->descriptor, short(POLLIN | POLLPRI | POLLOUT | POLLRDHUP), 0});
+		::poll(descriptors.data(), descriptors.size(), 0);
+		std::vector<std::pair<uint64_t, uint32_t>> ready;
+		for (size_t index = 0; index < watched.size(); ++index) {
+			const auto &item = watched[index];
+			const uint32_t events = (item.socket->closed ? afd_local_close : afd_events(*item.socket, descriptors[index].revents)) & item.events;
+			if (events)
+				ready.emplace_back(item.handle, events);
+		}
+		const bool cancelled = poll->cancelled || !owner;
+		if (ready.empty() && !cancelled && deadline != INT64_MAX && now_ticks() < deadline)
+			return false;
+		if (ready.empty() && !cancelled && deadline == INT64_MAX)
+			return false;
+		if (cancelled)
+			ready.clear();
+		std::vector<uint8_t> bytes(header + ready.size() * record);
+		std::memcpy(bytes.data(), &timeout, 8);
+		const uint32_t reported = uint32_t(ready.size());
+		std::memcpy(bytes.data() + 8, &reported, 4);
+		std::memcpy(bytes.data() + 12, &exclusive, 4);
+		for (size_t index = 0; index < ready.size(); ++index) {
+			std::memcpy(bytes.data() + header + index * record, &ready[index].first, width);
+			std::memcpy(bytes.data() + header + index * record + width, &ready[index].second, 4);
+		}
+		process.write_memory(output, bytes);
+		const uint32_t status = cancelled ? status_cancelled : 0;
+		put(status_block + width, bytes.size(), width);
+		put(status_block, status, width);
+		if (event)
+			objects.set_event(event, true);
+		if (owner && owner->port)
+			owner->port->post({bytes.size(), owner->key, apc_context, cancelled ? 995u : 0u});
+		poll->done = true;
+		if (owner)
+			std::erase(owner->polls, poll);
+		return true;
+	};
+	context.reactor->add(attempt, watched.front().socket->descriptor, short(POLLIN | POLLPRI | POLLOUT | POLLRDHUP));
+	call.ret(status_pending);
+	return true;
+}
+
+std::optional<bool> afd_cancel(KernelContext &context, uint64_t handle, uint64_t status_block)
+{
+	const auto endpoint = context.objects.object_as<AfdEndpoint>(handle);
+	if (!endpoint)
+		return std::nullopt;
+	bool found = false;
+	for (const auto &poll : endpoint->polls)
+		if (!status_block || poll->status_block == status_block) {
+			poll->cancelled = true;
+			found = true;
+		}
+	context.reactor->poll();
+	return found;
+}
+
 bool set_socket_completion_modes(NativeObjects &objects, uint64_t handle, uint32_t modes)
 {
+	// An endpoint's polls always pend, so the modes change nothing for it.
+	if (objects.object_as<AfdEndpoint>(handle))
+		return true;
 	const auto socket = objects.object_as<SocketObject>(handle);
 	if (!socket)
 		return false;
@@ -1204,6 +1379,12 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		if (call[0] != UINT64_MAX) {
 			const auto socket = socket_of(call[0]);
 			const auto file = objects.object_as<FileObject>(call[0]);
+			if (const auto endpoint = objects.object_as<AfdEndpoint>(call[0])) {
+				endpoint->port = port;
+				endpoint->key = call[2];
+				call.ret(handle);
+				return;
+			}
 			if (!socket && !file) {
 				if (create)
 					objects.close(handle);
@@ -1430,7 +1611,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(0);
 	});
 
-	constexpr uint32_t fionbio = 0x8004667e, fionread = 0x4004667f, sio_keepalive_vals = 0x98000004, sio_get_extension_function = 0xc8000006;
+	constexpr uint32_t fionbio = 0x8004667e, fionread = 0x4004667f, sio_keepalive_vals = 0x98000004, sio_get_extension_function = 0xc8000006,
+		sio_base_handle = 0x48000022, sio_bsp_handle = 0x4800001b, sio_bsp_handle_select = 0x4800001c, sio_bsp_handle_poll = 0x4800001d;
 	const auto resolve_export = [&context](const char *library, const char *name) { return context.modules.resolve({library, name, 0, false, 0}); };
 	// WSAEventSelect: the sockets are looked at whenever the threads are scheduled; a network event the program asked for is recorded
 	// once until the call that consumes it enables it again, and recording one sets the program's event.
@@ -1732,6 +1914,10 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 				fail(call, wsaeopnotsupp);
 				return;
 			}
+		} else if ((code == sio_base_handle || code == sio_bsp_handle || code == sio_bsp_handle_select || code == sio_bsp_handle_poll) &&
+			call[4] && call.u32(5) >= call.pointer_width()) {
+			// No layered service provider sits on a socket here, so the socket is its own base handle.
+			call.store_pointer(call[4], call[0]);
 		} else if (code == sio_keepalive_vals && call[2] && call.u32(3) >= 12) {
 			const int enabled = call.load<uint32_t>(call[2]) != 0, idle = int(std::max<uint32_t>(call.load<uint32_t>(call[2] + 4) / 1000, 1)),
 				interval = int(std::max<uint32_t>(call.load<uint32_t>(call[2] + 8) / 1000, 1));
@@ -1743,7 +1929,8 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		if (call[6])
-			call.store<uint32_t>(call[6], code == fionread ? 4 : code == sio_get_extension_function ? uint32_t(call.pointer_width()) : 0);
+			call.store<uint32_t>(call[6], code == fionread ? 4 : code == sio_get_extension_function || (code & 0xfffffff0U) == 0x48000010U ||
+				code == sio_base_handle ? uint32_t(call.pointer_width()) : 0);
 		call.ret(0);
 	});
 
@@ -1851,7 +2038,9 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 	});
 
 	// Names: the answers come from the host resolver, and the result is one block of guest memory that freeaddrinfo gives back.
-	registry.add("getaddrinfo", 4, [&context](ApiCall &call) {
+	// getaddrinfo and GetAddrInfoW: the host resolver's answer as a chain of ADDRINFOA or ADDRINFOW records in one block the program
+	// frees with freeaddrinfo or FreeAddrInfoW. The two records differ only in the width of the canonical name.
+	const auto resolve_names = [&context](ApiCall &call, bool wide) {
 		const size_t width = call.pointer_width();
 		// ADDRINFOA: four ints, the address length, then the canonical name, the address and the next entry.
 		const size_t record = 16 + 4 * width;
@@ -1865,8 +2054,9 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			hints.ai_protocol = call.load<int32_t>(call[2] + 12);
 			use = &hints;
 		}
-		const auto node = call[0] ? call.narrow(call[0], 1025) : std::string();
-		const auto service = call[1] ? call.narrow(call[1], 256) : std::string();
+		const auto text = [&](uint64_t address, size_t limit) { return wide ? to_utf8(call.wide(address, limit)) : call.narrow(address, limit); };
+		const auto node = call[0] ? text(call[0], 1025) : std::string();
+		const auto service = call[1] ? text(call[1], 256) : std::string();
 		addrinfo *found = nullptr;
 		const int status = ::getaddrinfo(call[0] ? node.c_str() : nullptr, call[1] ? service.c_str() : nullptr, use, &found);
 		if (status) {
@@ -1878,7 +2068,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		size_t count = 0, size = 0;
 		for (const auto *entry = found; entry; entry = entry->ai_next) {
 			++count;
-			size += record + 32 + (entry->ai_canonname ? std::strlen(entry->ai_canonname) + 1 : 0);
+			size += record + 32 + (entry->ai_canonname ? (std::strlen(entry->ai_canonname) + 1) * (wide ? 2 : 1) : 0);
 		}
 		const auto block = context.allocator.allocate(size, true);
 		if (!block) {
@@ -1889,7 +2079,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		uint64_t cursor = block, previous = 0;
 		for (const auto *entry = found; entry; entry = entry->ai_next) {
 			const uint64_t self = cursor, address = self + record, canonical = address + 32;
-			cursor = canonical + (entry->ai_canonname ? std::strlen(entry->ai_canonname) + 1 : 0);
+			cursor = canonical + (entry->ai_canonname ? (std::strlen(entry->ai_canonname) + 1) * (wide ? 2 : 1) : 0);
 			call.store<int32_t>(self, entry->ai_flags);
 			call.store<int32_t>(self + 4, windows_family(entry->ai_family));
 			call.store<int32_t>(self + 8, entry->ai_socktype);
@@ -1909,7 +2099,10 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			call.store_pointer(self + address_at, address);
 			if (entry->ai_canonname) {
 				const std::string name(entry->ai_canonname);
-				call.write(canonical, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(name.c_str()), name.size() + 1));
+				if (wide)
+					call.put_wide(canonical, from_utf8(name), name.size() + 1);
+				else
+					call.write(canonical, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(name.c_str()), name.size() + 1));
 				call.store_pointer(self + canon_at, canonical);
 			}
 			if (previous)
@@ -1920,11 +2113,49 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		call.store_pointer(call[3], block);
 		call.ret(0);
 		(void)count;
-	});
-	registry.add("freeaddrinfo", 1, [&context](ApiCall &call) {
-		if (call[0])
-			context.allocator.release(call[0]);
-	});
+	};
+	registry.add("getaddrinfo", 4, [resolve_names](ApiCall &call) { resolve_names(call, false); });
+	registry.add("GetAddrInfoW", 4, [resolve_names](ApiCall &call) { resolve_names(call, true); });
+	// getnameinfo and GetNameInfoW: the host and service of an address, by the host resolver, with Winsock's NI_ flags.
+	const auto name_of_address = [](ApiCall &call, bool wide) {
+		const auto address = host_address(call, call[0], size_t(call.i32(1)));
+		const uint32_t flags = call.u32(6);
+		const int host_flags = (flags & 0x01 ? NI_NOFQDN : 0) | (flags & 0x02 ? NI_NUMERICHOST : 0) | (flags & 0x04 ? NI_NAMEREQD : 0) |
+			(flags & 0x08 ? NI_NUMERICSERV : 0) | (flags & 0x10 ? NI_DGRAM : 0);
+		char host[1025] = {}, service[32] = {};
+		const int status = ::getnameinfo(reinterpret_cast<const sockaddr *>(address.data()), socklen_t(address.size()), call[2] ? host : nullptr,
+			call[2] ? sizeof host : 0, call[4] ? service : nullptr, call[4] ? sizeof service : 0, host_flags);
+		if (status) {
+			const uint32_t error = status == EAI_NONAME ? wsahost_not_found : status == EAI_AGAIN ? 11002 : status == EAI_FAMILY ? wsaeafnosupport : wsaeinval;
+			call.fail(error, error);
+			return;
+		}
+		const auto put = [&](uint64_t buffer, uint32_t capacity, const char *text) {
+			const size_t length = std::strlen(text);
+			if (!buffer)
+				return true;
+			if (capacity <= length)
+				return false;
+			if (wide)
+				call.put_wide(buffer, from_utf8(text), capacity);
+			else
+				call.put_narrow(buffer, text, capacity);
+			return true;
+		};
+		if (!put(call[2], call.u32(3), host) || !put(call[4], call.u32(5), service)) {
+			call.fail(wsaefault, wsaefault);
+			return;
+		}
+		call.ret(0);
+	};
+	registry.add("getnameinfo", 7, [name_of_address](ApiCall &call) { name_of_address(call, false); });
+	registry.add("GetNameInfoW", 7, [name_of_address](ApiCall &call) { name_of_address(call, true); });
+
+	for (const char *name : {"freeaddrinfo", "FreeAddrInfoW"})
+		registry.add(name, 1, [&context](ApiCall &call) {
+			if (call[0])
+				context.allocator.release(call[0]);
+		});
 	registry.add("gethostname", 2, [](ApiCall &call) {
 		char name[256] = {};
 		::gethostname(name, sizeof(name) - 1);
@@ -1986,6 +2217,40 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		std::array<char, 1024> buffer{};
 		getservbyport_r(int(uint16_t(call.u32(0))), call[1] ? protocol.c_str() : nullptr, &entry, buffer.data(), buffer.size(), &found);
 		service(call, found);
+	});
+	// getprotobyname and getprotobynumber answer from the protocols database into one PROTOENT the process reuses, as the SERVENT above
+	// is: the name and its aliases are pointers, so the record keeps the 32-bit and 64-bit layouts apart.
+	auto protocol_block = std::make_shared<uint64_t>(0);
+	const auto protocol_entry = [&context, protocol_block](ApiCall &call, const protoent *found) {
+		if (!found) {
+			call.fail(11004, 0);
+			return;
+		}
+		if (!*protocol_block)
+			*protocol_block = context.allocator.allocate(256, true);
+		const uint64_t block = *protocol_block;
+		const bool narrow = call.pointer_width() == 4;
+		// The name sits past the record and the empty list of aliases it points at.
+		const uint64_t aliases = block + (narrow ? 12 : 24), name = aliases + (narrow ? 4 : 8);
+		call.put_narrow(name, std::string(found->p_name).substr(0, 111), 112);
+		call.store_pointer(block, name);
+		call.store_pointer(block + (narrow ? 4 : 8), aliases);
+		call.store_pointer(aliases, 0);
+		call.store<uint16_t>(block + (narrow ? 8 : 16), uint16_t(found->p_proto));
+		call.ret(block);
+	};
+	registry.add("getprotobyname", 1, [protocol_entry](ApiCall &call) {
+		const auto name = call.narrow(call[0], 256);
+		protoent entry{}, *found = nullptr;
+		std::array<char, 1024> buffer{};
+		getprotobyname_r(name.c_str(), &entry, buffer.data(), buffer.size(), &found);
+		protocol_entry(call, found);
+	});
+	registry.add("getprotobynumber", 1, [protocol_entry](ApiCall &call) {
+		protoent entry{}, *found = nullptr;
+		std::array<char, 1024> buffer{};
+		getprotobynumber_r(int(call.u32(0)), &entry, buffer.data(), buffer.size(), &found);
+		protocol_entry(call, found);
 	});
 	registry.add("htons", 1, [](ApiCall &call) { call.ret(uint16_t(call.u32(0) << 8 | (call.u32(0) >> 8 & 0xff))); });
 	registry.add("ntohs", 1, [](ApiCall &call) { call.ret(uint16_t(call.u32(0) << 8 | (call.u32(0) >> 8 & 0xff))); });

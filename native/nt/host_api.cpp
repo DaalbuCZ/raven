@@ -1,4 +1,5 @@
 #include "access_token.h"
+#include "interfaces.h"
 #include "kernel_context.h"
 #include "text.h"
 
@@ -10,9 +11,8 @@
 #include <ifaddrs.h>
 #include <map>
 #include <optional>
-#include <net/if.h>
+#include <sstream>
 #include <netinet/in.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -20,10 +20,9 @@ namespace raven {
 
 namespace {
 
-constexpr uint32_t error_buffer_overflow = 111, error_no_data = 232, error_invalid_parameter = 87, wsaservice_not_found = 10108, wsa_invalid_handle = 6, wsa_not_enough_memory = 8, error_io_pending = 997, error_not_supported = 50, error_more_data = 234, error_no_more_items = 259;
+constexpr uint32_t error_buffer_overflow = 111, error_insufficient_buffer = 122, error_no_data = 232, error_invalid_parameter = 87, wsaservice_not_found = 10108, wsa_invalid_handle = 6, wsa_not_enough_memory = 8, error_io_pending = 997, error_not_supported = 50, error_more_data = 234, error_no_more_items = 259;
 constexpr uint32_t skip_unicast = 1, skip_anycast = 2, skip_multicast = 4, skip_dns_server = 8;
 constexpr uint32_t windows_inet6 = 23;
-constexpr uint32_t if_type_ethernet = 6, if_type_loopback = 24, if_type_wireless = 71;
 
 // A set of device interfaces that SetupDi hands out; the host exposes no devices to the guest, so the set stays empty.
 class DeviceInfoSet : public KernelObject {};
@@ -36,11 +35,7 @@ struct Address {
 	uint8_t prefix = 0;
 };
 
-struct Adapter {
-	std::string name;
-	uint32_t index = 0, mtu = 1500, type = if_type_ethernet, status = 2;
-	uint8_t hardware[8]{};
-	uint32_t hardware_length = 0;
+struct Adapter : HostInterface {
 	std::vector<Address> unicast;
 };
 
@@ -77,39 +72,52 @@ uint8_t prefix_length(const sockaddr *mask)
 	return bits;
 }
 
+// The host's DNS servers, the nameserver lines of its resolver configuration, as Windows socket addresses (AF_INET6 is 23 there).
+std::vector<std::vector<uint8_t>> host_dns_servers()
+{
+	std::vector<std::vector<uint8_t>> servers;
+	std::ifstream configuration("/etc/resolv.conf");
+	for (std::string line; std::getline(configuration, line);) {
+		std::istringstream words(line);
+		std::string keyword, address;
+		if (!(words >> keyword >> address) || keyword != "nameserver")
+			continue;
+		address = address.substr(0, address.find('%'));
+		in_addr four{};
+		in6_addr six{};
+		if (::inet_pton(AF_INET, address.c_str(), &four) == 1) {
+			std::vector<uint8_t> bytes(16, 0);
+			bytes[0] = AF_INET;
+			std::memcpy(bytes.data() + 4, &four, 4);
+			servers.push_back(std::move(bytes));
+		} else if (::inet_pton(AF_INET6, address.c_str(), &six) == 1) {
+			std::vector<uint8_t> bytes(28, 0);
+			bytes[0] = 23;
+			std::memcpy(bytes.data() + 8, &six, 16);
+			servers.push_back(std::move(bytes));
+		}
+	}
+	return servers;
+}
+
 std::vector<Adapter> host_adapters(uint32_t family)
 {
 	std::vector<Adapter> adapters;
+	std::map<std::string, size_t> found;
+	for (const auto &interface : host_interfaces()) {
+		Adapter adapter;
+		static_cast<HostInterface &>(adapter) = interface;
+		found.emplace(interface.name, adapters.size());
+		adapters.push_back(std::move(adapter));
+	}
 	ifaddrs *list = nullptr;
 	if (::getifaddrs(&list))
 		return adapters;
-	std::map<std::string, size_t> found;
 	for (const auto *entry = list; entry; entry = entry->ifa_next) {
-		if (!entry->ifa_name)
+		const auto position = entry->ifa_name ? found.find(entry->ifa_name) : found.end();
+		if (position == found.end() || !entry->ifa_addr)
 			continue;
-		auto position = found.find(entry->ifa_name);
-		if (position == found.end()) {
-			Adapter adapter;
-			adapter.name = entry->ifa_name;
-			adapter.index = ::if_nametoindex(entry->ifa_name);
-			adapter.status = (entry->ifa_flags & IFF_UP) && (entry->ifa_flags & IFF_RUNNING) ? 1 : 2;
-			adapter.type = (entry->ifa_flags & IFF_LOOPBACK) ? if_type_loopback :
-				::access(("/sys/class/net/" + adapter.name + "/wireless").c_str(), F_OK) == 0 ? if_type_wireless : if_type_ethernet;
-			if (const int probe = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0); probe >= 0) {
-				ifreq request{};
-				std::strncpy(request.ifr_name, entry->ifa_name, IFNAMSIZ - 1);
-				if (::ioctl(probe, SIOCGIFMTU, &request) == 0)
-					adapter.mtu = uint32_t(request.ifr_mtu);
-				if (adapter.type != if_type_loopback && ::ioctl(probe, SIOCGIFHWADDR, &request) == 0) {
-					std::memcpy(adapter.hardware, request.ifr_hwaddr.sa_data, 6);
-					adapter.hardware_length = 6;
-				}
-				::close(probe);
-			}
-			position = found.emplace(adapter.name, adapters.size()).first;
-			adapters.push_back(std::move(adapter));
-		}
-		if (!entry->ifa_addr || (entry->ifa_addr->sa_family != AF_INET && entry->ifa_addr->sa_family != AF_INET6))
+		if (entry->ifa_addr->sa_family != AF_INET && entry->ifa_addr->sa_family != AF_INET6)
 			continue;
 		if (family && family != uint32_t(entry->ifa_addr->sa_family == AF_INET ? AF_INET : windows_inet6))
 			continue;
@@ -189,9 +197,17 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		const size_t origin_at = unicast_cursor; unicast_cursor += 24;
 		const size_t prefix_at = unicast_cursor;
 		const size_t unicast_record = align(prefix_at + 1, width);
+		// IP_ADAPTER_DNS_SERVER_ADDRESS_XP: length and reserved word, next, then the socket address and its length. Every adapter
+		// that is not the loopback one uses the host's DNS servers.
+		const auto dns_servers = (flags & skip_dns_server) ? std::vector<std::vector<uint8_t>>() : host_dns_servers();
+		const size_t dns_record = align(8 + 2 * width + 4, 8);
+		constexpr uint32_t loopback_type = 24;
 		size_t needed = 0;
 		for (const auto &adapter : adapters) {
 			needed += record;
+			if (adapter.type != loopback_type)
+				for (const auto &server : dns_servers)
+					needed += dns_record + align(server.size(), 8);
 			if (!(flags & skip_unicast))
 				for (const auto &address : adapter.unicast)
 					needed += unicast_record + align(address.socket_address.size(), 8);
@@ -232,7 +248,20 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			}
 			put_pointer(self + suffix_at, base + position);
 			position += 2;
-			(void)dns_at;
+			position = align(position, 8);
+			if (adapter.type != loopback_type) {
+				size_t last = 0;
+				for (const auto &server : dns_servers) {
+					const size_t entry = position, stored = position + dns_record;
+					position = stored + align(server.size(), 8);
+					put32(entry, uint32_t(dns_record));
+					std::memcpy(block.data() + stored, server.data(), server.size());
+					put_pointer(entry + 8 + width, base + stored);
+					put32(entry + 8 + 2 * width, uint32_t(server.size()));
+					put_pointer(last ? last + 8 : self + dns_at, base + entry);
+					last = entry;
+				}
+			}
 			std::memcpy(block.data() + self + physical_at, adapter.hardware, 8);
 			put32(self + physical_length_at, adapter.hardware_length);
 			put32(self + flags_at, 0x10 | 0x80);
@@ -274,7 +303,35 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			position = align(position, 8);
 		}
 		call.write(base, std::span<const uint8_t>(block.data(), std::min(position, block.size())));
-		(void)skip_anycast; (void)skip_multicast; (void)skip_dns_server;
+		(void)skip_anycast; (void)skip_multicast;
+		call.ret(0);
+	});
+	// FIXED_INFO: the host's name and the first resolver of its configuration, which is the whole server list.
+	registry.add("GetNetworkParams", 2, [](ApiCall &call) {
+		if (!call[1]) {
+			call.ret(error_invalid_parameter);
+			return;
+		}
+		const size_t width = call.pointer_width();
+		const size_t list_at = 264 + width, string_size = (width + 36 + width - 1) & ~(width - 1);
+		const size_t node_at = list_at + string_size, record = (node_at + 276 + width - 1) & ~(width - 1);
+		if (!call[0] || call.load<uint32_t>(call[1]) < record) {
+			call.store<uint32_t>(call[1], uint32_t(record));
+			call.ret(error_buffer_overflow);
+			return;
+		}
+		std::vector<uint8_t> block(record);
+		char host[132] = {};
+		::gethostname(host, sizeof(host) - 1);
+		std::memcpy(block.data(), host, std::strlen(host));
+		std::ifstream configuration("/etc/resolv.conf");
+		for (std::string line; std::getline(configuration, line);)
+			if (line.starts_with("nameserver ") && line.find(':') == line.npos && line.size() - 11 < 16) {
+				std::memcpy(block.data() + list_at + width, line.data() + 11, line.size() - 11);
+				break;
+			}
+		block[node_at] = 1;
+		call.write(call[0], std::span<const uint8_t>(block));
 		call.ret(0);
 	});
 	// The IPv4 adapters in IP_ADAPTER_INFO records, loopback left out; addresses past the first of an adapter are chained after the records.
@@ -744,6 +801,13 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint32_t>(call[4], 0);
 		call.fail(error_no_more_items, 0);
 	});
+	// No log service keeps channels here: every channel is one that does not exist, and programs treat that as logging being off.
+	constexpr uint32_t error_evt_channel_not_found = 15007;
+	registry.add("EvtOpenChannelConfig", 3, [](ApiCall &call) { call.fail(error_evt_channel_not_found, 0); });
+	registry.add("EvtSubscribe", 8, [](ApiCall &call) { call.fail(error_evt_channel_not_found, 0); });
+	registry.add("EvtGetChannelConfigProperty", 6, [](ApiCall &call) { call.fail(6, 0); });
+	registry.add("EvtSetChannelConfigProperty", 4, [](ApiCall &call) { call.fail(6, 0); });
+	registry.add("EvtSaveChannelConfig", 2, [](ApiCall &call) { call.fail(6, 0); });
 	registry.add("EvtClose", 1, [&objects](ApiCall &call) {
 		if (!objects.object_as<EventQuery>(call[0])) {
 			call.fail(6, 0);
@@ -921,18 +985,10 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			call.store_pointer(call[1], 0x04090409);
 		call.ret(1);
 	});
-	// The drives the prefix has: C: and Z: always, and any other letter with a folder behind it. GetLogicalDriveStrings lists their roots.
-	const auto drives = [&context] {
-		uint32_t mask = 0;
-		for (char16_t letter = u'A'; letter <= u'Z'; ++letter) {
-			const std::u16string root{letter, u':', u'\\'};
-			if (const auto resolved = context.paths.resolve(root); resolved && resolved->exists)
-				mask |= 1u << (letter - u'A');
-		}
-		return mask;
-	};
+	// The drives the prefix has (NativePaths::drives). GetLogicalDriveStrings lists their roots.
+	const auto drives = [&context] { return context.paths.drives(); };
 	registry.add("GetLogicalDrives", 0, [drives](ApiCall &call) { call.ret(drives()); });
-	// QueryDosDevice: each drive of the prefix is a volume device, \Device\HarddiskVolumeN in letter order; without a name, the list of
+	// QueryDosDevice: each drive of the prefix is its volume device (NativePaths::volume_device); without a name, the list of
 	// the drives' device names.
 	for (const bool wide : {true, false})
 		registry.add(wide ? "QueryDosDeviceW" : "QueryDosDeviceA", 3, [drives, wide](ApiCall &call) {
@@ -949,11 +1005,7 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 					call.fail(2);
 					return;
 				}
-				uint32_t number = 1;
-				for (char16_t other = u'A'; other < letter; ++other)
-					if (mask & (1u << (other - u'A')))
-						++number;
-				result = u"\\Device\\HarddiskVolume" + widen_ascii(std::to_string(number)) + std::u16string(1, 0);
+				result = NativePaths::volume_device(letter) + std::u16string(1, 0);
 			}
 			result.push_back(0);
 			if (capacity < result.size()) {
@@ -970,6 +1022,97 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			}
 			call.ret(result.size());
 		});
+	// The volumes: one for each drive (NativePaths::volume_name). FindFirstVolume lists them in letter order, and each is mounted at its
+	// drive's root alone.
+	const auto volume_name = [](char16_t letter) { return NativePaths::volume_name(letter); };
+	const auto volume_letter = [drives, volume_name](const std::u16string &name) -> char16_t {
+		const uint32_t mask = drives();
+		for (char16_t letter = u'A'; letter <= u'Z'; ++letter)
+			if ((mask & (1u << (letter - u'A'))) && volume_name(letter) == name)
+				return letter;
+		return 0;
+	};
+	// A name and its terminator into a buffer of the given characters; a buffer too small fails with ERROR_FILENAME_EXCED_RANGE.
+	const auto put_volume = [](ApiCall &call, uint64_t buffer, uint32_t capacity, const std::u16string &name) {
+		if (capacity <= name.size()) {
+			call.fail(206);
+			return;
+		}
+		call.put_wide(buffer, name, capacity);
+		call.ret(1);
+	};
+	registry.add("FindFirstVolumeW", 2, [&objects, drives, volume_name, put_volume](ApiCall &call) {
+		auto list = std::make_shared<FindObject>();
+		const uint32_t mask = drives();
+		for (char16_t letter = u'A'; letter <= u'Z'; ++letter)
+			if (mask & (1u << (letter - u'A')))
+				list->entries.push_back({volume_name(letter), 0, 0, 0, 0, 0});
+		const auto made = objects.add_object(list);
+		if (made.status || list->entries.empty()) {
+			call.fail(made.status ? 8 : 18, UINT64_MAX);
+			return;
+		}
+		list->next = 1;
+		put_volume(call, call[0], call.u32(1), list->entries[0].name);
+		if (call.result)
+			call.ret(made.value);
+		else
+			objects.close(made.value);
+	});
+	registry.add("FindNextVolumeW", 3, [&objects, put_volume](ApiCall &call) {
+		const auto list = objects.object_as<FindObject>(call[0]);
+		if (!list) {
+			call.fail(6);
+			return;
+		}
+		if (list->next >= list->entries.size()) {
+			call.fail(18);
+			return;
+		}
+		put_volume(call, call[1], call.u32(2), list->entries[list->next].name);
+		if (call.result)
+			++list->next;
+	});
+	registry.add("FindVolumeClose", 1, [&objects](ApiCall &call) {
+		if (!objects.object_as<FindObject>(call[0]) || objects.close(call[0])) {
+			call.fail(6);
+			return;
+		}
+		call.ret(1);
+	});
+	// A drive's root, with its trailing backslash, is the mount point of its volume.
+	registry.add("GetVolumeNameForVolumeMountPointW", 3, [drives, volume_name, put_volume](ApiCall &call) {
+		const auto point = call.wide(call[0], 260);
+		const char16_t letter = point.size() == 3 && point[1] == u':' && point[2] == u'\\' ? char16_t(point[0] & ~0x20) : 0;
+		if (point.empty() || point.back() != u'\\') {
+			call.fail(87);
+			return;
+		}
+		if (!letter || letter < u'A' || letter > u'Z' || !(drives() & (1u << (letter - u'A')))) {
+			call.fail(4390);
+			return;
+		}
+		put_volume(call, call[1], call.u32(2), volume_name(letter));
+	});
+	// The paths a volume is mounted at, as a list of strings ending with an empty one; the count of characters it takes is reported.
+	registry.add("GetVolumePathNamesForVolumeNameW", 4, [volume_letter](ApiCall &call) {
+		const char16_t letter = volume_letter(call.wide(call[0], 260));
+		if (!letter) {
+			call.fail(87);
+			return;
+		}
+		const std::u16string list{letter, u':', u'\\', 0, 0};
+		if (call[3])
+			call.store<uint32_t>(call[3], uint32_t(list.size()));
+		if (call.u32(2) < list.size()) {
+			call.fail(234);
+			return;
+		}
+		std::vector<uint8_t> bytes(list.size() * 2);
+		std::memcpy(bytes.data(), list.data(), bytes.size());
+		call.write(call[1], bytes);
+		call.ret(1);
+	});
 	for (const bool wide : {true, false})
 		registry.add(wide ? "GetLogicalDriveStringsW" : "GetLogicalDriveStringsA", 2, [drives, wide](ApiCall &call) {
 			std::u16string text;
@@ -985,46 +1128,43 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			else call.put_narrow(call[1], to_utf8(text), text.size() + 1);
 			call.ret(text.size());
 		});
-	// A drive's volume: the prefix keeps the files, so every drive reports one NTFS volume.
-	registry.add("GetVolumeInformationW", 8, [&context](ApiCall &call) {
-		if (call[0]) {
-			const auto root = context.paths.resolve(call.wide(call[0], 260));
-			if (!root || !root->exists) {
-				call.fail(3);
+	// A drive's volume: the prefix keeps the files, so every drive reports one NTFS volume. The volume's fields, from the second
+	// argument on, are the same however the volume is named.
+	const auto volume_fields = [](ApiCall &call, bool wide) {
+		const auto put_text = [&](uint64_t address, uint32_t capacity, std::string_view text) {
+			if (!address || !capacity)
 				return;
-			}
-		}
-		if (call[1] && call.u32(2))
-			call.put_wide(call[1], u"", call.u32(2));
+			if (wide) call.put_wide(address, widen_ascii(std::string(text)), capacity);
+			else call.put_narrow(address, std::string(text), capacity);
+		};
+		put_text(call[1], call.u32(2), "");
 		if (call[3])
 			call.store<uint32_t>(call[3], 0x52415645);
 		if (call[4])
 			call.store<uint32_t>(call[4], 255);
 		if (call[5])
 			call.store<uint32_t>(call[5], 0x0000000f);
-		if (call[6] && call.u32(7))
-			call.put_wide(call[6], u"NTFS", call.u32(7));
+		put_text(call[6], call.u32(7), "NTFS");
 		call.ret(1);
-	});
-	registry.add("GetVolumeInformationA", 8, [&context](ApiCall &call) {
-		if (call[0]) {
-			const auto root = context.paths.resolve(widen_ascii(call.narrow(call[0], 260)));
-			if (!root || !root->exists) {
-				call.fail(3);
-				return;
+	};
+	for (const bool wide : {true, false})
+		registry.add(wide ? "GetVolumeInformationW" : "GetVolumeInformationA", 8, [&context, volume_fields, wide](ApiCall &call) {
+			if (call[0]) {
+				const auto root = context.paths.resolve(wide ? call.wide(call[0], 260) : widen_ascii(call.narrow(call[0], 260)));
+				if (!root || !root->exists) {
+					call.fail(3);
+					return;
+				}
 			}
+			volume_fields(call, wide);
+		});
+	// The volume of an open file or directory.
+	registry.add("GetVolumeInformationByHandleW", 8, [&objects, volume_fields](ApiCall &call) {
+		if (!objects.object_as<FileObject>(call[0]) && objects.descriptor(call[0]) < 0) {
+			call.fail(6);
+			return;
 		}
-		if (call[1] && call.u32(2))
-			call.put_narrow(call[1], "", call.u32(2));
-		if (call[3])
-			call.store<uint32_t>(call[3], 0x52415645);
-		if (call[4])
-			call.store<uint32_t>(call[4], 255);
-		if (call[5])
-			call.store<uint32_t>(call[5], 0x0000000f);
-		if (call[6] && call.u32(7))
-			call.put_narrow(call[6], "NTFS", call.u32(7));
-		call.ret(1);
+		volume_fields(call, true);
 	});
 	// DPI awareness contexts are the pseudo handles -1 to -5; the process is system DPI aware at 96 dots per inch.
 	const auto awareness_of = [](uint64_t context) -> int32_t {
@@ -1088,6 +1228,7 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	// Every process runs in session 1, the interactive one.
+	registry.add("WTSGetActiveConsoleSessionId", 0, [](ApiCall &call) { call.ret(1); });
 	registry.add("ProcessIdToSessionId", 2, [](ApiCall &call) {
 		if (!call[1]) {
 			call.fail(87);
@@ -1104,9 +1245,6 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("SetDllDirectoryW", 1, [set_dll_directory](ApiCall &call) { set_dll_directory(call, true); });
 	registry.add("SetDllDirectoryA", 1, [set_dll_directory](ApiCall &call) { set_dll_directory(call, false); });
-	// A program without a console window has no title to set.
-	registry.add("SetConsoleTitleW", 1, [](ApiCall &call) { call.ret(1); });
-	registry.add("SetConsoleTitleA", 1, [](ApiCall &call) { call.ret(1); });
 	// The interface a packet to an address would leave by: the first adapter that is up and is not the loopback one, else the loopback.
 	const auto best_interface = [](ApiCall &call) {
 		if (!call[1]) {
@@ -1133,6 +1271,126 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("GetBestInterface", 2, best_interface);
 	registry.add("GetBestInterfaceEx", 2, best_interface);
+	// The interfaces of the host as the older table calls report them: MIB_IFROW records, which a program reads to learn how the machine
+	// is networked before it opens its first socket, and whose absence it cannot tell from a machine without a network. GetIfEntry names
+	// one by the index the record already holds, GetIfTable carries them all behind a count, GetNumberOfInterfaces counts them.
+	registry.add("GetIfEntry", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(error_invalid_parameter, error_invalid_parameter);
+			return;
+		}
+		// The index the record already holds says which interface is asked about; the error code it fails with is what it returns.
+		const uint32_t index = call.load<uint32_t>(call[0] + 512);
+		const auto interfaces = host_interfaces();
+		const auto found = std::find_if(interfaces.begin(), interfaces.end(), [&](const HostInterface &interface) { return interface.index == index; });
+		if (index == 0 || found == interfaces.end()) {
+			call.fail(error_invalid_parameter, error_invalid_parameter);
+			return;
+		}
+		const auto row = mib_if_row(*found);
+		call.write(call[0], row);
+		call.ret(0);
+	});
+	registry.add("GetNumberOfInterfaces", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(error_invalid_parameter, error_invalid_parameter);
+			return;
+		}
+		call.store<uint32_t>(call[0], uint32_t(host_interfaces().size()));
+		call.ret(0);
+	});
+	// GetIfTable(table, size, order): the count, then the rows, in the order the system lists them or by index when sorted.
+	registry.add("GetIfTable", 3, [](ApiCall &call) {
+		if (!call[1]) {
+			call.fail(error_invalid_parameter, error_invalid_parameter);
+			return;
+		}
+		auto interfaces = host_interfaces();
+		if (call[2])
+			std::sort(interfaces.begin(), interfaces.end(), [](const HostInterface &left, const HostInterface &right) { return left.index < right.index; });
+		const size_t needed = 4 + interfaces.size() * mib_if_row_size;
+		const uint32_t capacity = call.load<uint32_t>(call[1]);
+		// A table that does not fit is not written, and the size it needs is given back to the caller.
+		if (!call[0] || capacity < needed) {
+			call.store<uint32_t>(call[1], uint32_t(needed));
+			call.ret(error_insufficient_buffer);
+			return;
+		}
+		std::vector<uint8_t> table(needed, 0);
+		const uint32_t count = uint32_t(interfaces.size());
+		std::memcpy(table.data(), &count, 4);
+		for (size_t number = 0; number < interfaces.size(); ++number) {
+			const auto row = mib_if_row(interfaces[number]);
+			std::memcpy(table.data() + 4 + number * mib_if_row_size, row.data(), row.size());
+		}
+		call.write(call[0], table);
+		call.store<uint32_t>(call[1], uint32_t(needed));
+		call.ret(0);
+	});
+	// GetBestRoute2: the host's own choice of route, found by connecting a datagram socket to the destination (which sends nothing):
+	// the address it is bound to is the best source, and the adapter holding that address the interface. The MIB_IPFORWARD_ROW2 names
+	// that interface and the destination as a host route; the next hop is not known from here and stays unspecified.
+	registry.add("GetBestRoute2", 7, [](ApiCall &call) {
+		if (!call[3] || !call[5] || !call[6]) {
+			call.ret(87);
+			return;
+		}
+		auto destination = call.read(call[3], 28);
+		const uint16_t windows_family = uint16_t(destination[0] | destination[1] << 8);
+		const int family = windows_family == 2 ? AF_INET : windows_family == 23 ? AF_INET6 : -1;
+		if (family < 0) {
+			call.ret(87);
+			return;
+		}
+		sockaddr_storage target{};
+		std::memcpy(&target, destination.data(), family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6));
+		target.ss_family = sa_family_t(family);
+		const int probe = ::socket(family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+		sockaddr_storage source{};
+		socklen_t length = sizeof(source);
+		const socklen_t size = family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
+		if (family == AF_INET) reinterpret_cast<sockaddr_in &>(target).sin_port = htons(9);
+		else reinterpret_cast<sockaddr_in6 &>(target).sin6_port = htons(9);
+		const bool routed = probe >= 0 && !::connect(probe, reinterpret_cast<const sockaddr *>(&target), size) &&
+			!::getsockname(probe, reinterpret_cast<sockaddr *>(&source), &length);
+		if (probe >= 0)
+			::close(probe);
+		if (!routed) {
+			call.ret(1231);
+			return;
+		}
+		uint32_t index = 0, type = 0;
+		for (const auto &adapter : host_adapters(0))
+			for (const auto &address : adapter.unicast)
+				if (address.socket_address.size() >= (family == AF_INET ? 8u : 24u) &&
+					std::memcmp(address.socket_address.data() + (family == AF_INET ? 4 : 8),
+						family == AF_INET ? static_cast<const void *>(&reinterpret_cast<sockaddr_in &>(source).sin_addr)
+										  : static_cast<const void *>(&reinterpret_cast<sockaddr_in6 &>(source).sin6_addr),
+						family == AF_INET ? 4 : 16) == 0) {
+					index = adapter.index;
+					type = adapter.type;
+				}
+		std::vector<uint8_t> best(28, 0);
+		std::memcpy(best.data(), &source, size);
+		best[0] = uint8_t(windows_family);
+		best[1] = 0;
+		best[2] = best[3] = 0;
+		call.write(call[6], best);
+		// MIB_IPFORWARD_ROW2: the interface LUID and index, the destination prefix (address and length), the next hop, then the
+		// lifetimes, metric, protocol and flags.
+		std::vector<uint8_t> row(104, 0);
+		const uint64_t luid = uint64_t(type) << 48 | uint64_t(index) << 24;
+		std::memcpy(row.data(), &luid, 8);
+		std::memcpy(row.data() + 8, &index, 4);
+		std::memcpy(row.data() + 12, destination.data(), 28);
+		row[40] = family == AF_INET ? 32 : 128;
+		row[44] = uint8_t(windows_family);
+		const uint32_t forever = 0xffffffffU;
+		std::memcpy(row.data() + 76, &forever, 4);
+		std::memcpy(row.data() + 80, &forever, 4);
+		call.write(call[5], row);
+		call.ret(0);
+	});
 	// The class of human interface devices; none is present.
 	registry.add("HidD_GetHidGuid", 1, [](ApiCall &call) {
 		static const uint8_t guid[16] = {0xb2, 0x55, 0x1e, 0x4d, 0x6f, 0xf1, 0xcf, 0x11, 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30};
@@ -1156,6 +1414,9 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	// The scheduling class of the process, kept as the program sets it; the host does not change how the process is scheduled.
 	auto priority_class = std::make_shared<uint32_t>(0x20);
 	registry.add("GetPriorityClass", 1, [priority_class](ApiCall &call) { call.ret(*priority_class); });
+	// Host memory is the kernel's to manage: the limits a program asks for are advice, which Windows may ignore as well.
+	registry.add("SetProcessWorkingSetSize", 3, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetProcessWorkingSetSizeEx", 4, [](ApiCall &call) { call.ret(1); });
 	registry.add("SetPriorityClass", 2, [priority_class](ApiCall &call) {
 		const uint32_t value = call.u32(1);
 		if (value != 0x20 && value != 0x40 && value != 0x80 && value != 0x100 && value != 0x4000 && value != 0x8000 && value != 0x00100000 && value != 0x00200000) {
@@ -1180,9 +1441,136 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		objects.close(call[0]);
 		call.ret(1);
 	});
-	// Remote desktop session queries have no answer here.
-	registry.add("WTSQuerySessionInformationW", 5, [](ApiCall &call) { call.fail(1, 0); });
-	registry.add("WTSFreeMemory", 1, [](ApiCall &) {});
+	// The sessions a desktop machine has: services apart in session 0, the user at the console in session 1.
+	registry.add("WTSEnumerateSessionsW", 5, [&context](ApiCall &call) {
+		if (call[1] || call.u32(2) != 1 || !call[3] || !call[4]) {
+			call.fail(87, 0);
+			return;
+		}
+		const std::u16string services = u"Services", console = u"Console";
+		const size_t record = call.pointer_width() == 4 ? 12 : 24, width = call.pointer_width();
+		const uint64_t block = context.allocator.allocate(2 * record + (services.size() + console.size() + 2) * 2);
+		if (!block) {
+			call.fail(8, 0);
+			return;
+		}
+		const uint64_t first = block + 2 * record, second = first + (services.size() + 1) * 2;
+		call.put_wide(first, services, services.size() + 1);
+		call.put_wide(second, console, console.size() + 1);
+		call.store<uint32_t>(block, 0);
+		call.store_pointer(block + width, first);
+		call.store<uint32_t>(block + 2 * width, 4);
+		call.store<uint32_t>(block + record, 1);
+		call.store_pointer(block + record + width, second);
+		call.store<uint32_t>(block + record + 2 * width, 0);
+		call.store_pointer(call[3], block);
+		call.store<uint32_t>(call[4], 2);
+		call.ret(1);
+	});
+	registry.add("WTSQuerySessionInformationW", 5, [&context, computer_name](ApiCall &call) {
+		if (!call[3] || !call[4] || call.u32(1) > 1) {
+			call.fail(87, 0);
+			return;
+		}
+		const uint32_t session = call.u32(1);
+		std::u16string text;
+		std::optional<uint32_t> number;
+		switch (call.u32(2)) {
+		case 4: number = session; break;
+		case 5: text = session ? context.paths.user_name() : u""; break;
+		case 6: text = session ? u"Console" : u"Services"; break;
+		case 7: text = session ? computer_name(0).value_or(u"RAVEN") : u""; break;
+		case 8: number = session ? 0U : 4U; break;
+		default: call.fail(1, 0); return;
+		}
+		const size_t size = number ? 4 : (text.size() + 1) * 2;
+		const uint64_t block = context.allocator.allocate(size);
+		if (!block) {
+			call.fail(8, 0);
+			return;
+		}
+		if (number)
+			call.store<uint32_t>(block, *number);
+		else
+			call.put_wide(block, text, text.size() + 1);
+		call.store_pointer(call[3], block);
+		call.store<uint32_t>(call[4], uint32_t(size));
+		call.ret(1);
+	});
+	registry.add("WTSQueryUserToken", 2, [&context, &objects](ApiCall &call) {
+		if (!call[1] || call.u32(0) != 1) {
+			call.fail(call[1] ? 7022 : 87, 0);
+			return;
+		}
+		const auto made = objects.add_object(context.process_token);
+		if (made.status) {
+			call.fail(8, 0);
+			return;
+		}
+		objects.set_access(made.value, 0xf01ff);
+		call.store_pointer(call[1], made.value);
+		call.ret(1);
+	});
+	// There is one user and its hive is always loaded, so a profile is its current user key.
+	registry.add("LoadUserProfileW", 2, [](ApiCall &call) {
+		if (!call[0] || !call[1]) {
+			call.fail(87, 0);
+			return;
+		}
+		call.store_pointer(call[1] + (call.pointer_width() == 4 ? 28 : 48), 0x80000001ULL);
+		call.ret(1);
+	});
+	registry.add("UnloadUserProfile", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("GetUserProfileDirectoryW", 3, [&context](ApiCall &call) {
+		if (!call[0] || !call[2]) {
+			call.fail(87, 0);
+			return;
+		}
+		const auto profile = context.paths.user_profile();
+		const uint32_t room = call.load<uint32_t>(call[2]);
+		call.store<uint32_t>(call[2], uint32_t(profile.size() + 1));
+		if (!call[1] || room <= profile.size()) {
+			call.fail(122, 0);
+			return;
+		}
+		call.put_wide(call[1], profile, profile.size() + 1);
+		call.ret(1);
+	});
+	// Scheduling and desktop hints a single user runtime has no use for.
+	registry.add("IsWindowRedirectedForPrint", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("RegisterTouchHitTestingWindow", 2, [](ApiCall &call) { call.ret(1); });
+	// PM_DESKTOP (POWER_PLATFORM_ROLE).
+	registry.add("PowerDeterminePlatformRoleEx", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("SHGetSettings", 2, [](ApiCall &call) {
+		if (call[0])
+			call.store<uint32_t>(call[0], 0);
+	});
+	// SYSPAL_STATIC: a true color display has no palette to give up.
+	registry.add("GetSystemPaletteUse", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("InheritWindowMonitor", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("IsImmersiveProcess", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("ImmGetProperty", 2, [](ApiCall &call) { call.ret(0); });
+	// INPUT_MESSAGE_SOURCE: no device and no origin is known for a message.
+	registry.add("GetCurrentInputMessageSource", 1, [](ApiCall &call) {
+		call.store<uint64_t>(call[0], 0);
+		call.ret(1);
+	});
+	registry.add("GetCurrentProcessExplicitAppUserModelID", 1, [](ApiCall &call) {
+		call.store_pointer(call[0], 0);
+		call.ret(0x80004005U);
+	});
+	// The newer interface calls name an interface by a LUID or a GUID, which no interface here has: the rows of MIB_IF_ROW2 carry a GUID
+	// of their own that nothing else refers to, so they are left to the older MIB_IFROW calls, which go by the index.
+	registry.add("ConvertInterfaceGuidToLuid", 2, [](ApiCall &call) { call.ret(1168); });
+	registry.add("GetIfEntry2", 1, [](ApiCall &call) { call.ret(1168); });
+	registry.add("SetProcessInformation", 4, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetProcessPriorityBoost", 2, [](ApiCall &call) { call.ret(1); });
+	registry.add("SetUserObjectInformationW", 4, [](ApiCall &call) { call.ret(1); });
+	registry.add("IsWinEventHookInstalled", 1, [](ApiCall &call) { call.ret(0); });
+	registry.add("WTSFreeMemory", 1, [&context](ApiCall &call) {
+		if (call[0])
+			context.allocator.release(call[0]);
+	});
 	// No input method editor is installed.
 	registry.add("ImmGetIMEFileNameW", 3, [](ApiCall &call) { call.ret(0); });
 	registry.add("ImmGetIMEFileNameA", 3, [](ApiCall &call) { call.ret(0); });
@@ -1204,8 +1592,14 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	// out of them; no report is ever sent, so each registration succeeds with S_OK and keeps nothing.
 	for (const auto name : {"WerRegisterRuntimeExceptionModule", "WerUnregisterRuntimeExceptionModule", "WerRegisterMemoryBlock",
 			"WerUnregisterMemoryBlock", "WerRegisterFile", "WerUnregisterFile", "WerSetFlags", "WerAddExcludedApplication",
-			"WerRemoveExcludedApplication"})
+			"WerRemoveExcludedApplication", "WerRegisterCustomMetadata", "WerUnregisterCustomMetadata"})
 		registry.add(name, 2, [](ApiCall &call) { call.ret(0); });
+	// A report would go nowhere, so none is made: the caller goes on as it does when reporting is turned off.
+	registry.add("WerReportCreate", 4, [](ApiCall &call) {
+		if (call[3])
+			call.write(call[3], std::vector<uint8_t>(call.pointer_width()));
+		call.ret(0x80004001U);
+	});
 	// Binding writes the addresses of a program's imports into its file ahead of time, which only spares the loader work; the loader here
 	// resolves every import when it loads the image, so an image left unbound is as good as a bound one (Windows Installer binds the
 	// programs a package names in its BindImage table).
@@ -1336,17 +1730,116 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(status == 0 ? 0 : status == 0xc0000073U ? 1332 : status == 0x107 ? 1332 : status == 0xc0000022U ? 5 : status == 0xc000000dU ? 87 :
 			status == 0xc0000017U ? 8 : 317);
 	});
+	// LSA_REFERENCED_DOMAIN_LIST: its header, the entries, then their names and SIDs, in memory LsaFreeMemory gives back.
+	const auto referenced_domains = [&context](ApiCall &call, const std::vector<std::u16string> &domains, const std::vector<std::vector<uint8_t>> &domain_sids) -> uint64_t {
+		const size_t width = call.pointer_width(), text_size = width == 8 ? 16 : 8, trust_size = text_size + width;
+		size_t domain_bytes = 16 + domains.size() * trust_size;
+		for (size_t index = 0; index < domains.size(); ++index)
+			domain_bytes += (domains[index].size() + 1) * 2 + domain_sids[index].size();
+		const uint64_t domain_block = context.allocator.allocate(domain_bytes, true);
+		if (!domain_block)
+			return 0;
+		const auto pointer_at = [&](uint64_t address, uint64_t value) {
+			if (width == 8) call.store<uint64_t>(address, value);
+			else call.store<uint32_t>(address, uint32_t(value));
+		};
+		call.store<uint32_t>(domain_block, uint32_t(domains.size()));
+		pointer_at(domain_block + (width == 8 ? 8 : 4), domains.empty() ? 0 : domain_block + 16);
+		uint64_t cursor = domain_block + 16 + domains.size() * trust_size;
+		for (size_t index = 0; index < domains.size(); ++index) {
+			const uint64_t entry = domain_block + 16 + index * trust_size;
+			call.store<uint16_t>(entry, uint16_t(domains[index].size() * 2));
+			call.store<uint16_t>(entry + 2, uint16_t((domains[index].size() + 1) * 2));
+			pointer_at(entry + (width == 8 ? 8 : 4), cursor);
+			call.put_wide(cursor, domains[index], domains[index].size() + 1);
+			cursor += (domains[index].size() + 1) * 2;
+			pointer_at(entry + text_size, cursor);
+			call.write(cursor, domain_sids[index]);
+			cursor += domain_sids[index].size();
+		}
+		return domain_block;
+	};
+	// The domain's SID is the account's without its last part.
+	const auto domain_sid_of = [](std::vector<uint8_t> sid) {
+		if (sid.size() > 8 && sid[1] > 0) {
+			sid[1] = uint8_t(sid[1] - 1);
+			sid.resize(sid.size() - 4);
+		}
+		return sid;
+	};
+	// LsaLookupSids(policy, count, sids, domains, names): LSA_TRANSLATED_NAME for each SID and the domains they belong to. An unknown SID is
+	// reported as such, with no name.
+	registry.add("LsaLookupSids", 5, [&context, accounts, referenced_domains, domain_sid_of](ApiCall &call) {
+		const uint32_t count = call.u32(1);
+		if (!call[2] || !call[3] || !call[4] || !count || count > 20480) {
+			call.ret(0xc000000dU);
+			return;
+		}
+		const size_t width = call.pointer_width(), name_at = width == 8 ? 8 : 4, index_at = name_at + (width == 8 ? 16 : 8), translated_size = width == 8 ? 32 : 16;
+		const auto known = accounts();
+		std::vector<const Account *> found(count, nullptr);
+		std::vector<std::u16string> domains;
+		std::vector<std::vector<uint8_t>> domain_sids;
+		std::vector<int32_t> domain_of(count, -1);
+		size_t name_bytes = count * translated_size;
+		for (uint32_t index = 0; index < count; ++index) {
+			const uint64_t sid_at = width == 8 ? call.load<uint64_t>(call[2] + index * 8ULL) : call.load<uint32_t>(call[2] + index * 4ULL);
+			if (!sid_at)
+				continue;
+			const auto sid = call.read(sid_at, 8 + size_t(call.read(sid_at, 2)[1]) * 4);
+			const auto match = std::find_if(known.begin(), known.end(), [&](const Account &account) { return account.sid == sid; });
+			if (match == known.end())
+				continue;
+			found[index] = &*match;
+			name_bytes += (match->name.size() + 1) * 2;
+			if (match->domain.empty())
+				continue;
+			const auto known_domain = std::find_if(domains.begin(), domains.end(), [&](const auto &domain) { return equal_fold(domain, match->domain); });
+			domain_of[index] = int32_t(known_domain - domains.begin());
+			if (known_domain == domains.end()) {
+				domains.push_back(match->domain);
+				domain_sids.push_back(domain_sid_of(match->sid));
+			}
+		}
+		const uint64_t domain_block = referenced_domains(call, domains, domain_sids), name_block = context.allocator.allocate(name_bytes, true);
+		if (!domain_block || !name_block) {
+			if (domain_block) context.allocator.release(domain_block);
+			if (name_block) context.allocator.release(name_block);
+			call.ret(0xc0000017U);
+			return;
+		}
+		uint64_t cursor = name_block + count * translated_size;
+		uint32_t mapped = 0;
+		for (uint32_t index = 0; index < count; ++index) {
+			const uint64_t entry = name_block + index * translated_size;
+			if (!found[index]) {
+				call.store<uint32_t>(entry, 8);
+				call.store<int32_t>(entry + index_at, -1);
+				continue;
+			}
+			++mapped;
+			call.store<uint32_t>(entry, found[index]->use);
+			call.store<uint16_t>(entry + name_at, uint16_t(found[index]->name.size() * 2));
+			call.store<uint16_t>(entry + name_at + 2, uint16_t((found[index]->name.size() + 1) * 2));
+			call.store_pointer(entry + name_at + (width == 8 ? 8 : 4), cursor);
+			call.put_wide(cursor, found[index]->name, found[index]->name.size() + 1);
+			cursor += (found[index]->name.size() + 1) * 2;
+			call.store<int32_t>(entry + index_at, domain_of[index]);
+		}
+		call.store_pointer(call[3], domain_block);
+		call.store_pointer(call[4], name_block);
+		call.ret(mapped == count ? 0 : mapped ? 0x107 : 0xc0000073U);
+	});
 	// LsaLookupNames2(policy, flags, count, names, domains, sids): LSA_TRANSLATED_SID2 for each name, "account" or "domain\account", and
 	// the LSA_REFERENCED_DOMAIN_LIST of the domains they belong to, each in memory LsaFreeMemory gives back. STATUS_SOME_NOT_MAPPED or
 	// STATUS_NONE_MAPPED when names are not known.
-	registry.add("LsaLookupNames2", 6, [&context, accounts](ApiCall &call) {
+	registry.add("LsaLookupNames2", 6, [&context, accounts, referenced_domains, domain_sid_of](ApiCall &call) {
 		const uint32_t count = call.u32(2);
 		if (!call[3] || !call[4] || !call[5] || !count || count > 1000) {
 			call.ret(0xc000000dU);
 			return;
 		}
 		const size_t width = call.pointer_width(), text_size = width == 8 ? 16 : 8, translated_size = width == 8 ? 24 : 16;
-		const size_t trust_size = text_size + width;
 		const auto known = accounts();
 		std::vector<const Account *> found(count, nullptr);
 		std::vector<std::u16string> domains;
@@ -1376,24 +1869,14 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			domain_of[index] = int32_t(known_domain - domains.begin());
 			if (known_domain == domains.end()) {
 				domains.push_back(match->domain);
-				// The domain's SID is the account's without its last part.
-				auto sid = match->sid;
-				if (sid.size() > 8 && sid[1] > 0) {
-					sid[1] = uint8_t(sid[1] - 1);
-					sid.resize(sid.size() - 4);
-				}
-				domain_sids.push_back(std::move(sid));
+				domain_sids.push_back(domain_sid_of(match->sid));
 			}
 		}
-		// The domain list: its header, the entries, then their names and SIDs.
-		size_t domain_bytes = 16 + domains.size() * trust_size;
-		for (size_t index = 0; index < domains.size(); ++index)
-			domain_bytes += (domains[index].size() + 1) * 2 + domain_sids[index].size();
 		size_t sid_bytes = count * translated_size;
 		for (const auto *account : found)
 			if (account)
 				sid_bytes += account->sid.size();
-		const uint64_t domain_block = context.allocator.allocate(domain_bytes, true), sid_block = context.allocator.allocate(sid_bytes, true);
+		const uint64_t domain_block = referenced_domains(call, domains, domain_sids), sid_block = context.allocator.allocate(sid_bytes, true);
 		if (!domain_block || !sid_block) {
 			if (domain_block) context.allocator.release(domain_block);
 			if (sid_block) context.allocator.release(sid_block);
@@ -1404,21 +1887,7 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			if (width == 8) call.store<uint64_t>(address, value);
 			else call.store<uint32_t>(address, uint32_t(value));
 		};
-		call.store<uint32_t>(domain_block, uint32_t(domains.size()));
-		pointer_at(domain_block + (width == 8 ? 8 : 4), domains.empty() ? 0 : domain_block + 16);
-		uint64_t cursor = domain_block + 16 + domains.size() * trust_size;
-		for (size_t index = 0; index < domains.size(); ++index) {
-			const uint64_t entry = domain_block + 16 + index * trust_size;
-			call.store<uint16_t>(entry, uint16_t(domains[index].size() * 2));
-			call.store<uint16_t>(entry + 2, uint16_t((domains[index].size() + 1) * 2));
-			pointer_at(entry + (width == 8 ? 8 : 4), cursor);
-			call.put_wide(cursor, domains[index], domains[index].size() + 1);
-			cursor += (domains[index].size() + 1) * 2;
-			pointer_at(entry + text_size, cursor);
-			call.write(cursor, domain_sids[index]);
-			cursor += domain_sids[index].size();
-		}
-		cursor = sid_block + count * translated_size;
+		uint64_t cursor = sid_block + count * translated_size;
 		uint32_t mapped = 0;
 		for (uint32_t index = 0; index < count; ++index) {
 			const uint64_t entry = sid_block + index * translated_size;
@@ -1442,6 +1911,28 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	// Session change messages are never sent: the registration succeeds and nothing arrives.
 	registry.add("WTSRegisterSessionNotification", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("WTSUnRegisterSessionNotification", 1, [](ApiCall &call) { call.ret(1); });
+	registry.add("WTSRegisterSessionNotificationEx", 3, [](ApiCall &call) { call.ret(1); });
+	registry.add("WTSUnRegisterSessionNotificationEx", 2, [](ApiCall &call) { call.ret(1); });
+	// The credential store is empty: enumerating and reading find nothing.
+	for (const auto name : {"CredEnumerateW", "CredEnumerateA"})
+		registry.add(name, 4, [](ApiCall &call) {
+			if (!call[2] || !call[3]) {
+				call.fail(87);
+				return;
+			}
+			call.store<uint32_t>(call[2], 0);
+			call.store_pointer(call[3], 0);
+			call.fail(1168);
+		});
+	for (const auto name : {"CredReadW", "CredReadA"})
+		registry.add(name, 4, [](ApiCall &call) {
+			if (!call[0] || !call[3]) {
+				call.fail(87);
+				return;
+			}
+			call.store_pointer(call[3], 0);
+			call.fail(1168);
+		});
 	// No pointer devices other than the mouse are present.
 	registry.add("RegisterPointerDeviceNotifications", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("GetPointerDevices", 2, [](ApiCall &call) {

@@ -122,5 +122,7 @@ int raven_entry(void)
 	if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SNATIVEDIGITS, text, 64) != 11 || !same(text, L"0123456789")) return 50;
 	SetLastError(0);
 	if (GetLocaleInfoEx(L"en-US", LOCALE_SNATIVEDIGITS, text, 10) || GetLastError() != ERROR_INSUFFICIENT_BUFFER) return 51;
+	if (LCIDToLocaleName(0x459, name, LOCALE_NAME_MAX_LENGTH, 0) != 11 || lstrcmpW(name, L"sd-Deva-IN")) return 52;
+	if (LocaleNameToLCID(L"ar-EG", 0) != 0xc01) return 53;
 	return 0;
 }

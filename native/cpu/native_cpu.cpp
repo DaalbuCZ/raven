@@ -1050,9 +1050,9 @@ void NativeProcess::use_small_pages(uint64_t address, size_t size)
 	memory_syscall(SYS_madvise, address, size, MADV_NOHUGEPAGE);
 }
 
-uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset)
+uint64_t NativeProcess::map_shared(int descriptor, size_t size, uint64_t offset, uint64_t address)
 {
-	return map_file(descriptor, size, offset, false);
+	return map_file(descriptor, size, offset, false, address);
 }
 
 uint64_t NativeProcess::map_descriptor(int descriptor, size_t size, uint64_t offset)
@@ -1110,7 +1110,7 @@ uint64_t NativeProcess::receive_descriptor(int descriptor, uint64_t scratch)
 	return uint64_t(received);
 }
 
-uint64_t NativeProcess::map_file(int descriptor, size_t size, uint64_t offset, bool transfer)
+uint64_t NativeProcess::map_file(int descriptor, size_t size, uint64_t offset, bool transfer, uint64_t address)
 {
 	state->trap_page.clear();
 	state->require_memory();
@@ -1131,15 +1131,16 @@ uint64_t NativeProcess::map_file(int descriptor, size_t size, uint64_t offset, b
 		}
 		// Windows places views on the 64 KiB allocation granularity and programs round view addresses down to it, so a view starts on
 		// such a boundary: a reservation one granule larger is made, the file is mapped over its aligned part and the slack is returned.
-		constexpr uint64_t granularity = 0x10000;
-		const auto hint = state->mode == NativeMode::x86 ? low_gap(state->child->pid, size + granularity, state->limit()) : 0;
+		// A view asked for at an address goes exactly there and needs no slack.
+		const uint64_t granularity = address ? 0 : 0x10000;
+		const auto hint = address ? address : state->mode == NativeMode::x86 ? low_gap(state->child->pid, size + granularity, state->limit()) : 0;
 		const auto reserved = memory_syscall(SYS_mmap, hint, size + granularity, PROT_NONE,
 			MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (hint ? MAP_FIXED_NOREPLACE : 0), uint64_t(-1), 0);
-		if (reserved >= state->limit() || size + granularity > state->limit() - reserved) {
+		if (reserved >= state->limit() || size + granularity > state->limit() - reserved || (address && reserved != address)) {
 			state->child->stop();
 			throw std::runtime_error("host returned an invalid shared mapping address");
 		}
-		const uint64_t aligned = (reserved + granularity - 1) & ~(granularity - 1);
+		const uint64_t aligned = granularity ? (reserved + granularity - 1) & ~(granularity - 1) : reserved;
 		const auto mapped = memory_syscall(SYS_mmap, aligned, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, guest_descriptor, offset);
 		if (mapped != aligned) {
 			state->child->stop();
@@ -1395,7 +1396,9 @@ void NativeProcess::end_call()
 		while (child.take_stop(child.pid, discarded)) {}
 		state->stopped = true;
 	}
-	state->require_stopped();
+	// With the guest gone (the deadline ended it) there is only the bookkeeping of the call left to drop.
+	if (state->child && state->child->pid != -1)
+		state->require_stopped();
 	state->callbacks.clear();
 	state->callback_cleanups.clear();
 	state->active_call=false;
@@ -1613,6 +1616,32 @@ void NativeProcess::pause_thread(NativeThreadState &thread)
 	forget_registers();
 }
 
+void NativeProcess::set_thread_registers(NativeThreadState &thread, const user_regs_struct &registers)
+{
+	thread.context.registers = registers;
+	if (!parallel() || (thread.stopped && !thread.context_in_task))
+		return;
+	if (thread.task <= 0)
+		throw std::runtime_error("native thread has no execution task");
+	auto &child = *state->child;
+	const pid_t caller = child.pid;
+	const bool stopped = state->stopped;
+	try {
+		child.pid = thread.task;
+		state->stopped = true;
+		forget_registers();
+		trace(PTRACE_SETREGS, child.pid, &thread.context.registers);
+	} catch (...) {
+		child.pid = caller;
+		state->stopped = stopped;
+		forget_registers();
+		throw;
+	}
+	child.pid = caller;
+	state->stopped = stopped;
+	forget_registers();
+}
+
 void NativeProcess::enter_fault_dispatch()
 {
 	state->require_stopped();
@@ -1685,7 +1714,11 @@ void NativeProcess::add_api_trap(uint64_t address, uint32_t callee_cleanup)
 		return at - page < state->trap_page.size() ? state->trap_page[at - page] : read_memory(at, 1)[0];
 	};
 	if (!state->covers(address, 1, PROT_EXEC) || byte_at(address) != 0xcc)
-		throw std::runtime_error("native API trap must be an executable INT3");
+	{
+		char text[96];
+		std::snprintf(text, sizeof text, "native API trap must be an executable INT3: %llx", static_cast<unsigned long long>(address));
+		throw std::runtime_error(text);
+	}
 	if (state->mode == NativeMode::x86 && (address >= state->limit() || callee_cleanup % 4))
 		throw std::runtime_error("native x86 API trap requires a 32-bit address and dword-aligned cleanup");
 	state->api_traps[address] = callee_cleanup;

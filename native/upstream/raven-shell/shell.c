@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shobjidl.h>
+#include <shlobj.h>
 #include <servprov.h>
 #include <propsys.h>
 #include <shellapi.h>
@@ -633,10 +634,77 @@ static HRESULT make_taskbar_list(REFIID iid, void **out)
 	return result;
 }
 
+/* Global options ---------------------------------------------------------------------------------------------- */
+
+static const CLSID global_options_class = {0x0000034b, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static const IID global_options_iid = {0x0000015b, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+
+/* The process-wide COM settings a program sets once while it starts, such as whether calls into its objects swallow exceptions. Every
+ * object shares one table, as each one stands for the same process; nothing here acts on the values, which are only kept and read back. */
+static ULONG_PTR global_options[COMGLB_UNMARSHALING_POLICY + 1];
+
+typedef struct {
+	IGlobalOptions face;
+	LONG refs;
+} OptionsObject;
+
+static HRESULT STDMETHODCALLTYPE go_query(IGlobalOptions *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	if (same_iid(iid, &IID_IUnknown) || same_iid(iid, &global_options_iid)) {
+		*out = self;
+		InterlockedIncrement(&((OptionsObject *)self)->refs);
+		return S_OK;
+	}
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE go_add_ref(IGlobalOptions *self) { return InterlockedIncrement(&((OptionsObject *)self)->refs); }
+static ULONG STDMETHODCALLTYPE go_release(IGlobalOptions *self)
+{
+	const LONG refs = InterlockedDecrement(&((OptionsObject *)self)->refs);
+	if (!refs)
+		HeapFree(GetProcessHeap(), 0, self);
+	return refs;
+}
+static HRESULT STDMETHODCALLTYPE go_set(IGlobalOptions *self, GLOBALOPT_PROPERTIES property, ULONG_PTR value)
+{
+	if (property < COMGLB_EXCEPTION_HANDLING || property > COMGLB_UNMARSHALING_POLICY)
+		return E_INVALIDARG;
+	global_options[property] = value;
+	return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE go_get(IGlobalOptions *self, GLOBALOPT_PROPERTIES property, ULONG_PTR *value)
+{
+	if (!value)
+		return E_POINTER;
+	if (property < COMGLB_EXCEPTION_HANDLING || property > COMGLB_UNMARSHALING_POLICY)
+		return E_INVALIDARG;
+	*value = global_options[property];
+	return S_OK;
+}
+
+static IGlobalOptionsVtbl options_vtbl = {go_query, go_add_ref, go_release, go_set, go_get};
+
+static HRESULT make_global_options(REFIID iid, void **out)
+{
+	OptionsObject *options = HeapAlloc(GetProcessHeap(), 0, sizeof *options);
+	if (!options)
+		return E_OUTOFMEMORY;
+	options->face.lpVtbl = &options_vtbl;
+	options->refs = 1;
+	const HRESULT result = go_query(&options->face, iid, out);
+	go_release(&options->face);
+	return result;
+}
+
 /* The classes this component serves itself, which CoCreateInstance makes directly and CoGetClassObject through a class factory. */
 static HRESULT make_builtin(REFCLSID clsid, REFIID iid, void **out, BOOL *served)
 {
 	*served = TRUE;
+	if (same_iid(clsid, &global_options_class))
+		return make_global_options(iid, out);
 	if (same_iid(clsid, &CLSID_FileOpenDialog))
 		return make_dialog(FALSE, iid, out);
 	if (same_iid(clsid, &CLSID_FileSaveDialog))
@@ -691,13 +759,15 @@ static IClassFactoryVtbl builtin_factory_vtbl = {bf_query, bf_add_ref, bf_releas
 static BOOL builtin_class(REFCLSID clsid)
 {
 	return same_iid(clsid, &CLSID_FileOpenDialog) || same_iid(clsid, &CLSID_FileSaveDialog) || same_iid(clsid, &CLSID_ShellLink) ||
-		same_iid(clsid, &CLSID_TaskbarList) || same_iid(clsid, &CLSID_KnownFolderManager);
+		same_iid(clsid, &CLSID_TaskbarList) || same_iid(clsid, &CLSID_KnownFolderManager) || same_iid(clsid, &global_options_class);
 }
 
 
 /* Class registry -------------------------------------------------------------------------------------------- */
 
-HRESULT WINAPI CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *out)
+/* Both creation entry points share this: programs that hook one of them call the other as the original, so neither may go through the
+ * other's export. */
+static HRESULT create_instance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *out)
 {
 	trace("CoCreateInstance", clsid);
 	trace("  requested", iid);
@@ -711,6 +781,11 @@ HRESULT WINAPI CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, 
 	}
 	/* Any other class is served by the library the registry names for it. */
 	return raven_create_registered(clsid, outer, context, iid, out);
+}
+
+HRESULT WINAPI CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID *out)
+{
+	return create_instance(clsid, outer, context, iid, out);
 }
 
 HRESULT WINAPI CoGetClassObject(REFCLSID clsid, DWORD context, LPVOID server, REFIID iid, LPVOID *out)
@@ -731,6 +806,55 @@ HRESULT WINAPI CoGetClassObject(REFCLSID clsid, DWORD context, LPVOID server, RE
 	return raven_registered_class_object(clsid, context, iid, out);
 }
 
+/* One object asked for several interfaces at once. Every class here is served in the process, so a server name changes nothing. */
+HRESULT WINAPI CoCreateInstanceEx(REFCLSID clsid, LPUNKNOWN outer, DWORD context, COSERVERINFO *server, DWORD count, MULTI_QI *results)
+{
+	IUnknown *object;
+	DWORD found = 0;
+	if (!count || !results)
+		return E_INVALIDARG;
+	for (DWORD index = 0; index < count; ++index) {
+		results[index].pItf = NULL;
+		results[index].hr = E_NOINTERFACE;
+	}
+	const HRESULT result = create_instance(clsid, outer, context, &IID_IUnknown, (void **)&object);
+	if (FAILED(result)) {
+		for (DWORD index = 0; index < count; ++index)
+			results[index].hr = result;
+		return result;
+	}
+	for (DWORD index = 0; index < count; ++index) {
+		results[index].hr = IUnknown_QueryInterface(object, results[index].pIID, (void **)&results[index].pItf);
+		if (SUCCEEDED(results[index].hr))
+			++found;
+	}
+	IUnknown_Release(object);
+	return found == count ? S_OK : found ? CO_S_NOTALLINTERFACES : E_NOINTERFACE;
+}
+
+/* shlwapi's table-driven QueryInterface: each entry gives an interface and the offset of its pointer from the object, a null identifier
+ * ends the table, and IUnknown is the first entry's pointer. */
+typedef struct {
+	const IID *iid;
+	DWORD offset;
+} interface_entry;
+
+HRESULT WINAPI QISearch(void *object, const interface_entry *table, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!object || !table || !iid)
+		return E_POINTER;
+	for (const interface_entry *entry = table; entry->iid; ++entry)
+		if (same_iid(iid, entry->iid) || (entry == table && same_iid(iid, &IID_IUnknown))) {
+			*out = (BYTE *)object + entry->offset;
+			IUnknown_AddRef((IUnknown *)*out);
+			return S_OK;
+		}
+	return E_NOINTERFACE;
+}
+
 /* shlwapi names this export by its ordinal (176): ask an object for a service through its service provider. */
 HRESULT WINAPI IUnknown_QueryService(IUnknown *object, REFGUID service, REFIID iid, void **out)
 {
@@ -746,6 +870,21 @@ HRESULT WINAPI IUnknown_QueryService(IUnknown *object, REFGUID service, REFIID i
 	result = IServiceProvider_QueryService(provider, service, iid, out);
 	IServiceProvider_Release(provider);
 	return result;
+}
+
+HRESULT WINAPI SHCreateItemFromParsingName(PCWSTR path, IBindCtx *context, REFIID iid, void **out);
+
+HRESULT WINAPI SHCreateItemFromIDList(PCIDLIST_ABSOLUTE list, REFIID iid, void **out)
+{
+	WCHAR path[MAX_PATH];
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	/* The host answers this call, under the shell's name. */
+	BOOL (WINAPI *path_of)(PCIDLIST_ABSOLUTE, LPWSTR) = (void *)GetProcAddress(LoadLibraryW(L"shell32.dll"), "SHGetPathFromIDListW");
+	if (!list || !path_of || !path_of(list, path))
+		return E_INVALIDARG;
+	return SHCreateItemFromParsingName(path, NULL, iid, out);
 }
 
 HRESULT WINAPI SHCreateItemFromParsingName(PCWSTR path, IBindCtx *context, REFIID iid, void **out)
@@ -1357,6 +1496,155 @@ HRESULT WINAPI CoGetMalloc(DWORD context, LPMALLOC *out)
 HRESULT WINAPI SHGetMalloc(LPMALLOC *out)
 {
 	return CoGetMalloc(MEMCTX_TASK, out);
+}
+
+/* ---- the free-threaded marshaler ----
+ * CoCreateFreeThreadedMarshaler makes the object an agile object aggregates: its IMarshal hands an interface pointer to another
+ * apartment of the same process as the pointer itself, so every apartment calls the object directly. The marshaled form is the
+ * marshal flags and the pointer, read back by the same object's UnmarshalInterface. No other process takes COM calls here, so a
+ * destination outside the process is refused. */
+typedef struct {
+	IUnknown inner;
+	IMarshal marshal;
+	IUnknown *outer;
+	LONG references;
+} FreeMarshaler;
+
+typedef struct {
+	DWORD flags, reserved;
+	ULONGLONG pointer;
+} FreeMarshalData;
+
+static const CLSID in_process_free_marshaler = {0x0000033a, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+
+static FreeMarshaler *free_marshaler_inner(IUnknown *self) { return CONTAINING_RECORD(self, FreeMarshaler, inner); }
+static FreeMarshaler *free_marshaler(IMarshal *self) { return CONTAINING_RECORD(self, FreeMarshaler, marshal); }
+static BOOL in_process(DWORD context) { return context == MSHCTX_INPROC || context == MSHCTX_CROSSCTX; }
+
+static HRESULT WINAPI free_inner_query(IUnknown *self, REFIID iid, void **out)
+{
+	FreeMarshaler *marshaler = free_marshaler_inner(self);
+	if (!out)
+		return E_POINTER;
+	if (same_iid(iid, &IID_IUnknown))
+		*out = &marshaler->inner;
+	else if (same_iid(iid, &IID_IMarshal))
+		*out = &marshaler->marshal;
+	else {
+		*out = NULL;
+		return E_NOINTERFACE;
+	}
+	IUnknown_AddRef((IUnknown *)*out);
+	return S_OK;
+}
+
+static ULONG WINAPI free_inner_reference(IUnknown *self) { return InterlockedIncrement(&free_marshaler_inner(self)->references); }
+
+static ULONG WINAPI free_inner_release(IUnknown *self)
+{
+	FreeMarshaler *marshaler = free_marshaler_inner(self);
+	const ULONG left = InterlockedDecrement(&marshaler->references);
+	if (!left)
+		HeapFree(GetProcessHeap(), 0, marshaler);
+	return left;
+}
+
+static IUnknownVtbl free_inner_table = {free_inner_query, free_inner_reference, free_inner_release};
+
+static HRESULT WINAPI free_query(IMarshal *self, REFIID iid, void **out) { return IUnknown_QueryInterface(free_marshaler(self)->outer, iid, out); }
+static ULONG WINAPI free_reference(IMarshal *self) { return IUnknown_AddRef(free_marshaler(self)->outer); }
+static ULONG WINAPI free_release(IMarshal *self) { return IUnknown_Release(free_marshaler(self)->outer); }
+
+static HRESULT WINAPI free_unmarshal_class(IMarshal *self, REFIID iid, void *object, DWORD context, void *reserved, DWORD flags, CLSID *out)
+{
+	if (!out)
+		return E_POINTER;
+	if (!in_process(context))
+		return CO_E_NOT_SUPPORTED;
+	*out = in_process_free_marshaler;
+	return S_OK;
+}
+
+static HRESULT WINAPI free_size_max(IMarshal *self, REFIID iid, void *object, DWORD context, void *reserved, DWORD flags, DWORD *out)
+{
+	if (!out)
+		return E_POINTER;
+	if (!in_process(context))
+		return CO_E_NOT_SUPPORTED;
+	*out = sizeof(FreeMarshalData);
+	return S_OK;
+}
+
+static HRESULT WINAPI free_marshal(IMarshal *self, IStream *stream, REFIID iid, void *object, DWORD context, void *reserved, DWORD flags)
+{
+	IUnknown *pointer;
+	if (!stream || !object)
+		return E_INVALIDARG;
+	if (!in_process(context))
+		return CO_E_NOT_SUPPORTED;
+	HRESULT result = IUnknown_QueryInterface((IUnknown *)object, iid, (void **)&pointer);
+	if (FAILED(result))
+		return result;
+	FreeMarshalData data = {flags, 0, (ULONGLONG)(ULONG_PTR)pointer};
+	result = IStream_Write(stream, &data, sizeof data, NULL);
+	/* A normal or table-strong marshal keeps its reference until the data is unmarshaled or released; a table-weak one keeps none. */
+	if (FAILED(result) || flags == MSHLFLAGS_TABLEWEAK)
+		IUnknown_Release(pointer);
+	return result;
+}
+
+static HRESULT read_marshal_data(IStream *stream, FreeMarshalData *data)
+{
+	ULONG read = 0;
+	const HRESULT result = stream ? IStream_Read(stream, data, sizeof *data, &read) : E_INVALIDARG;
+	return FAILED(result) ? result : read == sizeof *data ? S_OK : STG_E_READFAULT;
+}
+
+static HRESULT WINAPI free_unmarshal(IMarshal *self, IStream *stream, REFIID iid, void **out)
+{
+	FreeMarshalData data;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	HRESULT result = read_marshal_data(stream, &data);
+	if (FAILED(result))
+		return result;
+	IUnknown *pointer = (IUnknown *)(ULONG_PTR)data.pointer;
+	result = IUnknown_QueryInterface(pointer, iid, out);
+	if (data.flags == MSHLFLAGS_NORMAL)
+		IUnknown_Release(pointer);
+	return result;
+}
+
+static HRESULT WINAPI free_release_data(IMarshal *self, IStream *stream)
+{
+	FreeMarshalData data;
+	const HRESULT result = read_marshal_data(stream, &data);
+	if (SUCCEEDED(result) && data.flags != MSHLFLAGS_TABLEWEAK)
+		IUnknown_Release((IUnknown *)(ULONG_PTR)data.pointer);
+	return result;
+}
+
+static HRESULT WINAPI free_disconnect(IMarshal *self, DWORD reserved) { return S_OK; }
+
+static IMarshalVtbl free_marshal_table = {free_query, free_reference, free_release, free_unmarshal_class, free_size_max, free_marshal,
+	free_unmarshal, free_release_data, free_disconnect};
+
+HRESULT WINAPI CoCreateFreeThreadedMarshaler(LPUNKNOWN outer, LPUNKNOWN *out)
+{
+	if (!out)
+		return E_INVALIDARG;
+	FreeMarshaler *marshaler = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *marshaler);
+	if (!marshaler) {
+		*out = NULL;
+		return E_OUTOFMEMORY;
+	}
+	marshaler->inner.lpVtbl = &free_inner_table;
+	marshaler->marshal.lpVtbl = &free_marshal_table;
+	marshaler->outer = outer ? outer : &marshaler->inner;
+	marshaler->references = 1;
+	*out = &marshaler->inner;
+	return S_OK;
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)

@@ -42,11 +42,11 @@ std::span<const std::string_view> NativeDesktop::user_exports()
 std::span<const std::string_view> NativeDesktop::gdi_exports()
 {
 #ifdef RAVEN_SKIA
-	static constexpr std::array<std::string_view, 52> names{
-		"BitBlt", "CombineRgn", "CreateCompatibleBitmap", "CreateCompatibleDC", "CreateDCW", "CreateDIBSection", "CreateFontIndirectW", "CreatePen", "CreateRectRgn", "CreateSolidBrush", "DPtoLP", "DeleteDC", "DeleteObject", "EqualRgn", "ExcludeClipRect", "ExtTextOutW", "GdiFlush", "GetBitmapBits", "GetBkColor", "GetBkMode", "GetClipBox", "GetClipRgn", "GetCurrentObject", "GetCurrentPositionEx", "GetGraphicsMode", "GetLayout", "GetObjectA", "GetObjectType", "GetObjectW", "GetRgnBox", "GetStockObject", "GetTextColor", "GetTextExtentExPointW", "GetTextExtentPoint32W", "GetTextExtentPointW", "GetTextMetricsW", "GetViewportExtEx", "GetWindowExtEx", "IntersectClipRect", "LPtoDP", "LineTo", "MoveToEx", "OffsetRgn", "PtInRegion", "RectInRegion", "SelectClipRgn", "SelectObject", "SetBkColor", "SetBkMode", "SetRectRgn", "SetTextColor", "TextOutW"};
+	static constexpr std::array<std::string_view, 53> names{
+		"BitBlt", "CombineRgn", "CreateCompatibleBitmap", "CreateCompatibleDC", "CreateDCW", "CreateDIBSection", "CreateFontIndirectW", "CreateICW", "CreatePen", "CreateRectRgn", "CreateSolidBrush", "DPtoLP", "DeleteDC", "DeleteObject", "EqualRgn", "ExcludeClipRect", "ExtTextOutW", "GdiFlush", "GetBitmapBits", "GetBkColor", "GetBkMode", "GetClipBox", "GetClipRgn", "GetCurrentObject", "GetCurrentPositionEx", "GetGraphicsMode", "GetLayout", "GetObjectA", "GetObjectType", "GetObjectW", "GetRgnBox", "GetStockObject", "GetTextColor", "GetTextExtentExPointW", "GetTextExtentPoint32W", "GetTextExtentPointW", "GetTextMetricsW", "GetViewportExtEx", "GetWindowExtEx", "IntersectClipRect", "LPtoDP", "LineTo", "MoveToEx", "OffsetRgn", "PtInRegion", "RectInRegion", "SelectClipRgn", "SelectObject", "SetBkColor", "SetBkMode", "SetRectRgn", "SetTextColor", "TextOutW"};
 #else
-	static constexpr std::array<std::string_view, 46> names{
-		"BitBlt", "CombineRgn", "CreateCompatibleBitmap", "CreateCompatibleDC", "CreateDCW", "CreateDIBSection", "CreateFontIndirectW", "CreatePen", "CreateRectRgn", "CreateSolidBrush", "DPtoLP", "DeleteDC", "DeleteObject", "EqualRgn", "ExcludeClipRect", "GdiFlush", "GetBitmapBits", "GetBkColor", "GetBkMode", "GetClipBox", "GetClipRgn", "GetCurrentObject", "GetCurrentPositionEx", "GetGraphicsMode", "GetLayout", "GetObjectA", "GetObjectType", "GetObjectW", "GetRgnBox", "GetStockObject", "GetTextColor", "GetViewportExtEx", "GetWindowExtEx", "IntersectClipRect", "LPtoDP", "LineTo", "MoveToEx", "OffsetRgn", "PtInRegion", "RectInRegion", "SelectClipRgn", "SelectObject", "SetBkColor", "SetBkMode", "SetRectRgn", "SetTextColor"};
+	static constexpr std::array<std::string_view, 47> names{
+		"BitBlt", "CombineRgn", "CreateCompatibleBitmap", "CreateCompatibleDC", "CreateDCW", "CreateDIBSection", "CreateFontIndirectW", "CreateICW", "CreatePen", "CreateRectRgn", "CreateSolidBrush", "DPtoLP", "DeleteDC", "DeleteObject", "EqualRgn", "ExcludeClipRect", "GdiFlush", "GetBitmapBits", "GetBkColor", "GetBkMode", "GetClipBox", "GetClipRgn", "GetCurrentObject", "GetCurrentPositionEx", "GetGraphicsMode", "GetLayout", "GetObjectA", "GetObjectType", "GetObjectW", "GetRgnBox", "GetStockObject", "GetTextColor", "GetViewportExtEx", "GetWindowExtEx", "IntersectClipRect", "LPtoDP", "LineTo", "MoveToEx", "OffsetRgn", "PtInRegion", "RectInRegion", "SelectClipRgn", "SelectObject", "SetBkColor", "SetBkMode", "SetRectRgn", "SetTextColor"};
 #endif
 	return names;
 }
@@ -255,7 +255,7 @@ static DesktopBitmap mask_bitmap(const DesktopIcon &icon)
 		for (size_t x = 0; x < width; ++x) {
 			const size_t pixel = y * width + x;
 			bitmap.bits[y * stride + x / 8] |= uint8_t(image.and_mask[pixel] << (7 - x % 8));
-			if (icon.monochrome)
+			if (icon.monochrome && pixel < image.xor_mask.size())
 				bitmap.bits[(y + height) * stride + x / 8] |= uint8_t(image.xor_mask[pixel] << (7 - x % 8));
 		}
 	return bitmap;
@@ -368,6 +368,11 @@ uint64_t NativeDesktop::get_object(std::span<const uint64_t> args,bool ansi)
 		put(bytes, plain + 12, 1, 2);
 		put(bytes, plain + 14, bitmap->depth, 2);
 		put(bytes, plain + 20, size_t(bitmap->stride ? bitmap->stride : bitmap->width*4)*bitmap->height);
+		if (bitmap->masks[0] || bitmap->masks[1] || bitmap->masks[2]) {
+			put(bytes, plain + 16, 3);
+			for (size_t channel = 0; channel < 3; ++channel)
+				put(bytes, plain + 40 + channel * 4, bitmap->masks[channel]);
+		}
 	}
 	process.write_memory(args[2], bytes);
 	return bytes.size();
@@ -476,9 +481,11 @@ bool NativeDesktop::dispatch(std::string_view name)
 			result = icon->shared || objects.erase(handle);
 	} else if (name == "DeleteObject") {
 		const auto handle = process.api_arguments(1)[0];
-		result = objects.pen(handle) ? objects.delete_pen(handle) : objects.region(handle) ? objects.erase(handle) : objects.brush(handle) ? objects.delete_brush(handle) : objects.font(handle) ? objects.delete_font(handle) : objects.dc(handle) ? delete_dc(handle) : delete_bitmap(handle);
+		result = objects.pen(handle) ? objects.delete_pen(handle) : objects.region(handle) || objects.palette(handle) ? objects.erase(handle) : objects.brush(handle) ? objects.delete_brush(handle) : objects.font(handle) ? objects.delete_font(handle) : objects.dc(handle) ? delete_dc(handle) : delete_bitmap(handle);
 	} else if (name == "CreateSolidBrush") {
-		const auto color=uint32_t(process.api_arguments(1)[0]);
+		auto color=uint32_t(process.api_arguments(1)[0]);
+		// A palette-relative color is the color itself on a display without a palette.
+		if (color>>24==2) color&=0xffffff;
 		if (color & 0xff000000) environment.set_last_error(120);
 		else { result=objects.add(DesktopBrush{color}); if (!result) environment.set_last_error(8); }
 	} else if (name == "FrameRect") {
@@ -504,8 +511,8 @@ bool NativeDesktop::dispatch(std::string_view name)
 		} else environment.set_last_error(6);
 	} else if (name == "CreateCompatibleDC") {
 		result = create_dc(process.api_arguments(1)[0]);
-	} else if (name == "CreateDCW") {
-		// A display device context is created like a memory DC compatible with the screen; drawing on it stays off screen.
+	} else if (name == "CreateDCW" || name == "CreateICW") {
+		// An information context answers the same questions; a display device context is created like a memory DC compatible with the screen; drawing on it stays off screen.
 		const auto args = process.api_arguments(4);
 		(void)args;
 		result = create_dc(0);

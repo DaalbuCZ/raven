@@ -56,8 +56,11 @@ def runtime_paths(build):
         raven-accprop.dll raven-deployment.dll raven-netlist.dll raven-xaml.dll
         msi.dll cabinet.dll sxs.dll rpcrt4.dll libxslt.dll msxml3.dll atl100.dll oleaut32.dll
         libpng.dll libjpeg.dll libtiff.dll propsys.dll mlang.dll windowscodecs.dll gdiplus.dll
-        urlmon.dll riched20.dll msftedit.dll msvfw32.dll advpack.dll raven-setupapi.dll xmllite.dll
-        control.exe regedit.exe dism.exe fondue.exe msiexec.exe regsvr32.exe
+        urlmon.dll riched20.dll msftedit.dll msvfw32.dll advpack.dll raven-setupapi.dll xmllite.dll winsqlite3.dll raven-web.dll raven-appx.dll
+        icu.dll icuuc.dll icuin.dll
+        cmd.exe control.exe regedit.exe dism.exe fondue.exe msiexec.exe regsvr32.exe
+        find.exe findstr.exe more.com sort.exe where.exe xcopy.exe attrib.exe
+        timeout.exe choice.exe whoami.exe hostname.exe tasklist.exe taskkill.exe reg.exe rundll32.exe
         mscoree.dll ucrtbase32.dll l_intl.nls""".split()
     for root in (native, native / "x86"):
         files += [root / name for name in names if (root / name).exists()]

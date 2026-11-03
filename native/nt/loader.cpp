@@ -1,10 +1,52 @@
 #include "loader.h"
+#include "paths.h"
+#include "system_exports.h"
 
 #include <stdexcept>
 #include <algorithm>
 #include <sys/mman.h>
 
 namespace raven {
+
+ProgramLibraries::ProgramLibraries(std::u16string_view image_path, bool is_64) : is_64(is_64)
+{
+	const auto prefix = NativePrefix::from_environment();
+	const NativePaths paths(prefix);
+	if (const auto program = paths.resolve(image_path); program && program->exists)
+		folder = program->host.parent_path();
+}
+
+bool ProgramLibraries::contains(std::string_view dll)
+{
+	if (folder.empty() || !program_may_replace(dll))
+		return false;
+	if (const auto known = answers.find(dll); known != answers.end())
+		return known->second;
+	if (!files) {
+		files.emplace();
+		std::error_code error;
+		for (std::filesystem::directory_iterator walk(folder, error), end; !error && walk != end; walk.increment(error)) {
+			auto filename = walk->path().filename().string();
+			for (auto &character : filename)
+				if (character >= 'A' && character <= 'Z')
+					character = static_cast<char>(character + ('a' - 'A'));
+			files->emplace(std::move(filename), walk->path());
+		}
+	}
+	bool present = false;
+	if (const auto file = files->find(std::string(dll)); file != files->end()) {
+		std::error_code error;
+		if (std::filesystem::is_regular_file(file->second, error))
+			if (const auto mapped = ModuleBytes::map(file->second)) {
+				try {
+					const PEImage image(*mapped);
+					present = image.is_64 == is_64 && (image.characteristics & 0x2000);
+				} catch (...) {}
+			}
+	}
+	answers.emplace(std::string(dll), present);
+	return present;
+}
 
 std::vector<const PEModule *> initialization_order(const ModuleSet &modules, const PEModule &entry)
 {
@@ -232,7 +274,7 @@ void NativeLoaderData::add(const PEModule &module)
 {
 	const auto found = modules.all().find(module.name);
 	if (found == modules.all().end() || found->second.get() != &module || nodes.contains(&module) ||
-		nodes.size() >= 10000 || !module.image.is_64 || !(module.image.characteristics & 0x2000) ||
+		nodes.size() >= 10000 || !module.image.is_64 || (!(module.image.characteristics & 0x2000) && module.image.entry) ||
 		module.name.size() > 32766 || std::any_of(module.name.begin(), module.name.end(), [](unsigned char c) { return c > 127; }))
 		throw std::runtime_error("invalid dynamic native loader module");
 	validate();

@@ -19,8 +19,13 @@ size_t size_class(uint64_t size)
 
 uint64_t GuestAllocator::allocate(uint64_t size, bool zero)
 {
-	if (heap.available())
-		return heap.allocate(zero ? 8 : 0, std::max<uint64_t>(size, 1));
+	if (heap.available()) {
+		const auto address = heap.allocate(zero ? 8 : 0, std::max<uint64_t>(size, 1));
+		// The program may have freed an earlier block at this address with HeapFree, which this allocator never sees: what it still
+		// remembers of that block (an empty request, a movable handle) belongs to nothing now and must not apply to the new one.
+		forget(address);
+		return address;
+	}
 	if (size <= largest_shared) {
 		const size_t index = size_class(std::max<uint64_t>(size, 1));
 		const uint64_t block = uint64_t(16) << index;
@@ -54,8 +59,76 @@ uint64_t GuestAllocator::allocate(uint64_t size, bool zero)
 	return range.address;
 }
 
+void GuestAllocator::forget(uint64_t address)
+{
+	empty.erase(address);
+	if (const auto moved = moved_blocks.find(address); moved != moved_blocks.end()) {
+		movable_blocks.erase(moved->second);
+		moved_blocks.erase(moved);
+	}
+	if (const auto handle = movable_blocks.find(address); handle != movable_blocks.end()) {
+		moved_blocks.erase(handle->second);
+		movable_blocks.erase(handle);
+	}
+}
+
+uint64_t GuestAllocator::allocate_movable(uint64_t size, bool zero)
+{
+	const auto address = allocate(size, zero);
+	if (!address)
+		return 0;
+	empty.erase(address);
+	moved_blocks.erase(address);
+	movable_blocks[address] = address;
+	if (!size)
+		empty.insert(address);
+	return address;
+}
+
+void GuestAllocator::make_movable(uint64_t address)
+{
+	movable_blocks.emplace(address, address);
+}
+
+uint64_t GuestAllocator::data(uint64_t handle) const
+{
+	const auto found = movable_blocks.find(handle);
+	return found == movable_blocks.end() ? handle : found->second;
+}
+
+uint64_t GuestAllocator::handle(uint64_t block) const
+{
+	const auto found = moved_blocks.find(block);
+	return found == moved_blocks.end() ? block : found->second;
+}
+
+void GuestAllocator::move(uint64_t handle, uint64_t block)
+{
+	auto &current = movable_blocks.at(handle);
+	if (current != handle) {
+		moved_blocks.erase(current);
+		release_block(current);
+	}
+	current = block;
+	moved_blocks[block] = handle;
+}
+
 bool GuestAllocator::release(uint64_t address)
 {
+	const auto block = handle(address);
+	if (const auto found = movable_blocks.find(block); found != movable_blocks.end()) {
+		if (found->second != block) {
+			moved_blocks.erase(found->second);
+			release_block(found->second);
+		}
+		movable_blocks.erase(found);
+	}
+	return release_block(block);
+}
+
+bool GuestAllocator::release_block(uint64_t address)
+{
+	empty.erase(address);
 	if (heap.available())
 		return heap.release(address);
 	if (const auto block = shared.find(address); block != shared.end()) {
@@ -72,6 +145,8 @@ bool GuestAllocator::release(uint64_t address)
 
 uint64_t GuestAllocator::size(uint64_t address)
 {
+	if (empty.contains(address))
+		return 0;
 	if (heap.available())
 		return heap.block_size(address);
 	if (const auto block = shared.find(address); block != shared.end())

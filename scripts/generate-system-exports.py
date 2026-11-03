@@ -18,7 +18,7 @@ import sys
 LIBRARIES = """advapi32 bcrypt comctl32 comdlg32 crypt32 dbghelp dwmapi gdi32 imm32 kernel32 ole32 oleaut32 psapi
 sensapi setupapi shell32 shlwapi user32 uxtheme version wininet winmm wintrust ws2_32 wsock32
 bcryptprimitives cfgmgr32 dhcpcsvc dnsapi hid imagehlp iphlpapi ntdll ktmw32 msimg32 mswsock ncrypt netapi32 opengl32 glu32 powrprof pdh runtimeobject winspool ravenhost secur32 shcore userenv wevtapi winhttp wtsapi32
-atlthunk oleacc odbccp32 usp10 sfc dsound combase wer uiautomationcore lz32 loadperf mpr shfolder wldap32 oledlg normaliz slc rstrtmgr d3dcompiler_47""".split()
+atlthunk oleacc odbccp32 usp10 sfc dsound combase wer uiautomationcore lz32 loadperf mpr shfolder wldap32 oledlg normaliz slc sppc rstrtmgr""".split()
 # Real exports whose names begin with an underscore, which the generic filter drops.
 # The interlocked functions are compiler intrinsics in the import libraries, yet kernel32 exports them and programs import them by name.
 # The address waits live in kernelbase on Windows and in no kernel32 import library; Raven publishes them from kernel32 as its 32-bit side does.
@@ -37,8 +37,10 @@ EXTRA_WORDS["sfc"] = {"SfpDeleteCatalog": 1, "SfpInstallCatalog": 2, "SRSetResto
 UXTHEME_DARK = {"RefreshImmersiveColorPolicyState": 0, "GetIsImmersiveColorUsingHighContrast": 1, "ShouldAppsUseDarkMode": 0,
                 "AllowDarkModeForWindow": 2, "SetPreferredAppMode": 1, "FlushMenuThemes": 0, "IsDarkModeAllowedForWindow": 1,
                 "ShouldSystemUseDarkMode": 0, "IsDarkModeAllowedForApp": 0}
-EXTRA["uxtheme"] = sorted(UXTHEME_DARK)
-EXTRA_WORDS["uxtheme"] = UXTHEME_DARK
+# OpenThemeDataForDpi is documented in uxtheme.h since Windows 10 1703 and missing from the mingw-w64 import library.
+UXTHEME_DOCUMENTED = {"OpenThemeDataForDpi": 3}
+EXTRA["uxtheme"] = sorted({**UXTHEME_DARK, **UXTHEME_DOCUMENTED})
+EXTRA_WORDS["uxtheme"] = {**UXTHEME_DARK, **UXTHEME_DOCUMENTED}
 # loadperf.dll has no 32-bit import library in mingw-w64 either.
 EXTRA_WORDS["loadperf"] = {"LoadPerfCounterTextStringsA": 2, "LoadPerfCounterTextStringsW": 2, "UnloadPerfCounterTextStringsA": 2,
                            "UnloadPerfCounterTextStringsW": 2, "InstallPerfDllA": 3, "InstallPerfDllW": 3, "UpdatePerfNameFilesA": 4,
@@ -54,11 +56,12 @@ DIRECTORY32 = Path("/usr/i686-w64-mingw32/lib")
 # Windows libraries mingw-w64 ships no import library for.
 NAMES_ONLY = {"ravenhost": ["RavenFontClose", "RavenFontGlyphs", "RavenFontInfo", "RavenFontMetrics", "RavenFontName", "RavenFontOpen",
                             "RavenFontOutline", "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace", "RavenCanvasCreate",
-                            "RavenCanvasDestroy", "RavenCanvasDraw", "RavenCanvasPixels", "RavenCanvasSize", "RavenPathCombine", "RavenPathWiden"]}
+                            "RavenCanvasDestroy", "RavenCanvasDraw", "RavenCanvasPixels", "RavenCanvasSize", "RavenPathCombine", "RavenPathWiden",
+                            "RavenShaderRequest", "RavenShaderResult", "RavenShaderRelease"]}
 # atlthunk.dll, the window procedure thunks of Windows 10, has no import library in mingw-w64; its four functions are listed here.
 NAMES_ONLY["atlthunk"] = ["AtlThunk_AllocateData", "AtlThunk_DataToCode", "AtlThunk_FreeData", "AtlThunk_InitData"]
 # combase.dll, Windows' COM and Windows Runtime base, has no import library in mingw-w64: the functions programs and the .NET runtime take from it.
-COMBASE_WORDS = {"CLSIDFromString": 2, "CoCreateGuid": 1, "CoCreateInstance": 5, "CoDecrementMTAUsage": 1, "CoGetApartmentType": 2,
+COMBASE_WORDS = {"CLSIDFromString": 2, "CoCreateFreeThreadedMarshaler": 2, "CoCreateGuid": 1, "CoCreateInstance": 5, "CoDecrementMTAUsage": 1, "CoGetApartmentType": 2,
                  "CoGetMalloc": 2, "CoIncrementMTAUsage": 1, "CoInitializeEx": 2, "CoTaskMemAlloc": 1, "CoTaskMemFree": 1, "CoTaskMemRealloc": 2,
                  "CoUninitialize": 0, "GetErrorInfo": 2, "RoActivateInstance": 2, "RoGetActivationFactory": 3,
                  "RoGetParameterizedTypeInstanceIID": 5, "RoInitialize": 1, "RoOriginateError": 2, "RoOriginateErrorW": 3,
@@ -70,9 +73,22 @@ NAMES_ONLY["combase"] = sorted(COMBASE_WORDS)
 # slc.dll, the software licensing client, has no import library in mingw-w64: the documented queries of Windows policy values.
 SLC_WORDS = {"SLGetWindowsInformation": 4, "SLGetWindowsInformationDWORD": 2}
 NAMES_ONLY["slc"] = sorted(SLC_WORDS)
-NAMES_ONLY_WORDS = {**COMBASE_WORDS, **SLC_WORDS, "AtlThunk_AllocateData": 0, "AtlThunk_DataToCode": 1, "AtlThunk_FreeData": 1, "AtlThunk_InitData": 3, "RavenFontClose": 1, "RavenFontGlyphs": 4, "RavenFontInfo": 2, "RavenFontMetrics": 3, "RavenFontName": 4, "RavenFontOpen": 3,
+# sppc.dll, the Software Protection Platform client, has no import library in mingw-w64 either: the documented functions over the
+# licenses and policies it keeps.
+SPPC_WORDS = {"SLClose": 1, "SLConsumeRight": 5, "SLGetApplicationInformation": 6, "SLGetApplicationPolicy": 5,
+              "SLGetAuthenticationResult": 3, "SLGetInstalledProductKeyIds": 4, "SLGetLicense": 4, "SLGetLicenseFileId": 4,
+              "SLGetLicenseInformation": 6, "SLGetLicensingStatusInformation": 6, "SLGetPKeyId": 6, "SLGetPKeyInformation": 6, "SLGetPolicyInformation": 5,
+              "SLGetPolicyInformationDWORD": 3, "SLGetProductSkuInformation": 6, "SLGetSLIDList": 6, "SLGetServiceInformation": 5,
+              "SLInstallLicense": 4, "SLInstallProofOfPurchase": 6, "SLLoadApplicationPolicies": 4, "SLOpen": 1,
+              "SLPersistApplicationPolicies": 3, "SLDepositOfflineConfirmationId": 4, "SLGenerateOfflineInstallationId": 3, "SLReArm": 4,
+              "SLSetAuthenticationData": 3, "SLUninstallLicense": 2, "SLUninstallProofOfPurchase": 2, "SLUnloadApplicationPolicies": 2}
+# Programs look for SLDepositMigrationBlob as the sign of a current platform, and for SLRegisterPlugin and SLPersistRTSPayloadOverride
+# with the rest of the client. Windows documents neither them nor their arguments, so they have no argument words.
+NAMES_ONLY["sppc"] = sorted([*SPPC_WORDS, "SLDepositMigrationBlob", "SLPersistRTSPayloadOverride", "SLRegisterPlugin"])
+NAMES_ONLY_WORDS = {**COMBASE_WORDS, **SLC_WORDS, **SPPC_WORDS, "AtlThunk_AllocateData": 0, "AtlThunk_DataToCode": 1, "AtlThunk_FreeData": 1, "AtlThunk_InitData": 3, "RavenFontClose": 1, "RavenFontGlyphs": 4, "RavenFontInfo": 2, "RavenFontMetrics": 3, "RavenFontName": 4, "RavenFontOpen": 3,
                     "RavenFontOutline": 4, "RavenFontRender": 10, "RavenFontScan": 2, "RavenFontTable": 5, "RavenTrace": 1,
-                    "RavenCanvasCreate": 2, "RavenCanvasDestroy": 1, "RavenCanvasDraw": 4, "RavenCanvasPixels": 8, "RavenCanvasSize": 2, "RavenPathCombine": 8, "RavenPathWiden": 7}
+                    "RavenCanvasCreate": 2, "RavenCanvasDestroy": 1, "RavenCanvasDraw": 4, "RavenCanvasPixels": 8, "RavenCanvasSize": 2, "RavenPathCombine": 8, "RavenPathWiden": 7,
+                    "RavenShaderRequest": 2, "RavenShaderResult": 4, "RavenShaderRelease": 1}
 
 
 def exports(library):
@@ -91,7 +107,7 @@ def exports(library):
 def stdcall_words(library):
     """Argument words by function name from the decorated symbols of the 32-bit import library (_Name@bytes)."""
     if library in NAMES_ONLY:
-        return {name: NAMES_ONLY_WORDS[name] for name in NAMES_ONLY[library]}
+        return {name: NAMES_ONLY_WORDS[name] for name in NAMES_ONLY[library] if name in NAMES_ONLY_WORDS}
     archive = DIRECTORY32 / f"lib{library}.a"
     output = subprocess.run(["i686-w64-mingw32-nm", "-g", "--defined-only", str(archive)], check=True, capture_output=True,
                             text=True).stdout if archive.exists() else ""
