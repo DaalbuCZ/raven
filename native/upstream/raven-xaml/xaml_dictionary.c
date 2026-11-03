@@ -385,11 +385,13 @@ extern void raven_xaml_set_pending_theme(const WCHAR *theme, UINT32 length);
 
 static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
 {
-	static const WCHAR prefix[] = L"ms-appx:///";
+	static const WCHAR scheme[] = L"ms-appx://";
 	static const WCHAR files[] = L"/Files";
 	static const WCHAR xaml_suffix[] = L".xaml";
 	WCHAR path[1024];
-	const WCHAR *text;
+	WCHAR package[128];
+	const WCHAR *text, *rest;
+	UINT32 rest_length, package_length = 0;
 	uri1 *uri = NULL;
 	HSTRING absolute = NULL;
 	const BYTE *blob = NULL;
@@ -406,27 +408,47 @@ static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
 	if (FAILED(result))
 		return result;
 	text = WindowsGetStringRawBuffer(absolute, &length);
-	if (length < ARRAYSIZE(prefix) - 1 + ARRAYSIZE(xaml_suffix) - 1 ||
+	if (length < ARRAYSIZE(scheme) - 1 + 2 + ARRAYSIZE(xaml_suffix) - 1 ||
 		length + ARRAYSIZE(files) >= ARRAYSIZE(path) ||
-		CompareStringOrdinal(text, ARRAYSIZE(prefix) - 1, prefix, -1, TRUE) != CSTR_EQUAL ||
+		CompareStringOrdinal(text, ARRAYSIZE(scheme) - 1, scheme, -1, TRUE) != CSTR_EQUAL ||
 		CompareStringOrdinal(text + length - (ARRAYSIZE(xaml_suffix) - 1), ARRAYSIZE(xaml_suffix) - 1, xaml_suffix, -1, TRUE) != CSTR_EQUAL) {
 		result = E_NOTIMPL;
 		goto done;
 	}
 	/* Shortcut: only local package XAML without escaping or URI qualifiers is resolved here; the query, fragment, escape
 	 * and backslash forms answer E_NOTIMPL the way Application.LoadComponent refuses them. */
-	for (UINT32 index = ARRAYSIZE(prefix) - 1; index < length; ++index)
+	for (UINT32 index = ARRAYSIZE(scheme) - 1; index < length; ++index)
 		if (!text[index] || text[index] == L'?' || text[index] == L'#' || text[index] == L'%' || text[index] == L'\\') {
 			result = E_NOTIMPL;
 			goto done;
 		}
+	rest = text + ARRAYSIZE(scheme) - 1;
+	rest_length = length - (ARRAYSIZE(scheme) - 1);
+	if (rest[0] != L'/') {
+		/* The host form names another package: ms-appx://Microsoft.UI.Xaml.2.8/Microsoft.UI.Xaml/Themes/... The path that
+		 * follows the host reads that package's own index, the way MRT's AllResourceMaps carries one map per package. */
+		const WCHAR *slash = rest;
+		while (slash < rest + rest_length && *slash != L'/')
+			++slash;
+		if (slash == rest || slash == rest + rest_length || (size_t)(slash - rest) >= ARRAYSIZE(package)) {
+			result = E_NOTIMPL;
+			goto done;
+		}
+		package_length = (UINT32)(slash - rest);
+		memcpy(package, rest, (SIZE_T)package_length * sizeof(WCHAR));
+		package[package_length] = 0;
+		rest_length -= package_length;
+		rest = slash;
+	}
 	memcpy(path, files, (ARRAYSIZE(files) - 1) * sizeof(WCHAR));
-	path_length = ARRAYSIZE(files) - 1 + length - (ARRAYSIZE(prefix) - 2);
-	memcpy(path + ARRAYSIZE(files) - 1, text + ARRAYSIZE(prefix) - 2,
-		(length - (ARRAYSIZE(prefix) - 2) - 5) * sizeof(WCHAR));
+	path_length = ARRAYSIZE(files) - 1 + rest_length;
+	memcpy(path + ARRAYSIZE(files) - 1, rest, (rest_length - 5) * sizeof(WCHAR));
 	path_length -= 1; /* .xaml becomes .xbf */
 	memcpy(path + path_length - 4, L".xbf", 4 * sizeof(WCHAR));
-	result = raven_pri_get_blob(path, path_length, &blob, &bytes);
+	if (package_length)
+		result = raven_pri_get_blob_from(package, package_length, path, path_length, &blob, &bytes);
+	else
+		result = raven_pri_get_blob(path, path_length, &blob, &bytes);
 	if (FAILED(result))
 		goto done;
 	if (!(loaded = create_dictionary())) {
@@ -1406,6 +1428,63 @@ HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out)
  * framework's own, which this runtime does not ship. The engine serves the class so a compiled App.xaml that merges it
  * (and the application, whose stage asks for the type by name) gets a real dictionary; the missing WinUI default
  * resources behave exactly like the missing keys they are. */
+/* The WinUI framework package's theme documents: the files XamlControlsResources merges on Windows, read from the
+ * framework package's own index through the host form of the ms-appx URI. A load that fails (a file the index does not
+ * carry, a document the loader refuses) leaves that dictionary out of the merge — the missing keys then behave like the
+ * missing keys they are, the way an absent framework package would. */
+static const WCHAR framework_themes[][48] = {
+	L"Microsoft.UI.Xaml/Themes/21h1_themeresources.xaml",
+	L"Microsoft.UI.Xaml/Themes/21h1_generic.xaml",
+};
+
+static void merge_framework_dictionaries(struct dictionary *dictionary, const WCHAR *package, UINT32 package_length)
+{
+	for (UINT32 file = 0; file < ARRAYSIZE(framework_themes); ++file) {
+		static const WCHAR head[] = L"ms-appx://";
+		static const WCHAR tail[] = L"/";
+		WCHAR text[192];
+		UINT32 at = 0;
+		struct dictionary *loaded = NULL;
+		IInspectable *uri = NULL;
+		HRESULT result;
+		if (package_length + ARRAYSIZE(head) - 1 + ARRAYSIZE(tail) - 1 +
+			ARRAYSIZE(framework_themes[file]) - 1 + 1 > ARRAYSIZE(text))
+			return;
+		memcpy(text, head, (ARRAYSIZE(head) - 1) * sizeof(WCHAR));
+		at = ARRAYSIZE(head) - 1;
+		memcpy(text + at, package, (SIZE_T)package_length * sizeof(WCHAR));
+		at += package_length;
+		memcpy(text + at, tail, (ARRAYSIZE(tail) - 1) * sizeof(WCHAR));
+		at += ARRAYSIZE(tail) - 1;
+		memcpy(text + at, framework_themes[file], (ARRAYSIZE(framework_themes[file]) - 1) * sizeof(WCHAR));
+		at += ARRAYSIZE(framework_themes[file]) - 1;
+		text[at] = 0;
+		if (!(loaded = create_dictionary())) {
+			return;
+		}
+		result = raven_xaml_uri_create(text, at, &uri);
+		if (SUCCEEDED(result)) {
+			result = adopt_source(loaded, uri);
+			uri->lpVtbl->Release(uri);
+		}
+		if (SUCCEEDED(result)) {
+			/* The framework content merges behind the dictionary itself, newest-last: its keys answer only when the
+			 * adopting dictionary and the app's own do not define them, the documented lookup order. */
+			if (!dictionary->merged)
+				dictionary->merged = create_merged();
+			if (dictionary->merged)
+				dictionary->merged->lpVtbl->Append(
+					(__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *)dictionary->merged,
+					(__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *)&loaded->resource);
+			else
+				result = E_OUTOFMEMORY;
+		}
+		dictionary_release(loaded);
+		if (FAILED(result))
+			return;
+	}
+}
+
 HRESULT raven_xaml_dictionary_create_controls_resources(IInspectable **out)
 {
 	struct dictionary *dictionary;
@@ -1415,6 +1494,25 @@ HRESULT raven_xaml_dictionary_create_controls_resources(IInspectable **out)
 	if (!(dictionary = create_dictionary()))
 		return E_OUTOFMEMORY;
 	dictionary->name_override = controls_resources_name;
+	/* The framework package's index registers with the manifest's dependencies; whichever dependency is the WinUI
+	 * framework carries the theme documents this dictionary merges. Without the package the dictionary stays empty. */
+	for (UINT32 index = 0; ; ++index) {
+		const WCHAR *name = NULL, *publisher = NULL, *min_version = NULL;
+		WCHAR path[MAX_PATH];
+		HRESULT result = raven_xaml_package_dependency(index, &name, &publisher, &min_version);
+		UINT32 length;
+		if (result != S_OK)
+			break;
+		if (!name || !(length = (UINT32)lstrlenW(name)))
+			continue;
+		if (raven_xaml_package_dependency_path(index, path, MAX_PATH) != S_OK)
+			continue;
+		if (raven_pri_open_map(name, length, path) != S_OK)
+			continue;
+		if (length > ARRAYSIZE(L"Microsoft.UI.Xaml.") - 1 &&
+			CompareStringOrdinal(name, (int)(ARRAYSIZE(L"Microsoft.UI.Xaml.") - 1), L"Microsoft.UI.Xaml.", -1, TRUE) == CSTR_EQUAL)
+			merge_framework_dictionaries(dictionary, name, length);
+	}
 	*out = (IInspectable *)&dictionary->resource;
 	return S_OK;
 }

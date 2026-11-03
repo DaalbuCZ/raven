@@ -210,6 +210,20 @@ struct pri_state {
 
 static struct pri_state pri_state;
 
+/* A package dependency's own index: a framework package such as Microsoft.UI.Xaml.2.8 ships its resources.pri, whose
+ * theme documents an ms-appx URI with that package as the host names. The maps load on demand beside the main one; a
+ * lookup activates the map it searches for the duration of the call (the loaders here are single-threaded callers). */
+#define PRI_MAX_EXTRA_MAPS 4
+#define PRI_MAX_PACKAGE_UNITS 128
+struct pri_extra_map {
+	WCHAR package[PRI_MAX_PACKAGE_UNITS];
+	UINT32 package_length;
+	BOOL tried;
+	struct pri_state state;
+};
+static struct pri_extra_map extra_maps[PRI_MAX_EXTRA_MAPS];
+static struct pri_state *active_pri = &pri_state;
+
 static UINT32 read_u16(const BYTE *data, UINT32 offset)
 {
 	return (UINT32)data[offset] | ((UINT32)data[offset + 1] << 8);
@@ -272,7 +286,7 @@ struct pri_section_body {
 
 static BOOL section_body(UINT32 index, struct pri_section_body *body)
 {
-	struct pri_state *state = &pri_state;
+	struct pri_state *state = active_pri;
 	UINT32 toc, first, count, offset, length;
 	if (!state->file || index >= PRI_MAX_SECTIONS)
 		return FALSE;
@@ -302,7 +316,7 @@ static BOOL body_matches(struct pri_section_body *body, const char *identifier)
 
 static BOOL parse_data_section(UINT32 index, struct pri_section_body *body)
 {
-	struct pri_state *state = &pri_state;
+	struct pri_state *state = active_pri;
 	struct pri_cursor cursor = {state->file + body->start + 32, body->length - 40, 0};
 	UINT32 string_count, blob_count, stored;
 	struct pri_data_section *section;
@@ -328,9 +342,8 @@ static BOOL parse_data_section(UINT32 index, struct pri_section_body *body)
 	return TRUE;
 }
 
-static BOOL parse_index(BYTE *data, UINT32 length)
+static BOOL parse_index_into(struct pri_state *state, BYTE *data, UINT32 length)
 {
-	struct pri_state *state = &pri_state;
 	struct pri_cursor cursor;
 	struct pri_section_body body;
 	UINT32 toc, count, i;
@@ -616,7 +629,7 @@ static void ensure_pri(void)
 		BYTE *data = NULL;
 		UINT32 length = 0;
 		if (find_pri(path) && read_file(path, &data, &length)) {
-			if (!parse_index(data, length)) {
+			if (!parse_index_into(&pri_state, data, length)) {
 				FREE(pri_state.entries);
 				FREE(pri_state.ascii_block);
 				memset(&pri_state, 0, sizeof pri_state);
@@ -634,7 +647,7 @@ static void ensure_pri(void)
  * which double into a character index, the way the reference parser reads them. */
 static const WCHAR *entry_name(UINT32 index, UINT32 *length)
 {
-	struct pri_state *state = &pri_state;
+	struct pri_state *state = active_pri;
 	const WCHAR *name;
 	UINT32 start, limit, units;
 	if (index >= state->entry_count)
@@ -668,7 +681,7 @@ static BOOL entry_path(UINT32 index, WCHAR *out, UINT32 capacity, UINT32 *length
 	const WCHAR *spans[PRI_CHAIN_MAX];
 	UINT32 lengths[PRI_CHAIN_MAX];
 	UINT32 depth = 0, position = 0, level, i = index;
-	struct pri_state *state = &pri_state;
+	struct pri_state *state = active_pri;
 	if (index >= state->entry_count)
 		return FALSE;
 	while (depth < PRI_CHAIN_MAX) {
@@ -705,7 +718,7 @@ static BOOL entry_path(UINT32 index, WCHAR *out, UINT32 capacity, UINT32 *length
  * length both counting bytes — the way the Shapr3D package's index stores them. */
 static BOOL candidate_string(UINT32 index, const WCHAR **text, UINT32 *units)
 {
-	struct pri_state *state = &pri_state;
+	struct pri_state *state = active_pri;
 	const BYTE *candidate;
 	UINT32 kind, item, section, i, offset, length_bytes;
 	if (index >= state->candidate_count)
@@ -737,7 +750,7 @@ static BOOL candidate_string(UINT32 index, const WCHAR **text, UINT32 *units)
 /* The candidates of an item: the item info names the first candidate and the decision's set count says how many. */
 static BOOL candidate_range(UINT32 index, UINT32 *first, UINT32 *count)
 {
-	struct pri_state *state = &pri_state;
+	struct pri_state *state = active_pri;
 	UINT32 iteminfo, decision_index, first_candidate, first_set, set_count;
 	if (index >= state->entry_count || !state->iteminfo)
 		return FALSE;
@@ -759,24 +772,22 @@ static BOOL candidate_range(UINT32 index, UINT32 *first, UINT32 *count)
 }
 
 /* Resolve a package resource to a bounded blob in the process-lifetime PRI buffer. */
-HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length)
+/* The blob lookup itself, against the active map. */
+static HRESULT pri_lookup_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length)
 {
 	WCHAR path[PRI_MAX_PATH_UNITS];
 	UINT32 path_length, first, count;
-	if (!name || !data || !length) return E_POINTER;
-	*data = NULL; *length = 0;
-	ensure_pri();
-	for (UINT32 i = 0; i < pri_state.entry_count; ++i) {
+	for (UINT32 i = 0; i < active_pri->entry_count; ++i) {
 		if ((pri_state.entries[i].flags & 0x10) || !entry_path(i, path, ARRAYSIZE(path), &path_length)) continue;
 		if (CompareStringOrdinal(name, (int)name_length, path, (int)path_length, TRUE) != CSTR_EQUAL) continue;
 		if (!candidate_range(i, &first, &count) || !count) return E_BOUNDS;
-		const BYTE *candidate = pri_state.candidates + first * 8;
+		const BYTE *candidate = active_pri->candidates + first * 8;
 		if (candidate[0] != 1) return E_NOTIMPL;
 		UINT32 item = read_u16(candidate, 4), section = read_u16(candidate, 6), index;
-		for (index = 0; index < pri_state.data_count; ++index)
-			if (pri_state.data_section_index[index] == section) break;
-		if (index == pri_state.data_count) return E_BOUNDS;
-		struct pri_data_section *items = &pri_state.data[index];
+		for (index = 0; index < active_pri->data_count; ++index)
+			if (active_pri->data_section_index[index] == section) break;
+		if (index == active_pri->data_count) return E_BOUNDS;
+		struct pri_data_section *items = &active_pri->data[index];
 		if (item < items->string_count || item - items->string_count >= items->blob_count) return E_INVALIDARG;
 		item -= items->string_count;
 		UINT32 offset = read_u32(items->blob_table, item * 8), bytes = read_u32(items->blob_table, item * 8 + 4);
@@ -785,6 +796,87 @@ HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **d
 		return S_OK;
 	}
 	return E_BOUNDS;
+}
+
+HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length)
+{
+	HRESULT result;
+	if (!name || !data || !length) return E_POINTER;
+	*data = NULL; *length = 0;
+	ensure_pri();
+	result = pri_lookup_blob(name, name_length, data, length);
+	return result;
+}
+
+/* A dependency package's index: parsed once per package name into an extra map, so an ms-appx URI whose host names the
+ * package resolves its resources there. A file that is absent or does not parse marks the map tried with an empty
+ * state, whose lookups miss the way the main map's do. */
+HRESULT raven_pri_open_map(const WCHAR *package, UINT32 package_length, const WCHAR *path)
+{
+	BYTE *data = NULL;
+	UINT32 length = 0;
+	struct pri_extra_map *map = NULL;
+	if (!package || !package_length || !path) return E_POINTER;
+	if (package_length >= PRI_MAX_PACKAGE_UNITS) return E_INVALIDARG;
+	ensure_pri();
+	for (UINT32 i = 0; i < PRI_MAX_EXTRA_MAPS; ++i) {
+		struct pri_extra_map *candidate = &extra_maps[i];
+		if (candidate->package_length == package_length &&
+			CompareStringOrdinal(candidate->package, (int)candidate->package_length, package, (int)package_length, TRUE) == CSTR_EQUAL)
+			return S_OK; /* already registered, whatever its read found; the caller does not re-read */
+		if (!map && !candidate->tried)
+			map = candidate;
+	}
+	if (!map)
+		return E_OUTOFMEMORY; /* more framework packages than this engine registers; the URIs stay unresolved */
+	memcpy(map->package, package, (SIZE_T)package_length * sizeof(WCHAR));
+	map->package_length = package_length;
+	map->tried = TRUE;
+	if (!read_file(path, &data, &length))
+		return S_FALSE; /* no index where the manifest dependency says one should be; the map stays empty */
+	/* parse_index_into reads the section directory through the active map, so the parse runs against the new state */
+	active_pri = &map->state;
+	const BOOL parsed = parse_index_into(&map->state, data, length);
+	active_pri = &pri_state;
+	if (!parsed) {
+		FREE(map->state.entries);
+		FREE(map->state.ascii_block);
+		memset(&map->state, 0, sizeof map->state);
+		FREE(data);
+		return S_FALSE;
+	}
+	return S_OK;
+}
+
+/* The map a package-qualified URI reads: the package names one of the extra maps, NULL the main one. */
+static struct pri_extra_map *pri_find_map(const WCHAR *package, UINT32 package_length)
+{
+	for (UINT32 i = 0; i < PRI_MAX_EXTRA_MAPS; ++i) {
+		struct pri_extra_map *candidate = &extra_maps[i];
+		if (candidate->package_length == package_length &&
+			CompareStringOrdinal(candidate->package, (int)candidate->package_length, package, (int)package_length, TRUE) == CSTR_EQUAL)
+			return candidate;
+	}
+	return NULL;
+}
+
+HRESULT raven_pri_get_blob_from(const WCHAR *package, UINT32 package_length, const WCHAR *name, UINT32 name_length,
+	const BYTE **data, UINT32 *length)
+{
+	struct pri_extra_map *map;
+	HRESULT result;
+	if (!data || !length) return E_POINTER;
+	*data = NULL; *length = 0;
+	if (!name) return E_POINTER;
+	if (!package || !package_length)
+		return raven_pri_get_blob(name, name_length, data, length);
+	ensure_pri();
+	if (!(map = pri_find_map(package, package_length)))
+		return E_BOUNDS;
+	active_pri = &map->state;
+	result = pri_lookup_blob(name, name_length, data, length);
+	active_pri = &pri_state;
+	return result;
 }
 
 /* The ResourceCandidate: the string value is copied out of the index so the object owns its answer; the fixture

@@ -120,6 +120,17 @@ HRESULT raven_launch_arguments_create(IInspectable **out);
 HRESULT raven_xaml_load_into(const void *data, uint32_t size, IInspectable *target);
 BOOL raven_xaml_loader_notify(DWORD reason, void *reserved);
 HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length);
+/* A package dependency's own resource map: registered from the manifest's PackageDependency elements with the index
+ * the dependency's package root carries, so an ms-appx URI whose host names the package resolves there. */
+HRESULT raven_pri_open_map(const WCHAR *package, UINT32 package_length, const WCHAR *path);
+/* The dependency index a package-qualified name resolves against: NULL reads the main map, a package name its map
+ * (E_BOUNDS when no map carries that name, the miss a missing resource answers). */
+HRESULT raven_pri_get_blob_from(const WCHAR *package, UINT32 package_length, const WCHAR *name, UINT32 name_length,
+	const BYTE **data, UINT32 *length);
+/* The application manifest's package dependencies: the engine-internal reads package.c serves the loader from, with the
+ * dependency's own package root located in the layouts a deployment produces. */
+HRESULT raven_xaml_package_dependency(UINT32 index, const WCHAR **name, const WCHAR **publisher, const WCHAR **min_version);
+HRESULT raven_xaml_package_dependency_path(UINT32 index, WCHAR *path, UINT32 capacity);
 /* The engine-internal Uri creation and boxed string the loader uses for the properties a compiled document sets directly
  * (a ResourceDictionary's Source) and for the keys it inserts (a dictionary's keyed value): the same object the public
  * factory and the style defaults hand out, without a RoGetActivationFactory round trip. Boxed strings come back with one

@@ -1329,6 +1329,78 @@ __declspec(dllexport) HRESULT raven_xaml_package_dependency(UINT32 index, const 
 	return S_OK;
 }
 
+/* Where a package dependency's files live. Windows keeps framework packages under WindowsApps beside the application
+ * package; this engine installs none, so the dependency is looked up in the layouts a deployment actually produces:
+ * a deps directory holding the extracted packages inside or beside the application package, or the package directory
+ * named after the dependency itself in either place. S_FALSE answers when none exists — the dependency's resources
+ * then resolve nowhere, which a lookup reports as any other miss. */
+static BOOL dependency_path(UINT32 form, const WCHAR *directory, const WCHAR *name, BOOL parent, WCHAR *path, UINT32 capacity)
+{
+	/* form 0 puts the package in a deps directory, form 1 beside it; parent steps out of the application package first. */
+	static const WCHAR *separators[2] = {L"\\deps\\", L"\\"};
+	const UINT32 directory_length = (UINT32)lstrlenW(directory), name_length = (UINT32)lstrlenW(name);
+	const UINT32 fixed = (parent ? 3u : 0u) + (UINT32)lstrlenW(separators[form]) + (UINT32)lstrlenW(L"\\resources.pri");
+	if (directory_length + fixed + name_length + 1 >= capacity)
+		return FALSE;
+	lstrcpyW(path, directory);
+	if (parent)
+		lstrcatW(path, L"\\..");
+	lstrcatW(path, separators[form]);
+	lstrcatW(path, name);
+	lstrcatW(path, L"\\resources.pri");
+	return TRUE;
+}
+
+__declspec(dllexport) HRESULT raven_xaml_package_dependency_path(UINT32 index, WCHAR *path, UINT32 capacity)
+{
+	static const WCHAR *inside[] = {
+		L"%s\\deps\\%s\\resources.pri",
+		L"%s\\%s\\resources.pri",
+	};
+	static const WCHAR *beside[] = {
+		L"%s\\..\\deps\\%s\\resources.pri",
+		L"%s\\..\\%s\\resources.pri",
+	};
+	const struct package_dependency *dependency;
+	WCHAR directory[MAX_PATH];
+	DWORD length;
+	UINT32 cut = 0;
+	if (!path || !capacity) return E_POINTER;
+	path[0] = 0;
+	ensure_manifest();
+	if (index >= package_instance.manifest.dependency_count) return E_BOUNDS;
+	dependency = &package_instance.manifest.dependencies[index];
+	if (!dependency->name[0])
+		return E_BOUNDS;
+	length = GetModuleFileNameW(NULL, directory, MAX_PATH);
+	if (!length || length >= MAX_PATH)
+		return E_BOUNDS;
+	for (UINT32 i = 0; i < length; ++i)
+		if (directory[i] == L'\\' || directory[i] == L'/')
+			cut = (UINT32)i;
+	directory[cut] = 0;
+	for (UINT32 form = 0; form < ARRAYSIZE(inside); ++form) {
+		if (!dependency_path(form, directory, dependency->name, FALSE, path, capacity))
+			continue;
+		HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+		if (file != INVALID_HANDLE_VALUE) {
+			CloseHandle(file);
+			return S_OK;
+		}
+	}
+	for (UINT32 form = 0; form < ARRAYSIZE(beside); ++form) {
+		if (!dependency_path(form, directory, dependency->name, TRUE, path, capacity))
+			continue;
+		HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+		if (file != INVALID_HANDLE_VALUE) {
+			CloseHandle(file);
+			return S_OK;
+		}
+	}
+	path[0] = 0;
+	return S_FALSE;
+}
+
 /* The class factory and its statics */
 
 struct factory_activation { const IActivationFactoryVtbl *lpVtbl; struct package_factory *owner; };
