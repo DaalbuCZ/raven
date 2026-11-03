@@ -1845,6 +1845,44 @@ the same day — see the two entries below. Evidence:
   framework PRI is not yet registered or loaded, and nested Source loads also
   need to retain their parent resource context.
 
+- The WinUI framework package resolves and its theme resources merge (2026-11-03, stage 7): the manifest's
+  `PackageDependency` elements now name what the engine looks for — `package.c` parses each dependency's Name,
+  Publisher and MinVersion, and `raven_xaml_package_dependency_path` locates the dependency's package root in the
+  layouts a deployment produces (`<package>\deps\<name>\resources.pri`, beside it, or the same two above the
+  package). Each dependency's `resources.pri` registers as its own resource map keyed by the package name
+  (`raven_pri_open_map`, four maps beside the main one; the parse runs against an activatable map state, and
+  `body_matches` reads the active map's buffer — the bug the first framework probe caught). An `ms-appx` URI whose
+  host names a package reads that map — `ms-appx://Microsoft.UI.Xaml.2.8/Microsoft.UI.Xaml/Themes/…` — the shape
+  `Findings-M3` of the wine-uwp reference records for Windows. `XamlControlsResources`' creation registers the
+  dependency maps and merges `21h1_themeresources.xbf` and `21h1_generic.xbf` from the WinUI framework package into
+  the served dictionary's merged list, behind the app's own entries. The merge loads TOLERANTLY: a document whose
+  properties and objects the engine cannot all store (Brush.Opacity floats, VisualStateGroups collections, the
+  KeyTime storyboards) still merges what it can — the skip convention a load without a target already had, extended
+  to the refuse-with-target sites through a `tolerant` context flag; the document's shape is still validated and a
+  genuinely malformed form still refuses. Supporting fixes the walk demanded: the engine Uri parses the host form
+  (`ms-appx://Microsoft.UI.Xaml.2.8/...` — the authority segment lifts the lower-case-only rule), keyed dictionary
+  inserts box the colour and enum constants the framework dictionaries key directly (`AddToDictionaryWithKey` with a
+  packed ARGB or an enum constant — the app documents only reached it through node 22), and a nested load's failure
+  record survives the outer overwrite (`nested_failed` — the deepest node is the evidence). The public
+  `Windows.Foundation.Uri` serves from raven-web.dll (see the converged-Uri commit): its urlmon parser handles the
+  ms-appx schemes, and the weak-reference source .NET Native takes moved onto it.
+- Platform default styles (2026-11-03, stage 7): the OS theme resources — the surface
+  `Windows.UI.Xaml.Resources.*.dll` carries on Windows, per the wine-uwp overrides list — define the named default
+  styles compiled documents base their own on. Raven authors them: the `Default*Style` family (Button, TextBox,
+  ToggleSwitch, AppBarButton, CommandBar), `PaneToggleButtonStyle` and the named typography styles
+  (`BaseTextBlockStyle`, `BodyTextBlockStyle`, `CaptionTextBlockStyle`, `TitleTextBlockStyle`,
+  `SubtitleTextBlockStyle`) build once as sealed engine styles carrying their TargetTypes and no setter content — the
+  setters the real ones have are the OS's, not ours to copy — and `resolve_resource` serves them below every
+  dictionary, after the system-colour fallback. A style that bases on them brings its own setters; a control styled
+  only by the platform style keeps its own authored defaults.
+- Stage-7 wall moved (2026-11-03): with the framework merge and the platform styles, the traced Shapr3D launch walks
+  the compiled `App.xbf`, merges its dictionaries, loads `Colors.xaml`, and reaches `DefaultButtonStyles.xaml`,
+  whose `Style.BasedOn` now resolves `DefaultButtonStyle` through the platform fallback; the launch then builds
+  Frame, Page, Grid, Button, TextBlock and ContentPresenter elements (29 Style objects in the trace) before the next
+  `E_NOTIMPL` fail-fast. The next wall needs the freestanding probe's evidence — `RavenXamlLastFailure` names the
+  node — and the probe harness (a guest client loading a real XBF beside the package, writing
+  `RavenXamlLastFailure` to a file) is the tool the stage's next increment starts from.
+
 ## Performance rules
 
 - One GPU compositor; XAML visuals and the 3D viewport composite on the GPU.
