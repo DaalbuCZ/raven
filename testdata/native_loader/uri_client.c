@@ -58,8 +58,12 @@ int raven_entry(void)
 	if (WindowsCreateString(L"relative/path", 13, &input) != S_OK ||
 		factory->lpVtbl->CreateUri(factory, input, &uri) != E_INVALIDARG || uri) return 16;
 	WindowsDeleteString(input); input = NULL;
+	/* The class serves every absolute URI, the web schemes included: the earlier refusal of them was the XAML engine's own
+	 * shortcut, not the Windows contract, and the urlmon-backed parser the class now answers through accepts the request. */
 	if (WindowsCreateString(L"https://example.com/a%20b", 25, &input) != S_OK ||
-		factory->lpVtbl->CreateUri(factory, input, &uri) != E_NOTIMPL || uri) return 17;
+		factory->lpVtbl->CreateUri(factory, input, &uri) != S_OK || !uri) return 17;
+	uri->lpVtbl->Release(uri);
+	uri = NULL;
 	WindowsDeleteString(input);
 	factory->lpVtbl->Release(factory); IActivationFactory_Release(activation); WindowsDeleteString(name);
 	return 0;

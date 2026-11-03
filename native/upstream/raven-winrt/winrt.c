@@ -18,6 +18,8 @@ static const IID agile_object = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 
 static LONG live_objects;
 
 BOOL winrt_in_use(void) { return InterlockedCompareExchange(&live_objects, 0, 0) != 0; }
+void winrt_live_add(void) { InterlockedIncrement(&live_objects); }
+void winrt_live_release(void) { InterlockedDecrement(&live_objects); }
 
 static const IID *entry_iid(const struct winrt_object *object, const struct winrt_entry *entry)
 {

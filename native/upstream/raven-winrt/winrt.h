@@ -88,6 +88,10 @@ void *winrt_new(const struct winrt_class *kind, size_t size, const IID *own);
 void *winrt_new_own(const struct winrt_class *kind, size_t size, const IID *own, const IID *own_2, const IID *own_3);
 /* Whether any object of the component is alive, for DllCanUnloadNow. */
 BOOL winrt_in_use(void);
+/* The same accounting for the standalone helpers a component hands out that are not winrt_objects themselves — a weak
+ * reference is one — so holding one keeps the component loaded as holding an object does. */
+void winrt_live_add(void);
+void winrt_live_release(void);
 /* The object an interface pointer of it belongs to. */
 static inline struct winrt_object *winrt_object_of(void *iface) { return ((struct winrt_interface *)iface)->object; }
 /* The interface of the object answering iid, with a reference added, or NULL. */
