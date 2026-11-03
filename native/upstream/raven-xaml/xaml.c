@@ -1992,8 +1992,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 		window_tls = TlsAlloc();
 		if (window_tls == TLS_OUT_OF_INDEXES)
 			return FALSE;
-		if (!raven_composition_notify(reason, reserved) || !raven_application_notify(reason, reserved) ||
+		if (!raven_xaml_loader_notify(reason, reserved) || !raven_composition_notify(reason, reserved) || !raven_application_notify(reason, reserved) ||
 			!raven_xaml_window_notify(reason, reserved)) {
+			raven_xaml_loader_notify(DLL_PROCESS_DETACH, (void *)1);
 			raven_xaml_window_notify(DLL_PROCESS_DETACH, (void *)1);
 			TlsFree(window_tls);
 			window_tls = TLS_OUT_OF_INDEXES;
@@ -2004,6 +2005,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 		raven_xaml_window_notify(reason, reserved);
 		detach_window();
 	} else if (reason == DLL_PROCESS_DETACH && window_tls != TLS_OUT_OF_INDEXES) {
+		raven_xaml_loader_notify(reason, reserved);
 		raven_composition_notify(reason, reserved);
 		raven_application_notify(reason, reserved);
 		raven_xaml_window_notify(reason, reserved);

@@ -95,6 +95,49 @@ int raven_entry(void)
 		dictionary->lpVtbl->Release(dictionary); IInspectable_Release(resources); IInspectable_Release(before);
 		app->lpVtbl->Release(app);
 	}
+	/* A Source nested in an Application load sees an earlier merged dictionary, without publishing partial resources. */
+	{
+		typedef IInspectable *(*boxed_string_fn)(const WCHAR *, UINT32);
+		typedef HRESULT (*brush_color_fn)(IInspectable *, void *);
+		struct color { BYTE a, r, g, b; } color;
+		HMODULE component = LoadLibraryW(L"raven-xaml.dll");
+		boxed_string_fn boxed = component ? (boxed_string_fn)(void *)GetProcAddress(component, "raven_xaml_boxed_string_create") : NULL;
+		brush_color_fn brush_color = component ? (brush_color_fn)(void *)GetProcAddress(component, "raven_xaml_solid_brush_color") : NULL;
+		HSTRING app_path = make(L"ms-appx:///Fixture/AmbientApplication.xaml"), source_path = make(L"ms-appx:///Fixture/AmbientSource.xaml");
+		HSTRING dictionary_name = make(L"Windows.UI.Xaml.ResourceDictionary");
+		uri_i *app_uri = NULL, *source_uri = NULL;
+		IInspectable *app_object = NULL, *fresh_app = NULL, *dictionary_object = NULL, *resources = NULL, *brush = NULL, *key = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIApplication *app = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL, *second = NULL;
+		__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *merged = NULL;
+		__FIMap_2_IInspectable_IInspectable *map = NULL;
+		if (!boxed || !brush_color || !app_path || !source_path || !dictionary_name ||
+			uris->lpVtbl->CreateUri(uris, app_path, &app_uri) != S_OK || !app_uri ||
+			uris->lpVtbl->CreateUri(uris, source_path, &source_uri) != S_OK || !source_uri ||
+			RoActivateInstance(app_name, &app_object) != S_OK || !app_object ||
+			RoActivateInstance(dictionary_name, &dictionary_object) != S_OK || !dictionary_object) return 15;
+		if (statics->lpVtbl->LoadComponent(statics, dictionary_object, (IInspectable *)source_uri) != E_NOTIMPL) return 16;
+		if (statics->lpVtbl->LoadComponent(statics, app_object, (IInspectable *)app_uri) != S_OK) return 17;
+		if (IInspectable_QueryInterface(app_object, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&app) != S_OK || !app ||
+			app->lpVtbl->get_Resources(app, &resources) != S_OK || !resources ||
+			IInspectable_QueryInterface(resources, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary) != S_OK || !dictionary ||
+			dictionary->lpVtbl->get_MergedDictionaries(dictionary, (void **)&merged) != S_OK || !merged ||
+			merged->lpVtbl->GetAt(merged, 1, &second) != S_OK || !second ||
+			IInspectable_QueryInterface((IInspectable *)second, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK || !map) return 18;
+		key = boxed(L"AmbientBrush", 12);
+		if (!key || map->lpVtbl->Lookup(map, key, &brush) != S_OK || !brush || brush_color(brush, &color) != S_OK ||
+			color.a != 0xff || color.r != 0x11 || color.g != 0x22 || color.b != 0x33) return 19;
+		/* A new current Application has no parent color: a later unrelated load must not inherit a stale frame. */
+		if (RoActivateInstance(app_name, &fresh_app) != S_OK || !fresh_app ||
+			statics->lpVtbl->LoadComponent(statics, dictionary_object, (IInspectable *)source_uri) != E_NOTIMPL) return 20;
+		IInspectable_Release(fresh_app); IInspectable_Release(brush); IInspectable_Release(key);
+		map->lpVtbl->Release(map); second->lpVtbl->Release(second); merged->lpVtbl->Release(merged);
+		dictionary->lpVtbl->Release(dictionary); IInspectable_Release(resources); app->lpVtbl->Release(app);
+		IInspectable_Release(dictionary_object); IInspectable_Release(app_object);
+		app_uri->lpVtbl->Release(app_uri); source_uri->lpVtbl->Release(source_uri);
+		WindowsDeleteString(app_path); WindowsDeleteString(source_path); WindowsDeleteString(dictionary_name);
+		FreeLibrary(component);
+	}
 	IInspectable_Release(wrong);
 	uri->lpVtbl->Release(uri); missing->lpVtbl->Release(missing); invalid->lpVtbl->Release(invalid);
 	dictionaries->lpVtbl->Release(dictionaries); missing_type->lpVtbl->Release(missing_type); uris->lpVtbl->Release(uris);

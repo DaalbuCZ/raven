@@ -3069,8 +3069,27 @@ HRESULT __declspec(dllexport) raven_xaml_element_apply_value(IInspectable *objec
 {
 	struct style_target target;
 	HRESULT result;
+	INT32 enum_value;
+	__x_ABI_CWindows_CUI_CColor color;
 	if (!object)
 		return E_POINTER;
+	if (raven_enum_value_of(value, &enum_value)) {
+		result = raven_xaml_element_set_integer(object, name, length, enum_value);
+		if (result != S_FALSE)
+			return result;
+	}
+	if (raven_color_value_of(value, &color) == S_OK) {
+		result = raven_acrylic_brush_set_color(object, name, length, &color);
+		if (result != S_FALSE)
+			return result;
+	}
+	if (((length == 21 && CompareStringOrdinal(name, (int)length, L"SolidColorBrush_Color", -1, FALSE) == CSTR_EQUAL) ||
+		(length == 5 && CompareStringOrdinal(name, (int)length, L"Color", -1, FALSE) == CSTR_EQUAL)) &&
+		raven_color_value_of(value, &color) == S_OK) {
+		result = raven_solid_brush_put_color(object, &color);
+		if (result != S_FALSE)
+			return result;
+	}
 	/* A Style's own object properties: the compiled App.xaml's styles take their BasedOn through a resource reference
 	 * (SetValueFromStaticResource Style_BasedOn), which lands here with the resolved base style. */
 	if (length == 7 && CompareStringOrdinal(name, 7, L"BasedOn", -1, FALSE) == CSTR_EQUAL) {

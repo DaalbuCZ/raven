@@ -186,6 +186,12 @@ static void publisher_identifier(const WCHAR *publisher, WCHAR *out /* fourteen 
 #define MANIFEST_DESCRIPTION_MAX 1024
 #define MANIFEST_DEPENDENCY_MAX 8
 
+struct package_dependency {
+	WCHAR name[MANIFEST_TEXT_MAX];
+	WCHAR publisher[MANIFEST_TEXT_MAX];
+	WCHAR min_version[64];
+};
+
 struct package_manifest {
 	WCHAR name[MANIFEST_TEXT_MAX];
 	WCHAR publisher[MANIFEST_TEXT_MAX];
@@ -197,7 +203,7 @@ struct package_manifest {
 	WCHAR publisher_display[MANIFEST_TEXT_MAX];
 	WCHAR description[MANIFEST_DESCRIPTION_MAX];
 	WCHAR logo[MANIFEST_TEXT_MAX];
-	WCHAR dependencies[MANIFEST_DEPENDENCY_MAX][64];
+	struct package_dependency dependencies[MANIFEST_DEPENDENCY_MAX];
 	UINT32 dependency_count;
 	BOOL framework;
 	BOOL has_identity; /* an Identity element was read; its Name attribute decides whether it identifies */
@@ -627,6 +633,7 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 			BOOL is_identity = FALSE;
 			BOOL is_application = FALSE;
 			BOOL in_dependencies = FALSE;
+			struct package_dependency *dependency = NULL;
 			enum capture_kind property = capture_none;
 			position = name_start;
 			while (position < length && data[position] != ' ' && data[position] != '\t' && data[position] != '\r' &&
@@ -641,13 +648,10 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 			in_dependencies = depth && stack_is(stack[depth - 1].name, stack[depth - 1].length, "Dependencies");
 			if (is_identity)
 				manifest->has_identity = TRUE;
-			if (in_dependencies) {
-				/* the dependency elements are recorded by name, for what reads the package graph later */
-				if (manifest->dependency_count < MANIFEST_DEPENDENCY_MAX && name_length < 64) {
-					memcpy(manifest->dependencies[manifest->dependency_count], data + name_start, name_length);
-					manifest->dependencies[manifest->dependency_count][name_length] = 0;
-					++manifest->dependency_count;
-				}
+			if (in_dependencies && bytes_equal(data, name_start, name_length, "PackageDependency") &&
+				manifest->dependency_count < MANIFEST_DEPENDENCY_MAX) {
+				dependency = &manifest->dependencies[manifest->dependency_count];
+				memset(dependency, 0, sizeof *dependency);
 			} else if (depth && stack_is(stack[depth - 1].name, stack[depth - 1].length, "Properties")) {
 				if (bytes_equal(data, name_start, name_length, "DisplayName"))
 					property = capture_display_name;
@@ -720,6 +724,25 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 							(value.length == 4 && !memcmp(value.text, "true", 4)) ||
 							(value.length == 1 && value.text[0] == '1');
 					}
+				} else if (dependency && (bytes_equal(data, attribute_name, attribute_length, "Name") ||
+					bytes_equal(data, attribute_name, attribute_length, "Publisher") ||
+					bytes_equal(data, attribute_name, attribute_length, "MinVersion"))) {
+					WCHAR *destination;
+					UINT32 capacity;
+					if (bytes_equal(data, attribute_name, attribute_length, "Name")) {
+						destination = dependency->name; capacity = ARRAYSIZE(dependency->name);
+					} else if (bytes_equal(data, attribute_name, attribute_length, "Publisher")) {
+						destination = dependency->publisher; capacity = ARRAYSIZE(dependency->publisher);
+					} else {
+						destination = dependency->min_version; capacity = ARRAYSIZE(dependency->min_version);
+					}
+					destination[0] = 0;
+					utf8_clear(&value);
+					utf8_markup(&value, data + value_start, value_length);
+					/* Do not retain truncated identity components for a later package match. */
+					if (value_length < sizeof value.text && value.length &&
+						MultiByteToWideChar(CP_UTF8, 0, (const char *)value.text, (INT)value.length, NULL, 0) < (INT)capacity)
+						store_utf8(destination, capacity, &value);
 				} else if (is_application && bytes_equal(data, attribute_name, attribute_length, "Id")) {
 					/* the package-relative application id CoreApplication.Id answers with */
 					utf8_clear(&value);
@@ -733,6 +756,8 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 					store_utf8(manifest->entry_point, MANIFEST_TEXT_MAX, &value);
 				}
 			}
+			if (dependency && dependency->name[0] && dependency->publisher[0] && dependency->min_version[0])
+				++manifest->dependency_count;
 			if (position < length && data[position] == '/') {
 				self_closing = TRUE;
 				++position;
@@ -1286,6 +1311,22 @@ static void ensure_manifest(void)
 		while (InterlockedCompareExchange(&state, 2, 2) != 2)
 			Sleep(0);
 	}
+}
+
+/* Borrowed strings remain valid for the lifetime of the process. */
+__declspec(dllexport) HRESULT raven_xaml_package_dependency(UINT32 index, const WCHAR **name,
+	const WCHAR **publisher, const WCHAR **min_version)
+{
+	const struct package_dependency *dependency;
+	if (!name || !publisher || !min_version) return E_POINTER;
+	*name = *publisher = *min_version = NULL;
+	ensure_manifest();
+	if (index >= package_instance.manifest.dependency_count) return E_BOUNDS;
+	dependency = &package_instance.manifest.dependencies[index];
+	*name = dependency->name;
+	*publisher = dependency->publisher;
+	*min_version = dependency->min_version;
+	return S_OK;
 }
 
 /* The class factory and its statics */

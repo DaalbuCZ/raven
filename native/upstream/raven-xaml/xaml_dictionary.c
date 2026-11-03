@@ -138,6 +138,7 @@ struct dictionary {
 };
 
 static struct dictionary *create_dictionary(void);
+static const __FIMap_2_IInspectable_IInspectableVtbl map_table;
 static HRESULT dictionary_query_any(struct dictionary *self, REFIID iid, void **out);
 static ULONG dictionary_addref(struct dictionary *self);
 static ULONG dictionary_release(struct dictionary *self);
@@ -379,6 +380,9 @@ static HRESULT WINAPI resource_trust(resource1 *iface, TrustLevel *level)
 #define SOURCE_DEPTH 16
 static LONG source_depth;
 
+extern const WCHAR *raven_xaml_get_current_theme(UINT32 *length);
+extern void raven_xaml_set_pending_theme(const WCHAR *theme, UINT32 length);
+
 static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
 {
 	static const WCHAR prefix[] = L"ms-appx:///";
@@ -429,7 +433,11 @@ static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
 		result = E_OUTOFMEMORY;
 		goto done;
 	}
+	UINT32 current_theme_length = 0;
+	const WCHAR *current_theme = raven_xaml_get_current_theme(&current_theme_length);
+	raven_xaml_set_pending_theme(current_theme, current_theme_length);
 	result = raven_xaml_load_into(blob, bytes, (IInspectable *)&loaded->resource);
+	raven_xaml_set_pending_theme(NULL, 0);
 	if (FAILED(result))
 		goto done;
 	/* Adoption replaces the contents: the compiled markup sets Source on a fresh dictionary, and a WinRT caller that wants
@@ -577,7 +585,8 @@ static struct dictionary *dictionary_of(IInspectable *object)
 		return NULL;
 	if (FAILED(object->lpVtbl->QueryInterface(object, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map)) || !map)
 		return NULL;
-	self = ((struct map_part *)map)->owner;
+	if (map->lpVtbl == &map_table)
+		self = ((struct map_part *)map)->owner;
 	map->lpVtbl->Release(map);
 	return self;
 }

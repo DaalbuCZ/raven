@@ -31,6 +31,10 @@
 #include "windows_ui_xaml_style.h"
 #include <stdint.h>
 #include <winstring.h>
+static const WCHAR *g_current_effective_theme;
+static UINT32 g_current_effective_theme_length;
+static const WCHAR *g_pending_effective_theme;
+static UINT32 g_pending_effective_theme_length;
 
 #define MAX_NAME 256
 
@@ -61,13 +65,14 @@ struct load_context {
 	uint32_t count;
 };
 
-enum value_kind { value_none, value_string, value_bool, value_integer, value_float, value_color };
+enum value_kind { value_none, value_string, value_bool, value_integer, value_float, value_color, value_enum };
 struct value {
 	enum value_kind kind;
 	const WCHAR *text;
 	UINT32 length;
 	int64_t integer;
 	double real;
+	uint16_t enum_type;
 };
 
 static uint16_t read_u16(const uint8_t *data) { return (uint16_t)(data[0] | (data[1] << 8)); }
@@ -390,10 +395,13 @@ static HRESULT create_known(const WCHAR *name, UINT32 length, IInspectable **out
 	static const WCHAR presenter_name[] = L"Windows.UI.Xaml.Controls.ContentPresenter";
 	static const WCHAR controls_resources_name[] = L"Microsoft.UI.Xaml.Controls.XamlControlsResources";
 	static const WCHAR solid_brush_name[] = L"Microsoft.UI.Xaml.Media.SolidColorBrush";
+	static const WCHAR acrylic_brush_name[] = L"Microsoft.UI.Xaml.Media.AcrylicBrush";
 	IActivationFactory *factory = NULL;
 	HRESULT result;
 	*out = NULL;
-	if (CompareStringOrdinal(name, (int)length, solid_brush_name, -1, FALSE) == CSTR_EQUAL) {
+	if (CompareStringOrdinal(name, (int)length, acrylic_brush_name, -1, FALSE) == CSTR_EQUAL) {
+		return raven_acrylic_brush_create(out);
+	} else if (CompareStringOrdinal(name, (int)length, solid_brush_name, -1, FALSE) == CSTR_EQUAL) {
 		/* The media brush the theme dictionaries build: a projected runtime class the runtime catalog does not carry,
 		 * served by the engine (see xaml_styles.c). The Microsoft.UI namespace is what the documents' own xmlns
 		 * declares ("using:Microsoft.UI.Xaml.Media"). */
@@ -431,6 +439,7 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	v->length = 0;
 	v->integer = 0;
 	v->real = 0;
+	v->enum_type = 0;
 	switch (kind) {
 	case 0:
 		return S_OK;
@@ -469,8 +478,8 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 		r->at += 8;
 		break;
 	case 11:
-		next_u16(r); /* the enum's stable type reference */
-		v->kind = value_integer;
+		v->enum_type = next_u16(r);
+		v->kind = value_enum;
 		v->integer = next_i32(r);
 		break;
 	case 8:
@@ -522,15 +531,21 @@ static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 lengt
 	}
 	switch (value->kind) {
 	case value_string:
-		return raven_xaml_element_set_text(object, name, length, value->text, value->length);
+		{
+			HRESULT result = raven_acrylic_brush_set_text(object, name, length, value->text, value->length);
+			return result != S_FALSE ? result : raven_xaml_element_set_text(object, name, length, value->text, value->length);
+		}
 	case value_bool:
 	case value_integer:
+	case value_enum:
 		return raven_xaml_element_set_integer(object, name, length, value->integer);
 	case value_float:
-		return raven_xaml_elements_set_float(object, name, length, (float)value->real);
+		{
+			HRESULT result = raven_acrylic_brush_set_float(object, name, length, (float)value->real);
+			return result != S_FALSE ? result : raven_xaml_elements_set_float(object, name, length, (float)value->real);
+		}
 	case value_color:
-		/* A kind-8 constant lands where a brush colour goes: the engine SolidColorBrush takes it, every other target
-		 * (the AcrylicBrush the loader cannot build, a foreign brush) is the skip. */
+		/* Apply packed colors to the supported brush properties. */
 		if (!object)
 			return S_FALSE;
 		{
@@ -539,7 +554,8 @@ static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 lengt
 			color.R = (BYTE)((value->integer >> 16) & 0xff);
 			color.G = (BYTE)((value->integer >> 8) & 0xff);
 			color.B = (BYTE)(value->integer & 0xff);
-			return raven_solid_brush_put_color(object, &color);
+			HRESULT result = raven_acrylic_brush_set_color(object, name, length, &color);
+			return result != S_FALSE ? result : raven_solid_brush_put_color(object, &color);
 		}
 	default:
 		return S_FALSE;
@@ -617,6 +633,28 @@ struct scope {
 	UINT32 deferred_length;
 };
 
+/* A Source setter can synchronously start another load before its parent's resources are published. */
+struct ambient_frame {
+	const struct scope *stack;
+	size_t depth;
+	struct ambient_frame *previous;
+};
+static DWORD ambient_tls = TLS_OUT_OF_INDEXES;
+
+BOOL raven_xaml_loader_notify(DWORD reason, void *reserved)
+{
+	(void)reserved;
+	if (reason == DLL_PROCESS_ATTACH) {
+		ambient_tls = TlsAlloc();
+		return ambient_tls != TLS_OUT_OF_INDEXES;
+	}
+	if (reason == DLL_PROCESS_DETACH && ambient_tls != TLS_OUT_OF_INDEXES) {
+		TlsFree(ambient_tls);
+		ambient_tls = TLS_OUT_OF_INDEXES;
+	}
+	return TRUE;
+}
+
 /* The application's resource dictionary: the last stage of a lookup. Owned by the caller. */
 static HRESULT application_resources(IInspectable **out)
 {
@@ -670,10 +708,12 @@ static void requested_theme_name(const WCHAR **name, UINT32 *length)
  * ProvideThemeResourceValue; the reference is followed through the same lookup, bounded so a cycle ends the search. */
 #define RESOURCE_HOPS 16
 
+static BOOL is_map_object(IInspectable *object);
 static HRESULT resolve_resource(const struct scope *stack, size_t depth, int theme_resource, const WCHAR *key,
-	UINT32 length, IInspectable **out, int hops);
+	UINT32 length, IInspectable **out, int hops, const WCHAR *effective_theme, UINT32 effective_theme_length);
 
-static HRESULT resolve_follow(const struct scope *stack, size_t depth, IInspectable *value, IInspectable **out, int hops)
+static HRESULT resolve_follow(const struct scope *stack, size_t depth, IInspectable *value, IInspectable **out, int hops,
+	const WCHAR *effective_theme, UINT32 effective_theme_length)
 {
 	const WCHAR *key = NULL;
 	UINT32 length = 0;
@@ -684,35 +724,55 @@ static HRESULT resolve_follow(const struct scope *stack, size_t depth, IInspecta
 	*out = NULL;
 	if (hops >= RESOURCE_HOPS)
 		return E_BOUNDS;
-	return resolve_resource(stack, depth, theme, key, length, out, hops + 1);
+	return resolve_resource(stack, depth, theme, key, length, out, hops + 1, effective_theme, effective_theme_length);
 }
 
 static HRESULT resolve_resource(const struct scope *stack, size_t depth, int theme_resource, const WCHAR *key,
-	UINT32 length, IInspectable **out, int hops)
+	UINT32 length, IInspectable **out, int hops, const WCHAR *effective_theme, UINT32 effective_theme_length)
 {
 	const WCHAR *theme = NULL;
 	UINT32 theme_length = 0;
 	IInspectable *dictionary = NULL;
 	HRESULT result = E_BOUNDS;
 	*out = NULL;
-	if (theme_resource)
-		requested_theme_name(&theme, &theme_length);
+	if (theme_resource) {
+		if (effective_theme) { theme = effective_theme; theme_length = effective_theme_length; }
+		else requested_theme_name(&theme, &theme_length);
+	}
 	for (size_t index = depth; index; ) {
-		dictionary = raven_xaml_element_resources_existing(stack[--index].object);
+		IInspectable *scope_object = stack[--index].object;
+		dictionary = raven_xaml_element_resources_existing(scope_object);
+		if (!dictionary && scope_object && is_map_object(scope_object)) dictionary = scope_object;
 		if (!dictionary)
 			continue;
 		result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
 			raven_xaml_dictionary_lookup(dictionary, key, length, out);
-		if (SUCCEEDED(result))
-			return resolve_follow(stack, depth, *out, out, hops);
+		if (result == S_OK && *out)
+			return resolve_follow(stack, depth, *out, out, hops, effective_theme, effective_theme_length);
+	}
+	for (struct ambient_frame *frame = TlsGetValue(ambient_tls); frame; frame = frame->previous) {
+		for (size_t index = frame->depth; index; ) {
+			IInspectable *scope_object = frame->stack[--index].object;
+			dictionary = raven_xaml_element_resources_existing(scope_object);
+			if (!dictionary && scope_object && is_map_object(scope_object)) dictionary = scope_object;
+			if (!dictionary) continue;
+			result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
+				raven_xaml_dictionary_lookup(dictionary, key, length, out);
+			if (result == S_OK && *out)
+				return resolve_follow(stack, depth, *out, out, hops, effective_theme, effective_theme_length);
+		}
 	}
 	result = application_resources(&dictionary);
-	if (FAILED(result) || !dictionary)
-		return E_BOUNDS;
-	result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
-		raven_xaml_dictionary_lookup(dictionary, key, length, out);
-	IInspectable_Release(dictionary);
-	return SUCCEEDED(result) ? resolve_follow(stack, depth, *out, out, hops) : result;
+	if (SUCCEEDED(result) && dictionary) {
+		result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
+			raven_xaml_dictionary_lookup(dictionary, key, length, out);
+		IInspectable_Release(dictionary);
+		if (result == S_OK && *out)
+			return resolve_follow(stack, depth, *out, out, hops, effective_theme, effective_theme_length);
+	}
+	if (!effective_theme) requested_theme_name(&effective_theme, &effective_theme_length);
+	result = raven_xaml_system_color(key, length, effective_theme, effective_theme_length, out);
+	return result == S_FALSE ? E_BOUNDS : result;
 }
 
 static HRESULT get_merged_dictionaries(IInspectable *object, IInspectable **out)
@@ -1046,6 +1106,46 @@ static int substream_range(const struct load_context *context, uint32_t index, s
 static UINT32 last_failure_offset;
 static HRESULT last_failure_status;
 
+struct resource_map_entry { uint32_t token; uint32_t key; BOOL seen; BOOL applied; };
+struct resource_map { struct resource_map_entry *entries; uint32_t capacity; uint32_t remaining; };
+
+/* ResourceDictionary_v3 maps keys to offsets of value-creation nodes within its deferred stream. */
+static HRESULT resource_map_init(struct resource_map *map, const struct metadata *m, size_t start, size_t limit,
+	size_t stream_size)
+{
+	struct reader r = {m->data, start, limit, 0};
+	uint32_t count, capacity = 1;
+	map->entries = NULL;
+	map->capacity = 0;
+	map->remaining = 0;
+	if (!start) return S_OK;
+	if (next_vint(&r) != 10) return E_INVALIDARG;
+	count = (uint32_t)next_vint(&r);
+	if (r.invalid || count > 0x10000) return E_INVALIDARG;
+	if (!count) return S_OK;
+	while (capacity < count * 2) capacity <<= 1;
+	map->entries = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)capacity * sizeof *map->entries);
+	if (!map->entries) return E_OUTOFMEMORY;
+	map->capacity = capacity;
+	map->remaining = count;
+	for (uint32_t i = 0; i < count; ++i) {
+		const uint16_t key = next_u16(&r);
+		const uint32_t offset = (uint32_t)next_vint(&r);
+		const WCHAR *text;
+		UINT32 length, slot;
+		if (r.invalid || offset >= stream_size || FAILED(metadata_string(m, key, &text, &length))) {
+			HeapFree(GetProcessHeap(), 0, map->entries);
+			map->entries = NULL;
+			return E_INVALIDARG;
+		}
+		slot = ((offset + 1) * 2654435761u) & (capacity - 1);
+		while (map->entries[slot].token) slot = (slot + 1) & (capacity - 1);
+		map->entries[slot].token = offset + 1;
+		map->entries[slot].key = key;
+	}
+	return S_OK;
+}
+
 /* The diagnostic a probe or a test reads after a failed RavenXamlLoad: which node and why. Engine-internal, __cdecl. */
 __declspec(dllexport) void __cdecl RavenXamlLastFailure(UINT32 *offset, HRESULT *status)
 {
@@ -1054,16 +1154,23 @@ __declspec(dllexport) void __cdecl RavenXamlLastFailure(UINT32 *offset, HRESULT 
 }
 
 static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root,
-	IInspectable *target, BOOL *target_used, const struct load_context *context, int deferral_depth)
+	IInspectable *target, BOOL *target_used, const struct load_context *context, int deferral_depth,
+	const WCHAR *effective_theme, UINT32 effective_theme_length, size_t map_start, size_t map_limit)
 {
 	struct reader r = {m->data, begin, end, 0};
 	struct scope stack[LOADER_DEPTH];
+	uint32_t scope_tokens[LOADER_DEPTH] = {0};
+	struct resource_map resource_map;
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
 	IInspectable *last_object = NULL;
 	IInspectable *completed_value = NULL;
 
 	IInspectable *pending_object = NULL;
+	uint32_t pending_token = 0;
+	IInspectable *pending_theme_dictionary = NULL;
+	size_t pending_theme_begin = 0, pending_theme_end = 0;
+	size_t pending_map_start = 0, pending_map_limit = 0;
 	struct value pending_value = {value_none, NULL, 0, 0, 0};
 	BOOL pending_value_valid = FALSE;
 	UINT32 pending_length = 0;
@@ -1072,14 +1179,32 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	 * (RavenXamlLastFailure below); a nested Source load overwrites the outer document's record, which is the evidence
 	 * the caller wants — the deepest failure is the one that propagates. */
 	size_t node_at = begin;
+	g_current_effective_theme = effective_theme;
+	g_current_effective_theme_length = effective_theme_length;
+	status = resource_map_init(&resource_map, m, map_start, map_limit, end - begin);
+	if (FAILED(status)) return status;
 	while (r.at < r.end) {
 		const uint8_t kind = next_byte(&r);
 		node_at = r.at - 1;
+		if (resource_map.capacity) {
+			uint32_t token = (uint32_t)(node_at - begin) + 1;
+			uint32_t slot = (token * 2654435761u) & (resource_map.capacity - 1);
+			while (resource_map.entries[slot].token) {
+				if (resource_map.entries[slot].token == token && !resource_map.entries[slot].seen) {
+					resource_map.entries[slot].seen = TRUE;
+				}
+				slot = (slot + 1) & (resource_map.capacity - 1);
+			}
+		}
+		if (depth < LOADER_DEPTH && (kind == 1 || kind == 18 || kind == 19 ||
+			(kind >= 20 && kind <= 22) || (!depth && kind >= 23 && kind <= 25)))
+			scope_tokens[depth] = kind >= 20 && kind <= 22 ? (uint32_t)(node_at - begin) + 1 : 0;
 		/* A pushed constant is the value of the dictionary entry the next keyed insertion consumes; any other node in
 		 * between leaves it unused, the way an ignored PushConstant always behaved. A provided resource reference is
 		 * consumed the same way. */
 		if (kind != 4 && kind != 10)
 			pending_value_valid = FALSE;
+		if (kind != 4 && kind != 10 && kind != 34 && kind != 35) pending_token = 0;
 		if (kind != 10 && kind != 34 && kind != 35 && pending_object) {
 			IInspectable_Release(pending_object);
 			pending_object = NULL;
@@ -1102,6 +1227,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (!depth && target) { status = E_INVALIDARG; goto done; }
 			if (depth) {
 				struct scope *scope = &stack[--depth];
+				const uint32_t closed_token = scope_tokens[depth];
 				/* A namespace scope carries no object: a value completed inside it rides over it to the collection or
 				 * map scope beneath, the choreography the compiled App.xaml runs for every merged dictionary
 				 * (GetValue MergedDictionaries, PushScopeAddNamespace, create, EndInitPopScope, AddToCollection). */
@@ -1150,6 +1276,30 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					/* A value a collection or map scope receives: the append or the keyed insertion takes it. */
 					if (last_object) IInspectable_Release(last_object);
 					last_object = scope->object;
+					if (resource_map.capacity && closed_token) {
+						uint32_t token = closed_token;
+						uint32_t slot = (token * 2654435761u) & (resource_map.capacity - 1);
+						BOOL inserted = FALSE;
+						while (resource_map.entries[slot].token) {
+							if (resource_map.entries[slot].token == token) {
+								struct value key = {0};
+								key.kind = value_string;
+								status = metadata_string(m, resource_map.entries[slot].key, &key.text, &key.length);
+								if (SUCCEEDED(status)) status = add_to_dictionary(stack[depth - 1].object, &key, last_object, NULL);
+								if (FAILED(status)) goto done;
+								if (!resource_map.entries[slot].applied) {
+									resource_map.entries[slot].applied = TRUE;
+									--resource_map.remaining;
+								}
+								inserted = TRUE;
+							}
+							slot = (slot + 1) & (resource_map.capacity - 1);
+						}
+						if (inserted && (r.at == r.end || (r.data[r.at] != 8 && r.data[r.at] != 9 && r.data[r.at] != 10))) {
+							IInspectable_Release(last_object);
+							last_object = NULL;
+						}
+					}
 				} else if (scope->object) IInspectable_Release(scope->object);
 			}
 			break;
@@ -1210,6 +1360,11 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					status = raven_color_value_create(&color, &object);
 					if (FAILED(status))
 						object = NULL;
+				}
+				if (FAILED(status) && !object && reference == (0x8000 | 601) && value.kind == value_enum) {
+					const WCHAR *enum_name = raven_xaml_class_by_stable(601);
+					if (value.enum_type != 601) { status = E_INVALIDARG; goto done; }
+					status = raven_enum_value_create(enum_name, (UINT32)lstrlenW(enum_name), (INT32)value.integer, &object);
 				}
 			}
 			if (target && (FAILED(status) || !object)) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
@@ -1446,6 +1601,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				 * purpose keeps the old shortcut, which ignored it. */
 				pending_value = value;
 				pending_value_valid = TRUE;
+				pending_token = (uint32_t)(node_at - begin) + 1;
 				break;
 			}
 			if (kind == 34 || kind == 35) {
@@ -1461,6 +1617,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				if (FAILED(status)) goto done;
 				if (pending_object) IInspectable_Release(pending_object);
 				pending_object = reference;
+				pending_token = (uint32_t)(node_at - begin) + 1;
 				break;
 			}
 			if (target) { status = E_NOTIMPL; goto done; }
@@ -1474,6 +1631,44 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			/* The value the entry takes: the object the just-closed scope attached, else the reference a preceding
 			 * Provide node installed (nodes 34/35 are always followed by the keyed insertion), else a pushed constant. */
 			value_object = last_object ? last_object : pending_object;
+			if (resource_map.capacity && pending_token && !last_object) {
+				uint32_t slot = (pending_token * 2654435761u) & (resource_map.capacity - 1);
+				while (resource_map.entries[slot].token) {
+					if (resource_map.entries[slot].token == pending_token) {
+						struct value mapped_key = {0};
+						mapped_key.kind = value_string;
+						status = metadata_string(m, resource_map.entries[slot].key, &mapped_key.text, &mapped_key.length);
+						if (SUCCEEDED(status)) status = add_to_dictionary(depth ? stack[depth - 1].object : NULL, &mapped_key,
+							value_object, pending_value_valid ? &pending_value : NULL);
+						if (FAILED(status)) goto done;
+						if (!resource_map.entries[slot].applied) {
+							resource_map.entries[slot].applied = TRUE;
+							--resource_map.remaining;
+						}
+					}
+					slot = (slot + 1) & (resource_map.capacity - 1);
+				}
+			}
+			if (pending_theme_dictionary && value_object == pending_theme_dictionary) {
+				const WCHAR *child_theme = effective_theme;
+				UINT32 child_theme_length = effective_theme_length;
+				IInspectable *deferred = NULL;
+				BOOL into_used = FALSE;
+				HRESULT loaded;
+				if (key.kind == value_string && key.text &&
+					((key.length == 5 && !memcmp(key.text, L"Light", 5 * sizeof(WCHAR))) ||
+					 (key.length == 4 && !memcmp(key.text, L"Dark", 4 * sizeof(WCHAR))) ||
+					 (key.length == 12 && !memcmp(key.text, L"HighContrast", 12 * sizeof(WCHAR))))) {
+					child_theme = key.text;
+					child_theme_length = key.length;
+				}
+				loaded = load_nodes(m, pending_theme_begin, pending_theme_end, &deferred, value_object,
+					&into_used, context, deferral_depth + 1, child_theme, child_theme_length, pending_map_start, pending_map_limit);
+				if (deferred) IInspectable_Release(deferred);
+				IInspectable_Release(pending_theme_dictionary);
+				pending_theme_dictionary = NULL;
+				if (target && FAILED(loaded)) { status = loaded; goto done; }
+			}
 			status = add_to_dictionary(depth ? stack[depth - 1].object : NULL, &key, value_object,
 				pending_value_valid ? &pending_value : NULL);
 			if (last_object) IInspectable_Release(last_object);
@@ -1481,6 +1676,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (pending_object) IInspectable_Release(pending_object);
 			pending_object = NULL;
 			pending_value_valid = FALSE;
+			pending_token = 0;
 			/* An entry whose value never materialized (the object creation was skipped: a struct the runtime does not
 			 * activate, an unresolvable type) leaves the dictionary without the key when no target demands the
 			 * document complete; with a target the miss is refused. */
@@ -1503,9 +1699,11 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const uint32_t statics = (uint32_t)next_vint(&r);
 			const uint32_t themes = (uint32_t)next_vint(&r);
 			uint32_t runtime_type = 0;
+			size_t runtime_data;
 			if (r.invalid || statics > 0x10000 || themes > 0x10000) { status = E_INVALIDARG; goto done; }
 			for (uint32_t index = 0; index < statics + themes; ++index)
 				next_u16(&r);
+			runtime_data = r.at;
 			status = read_custom_runtime_data(&r, m, &runtime_type);
 			if (FAILED(status))
 				goto done;
@@ -1525,16 +1723,28 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					HRESULT loaded = S_OK;
 					const int dictionary_content = runtime_type == 371 || runtime_type == 7 ||
 						runtime_type == 10 || runtime_type == 12;
+					/* Theme dictionary content is keyed immediately after its scope closes; defer it until that key is known. */
+					if (dictionary_content && depth >= 2 && stack[depth - 2].kind == 5 && stack[depth - 1].object) {
+						if (pending_theme_dictionary) { status = E_INVALIDARG; goto done; }
+						pending_theme_dictionary = stack[depth - 1].object;
+						IInspectable_AddRef(pending_theme_dictionary);
+						pending_theme_begin = deferred_begin;
+						pending_theme_end = deferred_end;
+						pending_map_start = runtime_type == 10 ? runtime_data : 0;
+						pending_map_limit = r.end;
+						break;
+					}
 					if (dictionary_content && stack[depth - 1].object &&
 						SUCCEEDED(IInspectable_QueryInterface(stack[depth - 1].object,
 							&IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&current))) {
 						BOOL into_used = FALSE;
 						current->lpVtbl->Release(current);
 						loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, stack[depth - 1].object,
-							&into_used, context, deferral_depth + 1);
+							&into_used, context, deferral_depth + 1, effective_theme, effective_theme_length,
+							runtime_type == 10 ? runtime_data : 0, r.end);
 					} else {
 						loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, NULL, NULL, context,
-							deferral_depth + 1);
+							deferral_depth + 1, effective_theme, effective_theme_length, runtime_type == 10 ? runtime_data : 0, r.end);
 						if (SUCCEEDED(loaded) && deferred) {
 							__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
 							if (SUCCEEDED(IInspectable_QueryInterface(deferred, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary,
@@ -1586,10 +1796,16 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length))) {
 				HRESULT applied = S_FALSE;
 				if (!resource) {
-					applied = apply_value(stack[depth - 1].object, name, length, &value);
+					if (length == 6 && !memcmp(name, L"Source", 6 * sizeof(WCHAR)) && value.kind == value_string) {
+						struct ambient_frame frame = {stack, depth, TlsGetValue(ambient_tls)};
+						if (!TlsSetValue(ambient_tls, &frame)) { status = E_OUTOFMEMORY; goto done; }
+						applied = apply_value(stack[depth - 1].object, name, length, &value);
+						if (!TlsSetValue(ambient_tls, frame.previous)) { status = E_UNEXPECTED; goto done; }
+					} else applied = apply_value(stack[depth - 1].object, name, length, &value);
 				} else if (value.kind == value_string && value.text) {
 					IInspectable *resolved = NULL;
-					if (SUCCEEDED(resolve_resource(stack, depth, kind == 36, value.text, value.length, &resolved, 0)) &&
+					if (SUCCEEDED(resolve_resource(stack, depth, kind == 36, value.text, value.length, &resolved, 0,
+						effective_theme, effective_theme_length)) &&
 						resolved) {
 						applied = raven_xaml_element_apply_value(stack[depth - 1].object, name, length, resolved);
 						IInspectable_Release(resolved);
@@ -1640,10 +1856,17 @@ done:
 		last_failure_offset = (UINT32)node_at;
 		last_failure_status = status;
 	}
-	if (SUCCEEDED(status) && target && (pending_name || last_object)) status = E_INVALIDARG;
+	if (SUCCEEDED(status) && target && resource_map.remaining) {
+		status = E_NOTIMPL;
+		for (uint32_t i = 0; i < resource_map.capacity; ++i)
+			if (resource_map.entries[i].token && !resource_map.entries[i].seen) { status = E_INVALIDARG; break; }
+	}
+	if (SUCCEEDED(status) && target && (pending_name || last_object || pending_theme_dictionary)) status = E_INVALIDARG;
 	if (last_object) IInspectable_Release(last_object);
 	if (completed_value) IInspectable_Release(completed_value);
 	if (pending_object) IInspectable_Release(pending_object);
+	if (pending_theme_dictionary) IInspectable_Release(pending_theme_dictionary);
+	if (resource_map.entries) HeapFree(GetProcessHeap(), 0, resource_map.entries);
 	/* The scopes unwind without their deferred applications: a failed document never half-applies the templates it
 	 * declared, and the objects the unwind releases own the only references the deferred targets held through them. */
 	while (depth) {
@@ -1698,7 +1921,7 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
 		const uint32_t line_offset = read_u32(bytes + table + 4 + (size_t)index * 8 + 4);
 		const size_t begin = substreams + node_offset, end = substreams + line_offset;
-		status = load_nodes(&metadata, begin, end, root, target, &target_used, &context, 0);
+		status = load_nodes(&metadata, begin, end, root, target, &target_used, &context, 0, g_pending_effective_theme, g_pending_effective_theme_length, 0, 0);
 		if (FAILED(status)) {
 			if (*root) {
 				IInspectable_Release(*root);
@@ -1713,6 +1936,20 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 __declspec(dllexport) HRESULT WINAPI RavenXamlLoad(const void *data, uint32_t size, IInspectable **root)
 {
 	return load_document(data, size, root, NULL);
+}
+
+/* The target form: a document applied INTO an object the caller already owns (Application.LoadComponent and a dictionary's
+ * Source both use it). Exported so a fixture can populate Application.Resources the way a compiled App.xaml does. */
+__declspec(dllexport) const WCHAR *raven_xaml_get_current_theme(UINT32 *length)
+{
+	if (length) *length = g_current_effective_theme_length;
+	return g_current_effective_theme;
+}
+
+__declspec(dllexport) void raven_xaml_set_pending_theme(const WCHAR *theme, UINT32 length)
+{
+	g_pending_effective_theme = theme;
+	g_pending_effective_theme_length = length;
 }
 
 /* The target form: a document applied INTO an object the caller already owns (Application.LoadComponent and a dictionary's

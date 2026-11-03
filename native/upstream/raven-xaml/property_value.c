@@ -367,3 +367,174 @@ __declspec(dllexport) HRESULT raven_xaml_color_value(IInspectable *object, __x_A
 {
 	return raven_color_value_of(object, color);
 }
+
+/* A XAML enum as a value object. An enum is a struct-like projected type, not activatable, so a compiled dictionary that
+ * stores one (Colors.xbf's "InverseTheme" = ElementTheme.Dark) arrives as a CreateTypeWithConstant node whose type the
+ * catalog cannot create. The engine boxes the constant into an IInspectable whose runtime class name is the enum's full
+ * name and whose reader is the engine's own interop interface — the convention the colour value above established. The
+ * integer is what the property setters already take, so an enum reaching a property applies like one. */
+static const IID raven_enum_value_interop_iid = {0x2b6a4a7e, 0x9d31, 0x4c1b, {0x85, 0x3f, 0x0a, 0x7e, 0x2d, 0x61, 0x9c, 0x44}};
+typedef struct raven_enum_value_interop raven_enum_value_interop;
+struct raven_enum_value_interop_vtbl {
+	HRESULT (WINAPI *QueryInterface)(raven_enum_value_interop *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(raven_enum_value_interop *);
+	ULONG (WINAPI *Release)(raven_enum_value_interop *);
+	HRESULT (WINAPI *get_Value)(raven_enum_value_interop *, INT32 *);
+};
+struct raven_enum_value_interop { const struct raven_enum_value_interop_vtbl *lpVtbl; };
+struct enum_value {
+	IInspectable inspectable;
+	raven_enum_value_interop interop;
+	LONG refs;
+	WCHAR *type_name;
+	UINT32 type_length;
+	INT32 value;
+};
+#define ENUM_OWNER(part) ((struct enum_value *)((char *)(part)-offsetof(struct enum_value, interop)))
+
+static HRESULT WINAPI enum_value_query(IInspectable *self, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject))
+		*out = self;
+	else if (IsEqualIID(iid, &raven_enum_value_interop_iid))
+		*out = &((struct enum_value *)self)->interop;
+	else
+		return E_NOINTERFACE;
+	IInspectable_AddRef(self);
+	return S_OK;
+}
+static ULONG WINAPI enum_value_addref(IInspectable *self) { return InterlockedIncrement(&((struct enum_value *)self)->refs); }
+static ULONG WINAPI enum_value_release(IInspectable *self)
+{
+	struct enum_value *value = (struct enum_value *)self;
+	ULONG refs = InterlockedDecrement(&value->refs);
+	if (!refs) {
+		if (value->type_name)
+			HeapFree(GetProcessHeap(), 0, value->type_name);
+		HeapFree(GetProcessHeap(), 0, value);
+	}
+	return refs;
+}
+static HRESULT WINAPI enum_value_iids(IInspectable *self, ULONG *count, IID **iids) { (void)self; if (!count || !iids) return E_POINTER; *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI enum_value_name(IInspectable *self, HSTRING *out)
+{
+	struct enum_value *value = (struct enum_value *)self;
+	if (!out)
+		return E_POINTER;
+	return WindowsCreateString(value->type_name, value->type_length, out);
+}
+static HRESULT WINAPI enum_value_trust(IInspectable *self, TrustLevel *out) { (void)self; if (!out) return E_POINTER; *out = BaseTrust; return S_OK; }
+static const IInspectableVtbl enum_value_table = {
+	enum_value_query, enum_value_addref, enum_value_release, enum_value_iids, enum_value_name, enum_value_trust,
+};
+static HRESULT WINAPI enum_interop_query(raven_enum_value_interop *self, REFIID iid, void **out) { return enum_value_query(&ENUM_OWNER(self)->inspectable, iid, out); }
+static ULONG WINAPI enum_interop_addref(raven_enum_value_interop *self) { return enum_value_addref(&ENUM_OWNER(self)->inspectable); }
+static ULONG WINAPI enum_interop_release(raven_enum_value_interop *self) { return enum_value_release(&ENUM_OWNER(self)->inspectable); }
+static HRESULT WINAPI enum_interop_get(raven_enum_value_interop *self, INT32 *out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = ENUM_OWNER(self)->value;
+	return S_OK;
+}
+static const struct raven_enum_value_interop_vtbl enum_interop_table = {
+	enum_interop_query, enum_interop_addref, enum_interop_release, enum_interop_get,
+};
+
+HRESULT raven_enum_value_create(const WCHAR *type_name, UINT32 type_length, INT32 value, IInspectable **out)
+{
+	struct enum_value *boxed;
+	if (!out || !type_name || !type_length)
+		return E_POINTER;
+	*out = NULL;
+	boxed = ALLOC(sizeof *boxed);
+	if (!boxed)
+		return E_OUTOFMEMORY;
+	boxed->type_name = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)type_length * sizeof(WCHAR));
+	if (!boxed->type_name) {
+		HeapFree(GetProcessHeap(), 0, boxed);
+		return E_OUTOFMEMORY;
+	}
+	memcpy(boxed->type_name, type_name, (SIZE_T)type_length * sizeof(WCHAR));
+	boxed->type_length = type_length;
+	boxed->value = value;
+	boxed->refs = 1;
+	boxed->inspectable.lpVtbl = &enum_value_table;
+	boxed->interop.lpVtbl = &enum_interop_table;
+	*out = &boxed->inspectable;
+	return S_OK;
+}
+
+BOOL raven_enum_value_of(IInspectable *object, INT32 *value)
+{
+	raven_enum_value_interop *interop = NULL;
+	HRESULT result;
+	if (!object || !value)
+		return FALSE;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &raven_enum_value_interop_iid, (void **)&interop)) || !interop)
+		return FALSE;
+	result = interop->lpVtbl->get_Value(interop, value);
+	interop->lpVtbl->Release(interop);
+	return SUCCEEDED(result);
+}
+
+__declspec(dllexport) HRESULT raven_xaml_enum_value(IInspectable *object, INT32 *value)
+{
+	if (!object || !value) return E_POINTER;
+	return raven_enum_value_of(object, value) ? S_OK : E_NOINTERFACE;
+}
+
+/* shortcut: colors use compiled palette defaults until live system theme settings are served. */
+HRESULT raven_xaml_system_color(const WCHAR *key, UINT32 length, const WCHAR *theme, UINT32 theme_length, IInspectable **out)
+{
+	static const struct { const WCHAR *name; BYTE alpha; BOOL base; } colors[] = {
+		{L"SystemAltLowColor", 0x33, FALSE},
+		{L"SystemAltHighColor", 0xff, FALSE},
+		{L"SystemBaseLowColor", 0x33, TRUE},
+	};
+	static const struct { const WCHAR *name; BYTE slot; } accent_names[] = {
+		{L"SystemAccentColorLight3", 0}, {L"SystemAccentColorLight2", 1},
+		{L"SystemAccentColorLight1", 2}, {L"SystemAccentColor", 3},
+		{L"SystemAccentColorDark1", 4}, {L"SystemAccentColorDark2", 5}, {L"SystemAccentColorDark3", 6},
+	};
+	/* shortcut: fixed blue fallback when the user has no valid AccentPalette; replace with the shell's palette generator. */
+	static const BYTE default_accent[7][3] = {
+		{0x99, 0xeb, 0xff}, {0x4c, 0xc2, 0xff}, {0x1a, 0x98, 0xed}, {0x00, 0x78, 0xd4},
+		{0x00, 0x5f, 0xb8}, {0x00, 0x3e, 0x92}, {0x00, 0x21, 0x5e},
+	};
+	BOOL dark;
+	if (!key || !theme || !out) return E_POINTER;
+	*out = NULL;
+	for (size_t i = 0; i < ARRAYSIZE(accent_names); ++i) {
+		if (CompareStringOrdinal(key, (int)length, accent_names[i].name, -1, FALSE) == CSTR_EQUAL) {
+			/* AccentPalette is eight four-byte RGB slots, lightest first; the last byte is reserved, not opacity. */
+			typedef LSTATUS (WINAPI *reg_get_value_fn)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID, LPDWORD);
+			BYTE palette[32];
+			DWORD bytes = sizeof palette;
+			const BYTE *rgb = default_accent[accent_names[i].slot];
+			HMODULE registry = LoadLibraryW(L"advapi32.dll");
+			reg_get_value_fn get_value = registry ? (reg_get_value_fn)(void *)GetProcAddress(registry, "RegGetValueW") : NULL;
+			if (get_value && get_value(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+				L"AccentPalette", RRF_RT_REG_BINARY, NULL, palette, &bytes) == ERROR_SUCCESS && bytes == sizeof palette)
+				rgb = palette + accent_names[i].slot * 4;
+			__x_ABI_CWindows_CUI_CColor color = {0xff, rgb[0], rgb[1], rgb[2]};
+			if (registry) FreeLibrary(registry);
+			return raven_color_value_create(&color, out);
+		}
+	}
+	if (theme_length == 4 && CompareStringOrdinal(theme, 4, L"Dark", -1, FALSE) == CSTR_EQUAL) dark = TRUE;
+	else if (theme_length == 12 && CompareStringOrdinal(theme, 12, L"HighContrast", -1, FALSE) == CSTR_EQUAL) dark = TRUE;
+	else if (theme_length == 5 && CompareStringOrdinal(theme, 5, L"Light", -1, FALSE) == CSTR_EQUAL) dark = FALSE;
+	else return S_FALSE;
+	for (size_t i = 0; i < ARRAYSIZE(colors); ++i) {
+		if (CompareStringOrdinal(key, (int)length, colors[i].name, -1, FALSE) == CSTR_EQUAL) {
+			BYTE rgb = (dark == colors[i].base) ? 0xff : 0;
+			__x_ABI_CWindows_CUI_CColor color = {colors[i].alpha, rgb, rgb, rgb};
+			return raven_color_value_create(&color, out);
+		}
+	}
+	return S_FALSE;
+}

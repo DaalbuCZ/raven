@@ -236,12 +236,10 @@ class Xbf:
         count = reader.i32()
         table = [(reader.u32(), reader.u32()) for _ in range(count)]
         start = reader.at
-        self.substreams = []
-        for index, (node_offset, line_offset) in enumerate(table):
-            if start + node_offset != reader.at:
-                raise ValueError("substream offset does not follow the previous one")
-            self.substreams.append((start + node_offset, start + line_offset))
-            reader.at = start + line_offset
+        # A substream's nodes span [node_offset, line_offset); what follows up to the next node section is line info,
+        # which carries no nodes. Files compiled without line info (the app packages) keep the sections contiguous,
+        # which is the special case line_offset[i] == node_offset[i + 1].
+        self.substreams = [(start + node_offset, start + line_offset) for node_offset, line_offset in table]
         self.substreams_start = start
 
     def nodes(self, limit=0):

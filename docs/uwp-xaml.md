@@ -1795,6 +1795,55 @@ the same day — see the two entries below. Evidence:
   structs); `RavenXamlLastFailure` is the designed probe for naming the
   exact node. The WinUI 2.x content ceiling stays recorded: the catalog
   serves the class, its dictionary is empty.
+- ElementTheme resource values (2026-11-03): the loader boxes the kind-11
+  enum constants used by the three `InverseTheme` entries in Colors.xbf,
+  checks the embedded stable type against the created type, and applies a
+  resolved enum through the integer property path. The x64 and x86 XAML
+  controls fixtures verify dictionary lookup, runtime class, value, and a
+  mismatched type. A fresh Shapr3D launch with the rebuilt component now
+  fail-fasts with `0x80004001` (`E_NOTIMPL`); it does not open a window.
+  The exact remaining node or operation still needs diagnosis.
+- System colors and theme context (2026-11-03): the refusing operation was
+  `SystemAltLowColor` in the Light dictionary of `Themes/Colors.xbf`.
+  Deferred theme dictionaries now load when their Light or Dark key is known,
+  so their static resources use the dictionary's theme. The initial fallback
+  supplies the observed AltLow, AltHigh and BaseLow palette values, and boxed
+  colors apply to a solid brush. Fixtures check both themes, resource-to-brush
+  application, and enum resources on scalar and object properties; x64 and
+  x86 XAML controls tests pass. Dynamic accent colors are not yet supplied.
+  A fresh Shapr3D trace reaches the next failure: activation
+  of `Microsoft.UI.Xaml.Media.AcrylicBrush` returns `0x80040154`.
+- Acrylic brush fallback (2026-11-03): the XBF loader builds the observed
+  `Microsoft.UI.Xaml.Media.AcrylicBrush`, stores its source, tint, opacity,
+  luminosity opacity and fallback color, and renders its fallback color via
+  the existing brush path. The compositor does not yet render acrylic effects.
+  The x64 and x86 XAML controls fixtures check the authored values. A fresh
+  Shapr3D launch passes this activation and stops later with `E_NOTIMPL`.
+- High Contrast defaults (2026-11-03): the next failure is the same
+  `SystemAltLowColor` reference in the High Contrast dictionary. The local
+  Windows XAML resource's High Contrast substream supplies the same three
+  literal fallback colors as its default dark palette, so Raven supplies those
+  defaults too; live system overrides remain unsupported. The x64 and x86 XAML
+  and MRT regression set passes (14 tests). The next Shapr3D launch gets past
+  all three theme dictionaries and stops at Colors.xbf offset `0xe7a`, where
+  `SystemAccentColorLight1` is requested; six dynamic accent shades follow.
+- Accent resource fallback (2026-11-03): the seven system accent colors read
+  the guest user's 32-byte `AccentPalette` when present, and otherwise use an
+  approximate blue palette. The x64 and x86 XAML controls fixtures check all
+  seven colors; isolated guest prefixes also check a custom palette, truncated
+  data and the wrong registry type. Live accent updates and Windows' palette
+  generation are not yet implemented. A Shapr3D trace now reaches the
+  `Grey10Alpha` resource in Colors.xbf, whose key is in deferred dictionary
+  runtime data rather than an explicit AddToDictionary node.
+- Deferred dictionary keys (2026-11-03): ResourceDictionary_v3's resource
+  map now associates creation-node offsets with keys, including aliases, and
+  a dictionary being built participates in its own resource lookup. The x64
+  and x86 controls fixtures cover mapped colors, an alias, a brush referencing
+  an earlier color, and invalid offsets. The real Colors.xaml load completes;
+  Shapr3D next reaches `DefaultButtonStyles.xaml`, whose `Style.BasedOn`
+  needs `DefaultButtonStyle` from the WinUI framework dictionary. The package's
+  framework PRI is not yet registered or loaded, and nested Source loads also
+  need to retain their parent resource context.
 
 ## Performance rules
 

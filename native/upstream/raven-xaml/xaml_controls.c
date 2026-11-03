@@ -16,6 +16,7 @@
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
+#include "windows_ui_xaml_style.h"
 #include <windows.ui.xaml.interop.h>
 #include "windows_ui_xaml_controls.h"
 #include "windows_ui_xaml_elements.h"
@@ -1495,6 +1496,18 @@ HRESULT raven_xaml_element_set_object(IInspectable *object, const WCHAR *name, U
 	if (same_text(name, length, L"Template") || same_text(name, length, L"ContentTemplate") ||
 		same_text(name, length, L"Resources"))
 		return raven_xaml_elements_set_object(object, name, length, value);
+	/* A Style's BasedOn is an object property: the base style is stored on the style and applied first when the
+	 * derived style is put on an element. This keeps the BasedOn chain working for styles loaded from XAML, where
+	 * the base arrives as a resolved resource object. */
+	if (same_text(name, length, L"BasedOn")) {
+		__x_ABI_CWindows_CUI_CXaml_CIStyle *style = NULL;
+		if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style)) && style) {
+			const HRESULT result = style->lpVtbl->put_BasedOn(style, (uint64_t)(uintptr_t)value);
+			style->lpVtbl->Release(style);
+			return result;
+		}
+		return S_FALSE;
+	}
 	if (!same_text(name, length, L"Content"))
 		return S_FALSE;
 	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CIWindow, (void **)&window)) && window) {

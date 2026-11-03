@@ -103,14 +103,22 @@ HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, 
 HRESULT raven_solid_brush_create(IInspectable **out);
 HRESULT raven_solid_brush_put_color(IInspectable *brush, const __x_ABI_CWindows_CUI_CColor *color);
 HRESULT raven_solid_brush_get_color(IInspectable *brush, __x_ABI_CWindows_CUI_CColor *color);
+HRESULT raven_acrylic_brush_create(IInspectable **out);
+HRESULT raven_acrylic_brush_set_text(IInspectable *brush, const WCHAR *name, UINT32 length, const WCHAR *value, UINT32 value_length);
+HRESULT raven_acrylic_brush_set_float(IInspectable *brush, const WCHAR *name, UINT32 length, float value);
+HRESULT raven_acrylic_brush_set_color(IInspectable *brush, const WCHAR *name, UINT32 length, const __x_ABI_CWindows_CUI_CColor *value);
 /* The boxed Windows.UI.Color value (property_value.c): the struct a PushScopeCreateTypeWithConstant node carries is not
  * activatable, so the loader boxes the four bytes into this object. */
 HRESULT raven_color_value_create(const __x_ABI_CWindows_CUI_CColor *color, IInspectable **out);
 HRESULT raven_color_value_of(IInspectable *object, __x_ABI_CWindows_CUI_CColor *color);
+HRESULT raven_enum_value_create(const WCHAR *type_name, UINT32 type_length, INT32 value, IInspectable **out);
+BOOL raven_enum_value_of(IInspectable *object, INT32 *value);
+HRESULT raven_xaml_system_color(const WCHAR *key, UINT32 length, const WCHAR *theme, UINT32 theme_length, IInspectable **out);
 HRESULT raven_xaml_application_current(IInspectable **out);
 HRESULT raven_xaml_window_current(IInspectable **out);
 HRESULT raven_launch_arguments_create(IInspectable **out);
 HRESULT raven_xaml_load_into(const void *data, uint32_t size, IInspectable *target);
+BOOL raven_xaml_loader_notify(DWORD reason, void *reserved);
 HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length);
 /* The engine-internal Uri creation and boxed string the loader uses for the properties a compiled document sets directly
  * (a ResourceDictionary's Source) and for the keys it inserts (a dictionary's keyed value): the same object the public

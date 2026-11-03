@@ -228,6 +228,26 @@ def application_dictionary_xbf(unknown_child=False):
     return compiled_document(["ms-appx:///Fixture/Source.xaml"], nodes)
 
 
+def ambient_application_xbf():
+    """A later Source resolves a color from an earlier merged dictionary while the application is still loading."""
+    nodes = (b"\x01\x17\x1f\x80"                    # Application
+             + b"\x14\x73\x81\x13\xaf\x82"       # resources and merged dictionaries
+             + b"\x14\x73\x81"                      # first merged dictionary
+             + b"\x16\x2a\x80\x08\x33\x22\x11\xff\x02"  # boxed Color #ff112233
+             + dictionary_key(0) + b"\x21\x08"
+             + b"\x14\x73\x81\x1b\xb0\x82\x05" + struct.pack("<H", 1) + b"\x21\x08"
+             + b"\x02\x21\x02")
+    return compiled_document(["ParentColor", "ms-appx:///Fixture/AmbientSource.xaml"], nodes)
+
+
+def ambient_source_xbf():
+    nodes = (b"\x14\x73\x81"                         # ResourceDictionary
+             + b"\x14\x09\x81"                       # SolidColorBrush (stable 265)
+             + b"\x1e\xdc\x81\x05\x00\x00"     # Color from ParentColor (stable property 476)
+             + b"\x21" + dictionary_key(1) + b"\x21")
+    return compiled_document(["ParentColor", "AmbientBrush"], nodes)
+
+
 def compiled_document(strings, nodes):
     """A compiled XBF document whose metadata carries only a string table.
 
@@ -366,6 +386,8 @@ def main():
         malformed[142] = 1  # the first string's required terminator
         resources["Files/Fixture/Invalid.xbf"] = bytes(malformed)
         resources["Files/Fixture/Dictionaries.xbf"] = application_dictionary_xbf()
+        resources["Files/Fixture/AmbientApplication.xbf"] = ambient_application_xbf()
+        resources["Files/Fixture/AmbientSource.xbf"] = ambient_source_xbf()
         resources["Files/Fixture/MissingType.xbf"] = application_dictionary_xbf(unknown_child=True)
         resources["Files/Fixture/Source.xbf"] = resource_dictionary_xbf(
             [("Greeting", "Hello from Source"), ("Farewell", "Goodbye")])

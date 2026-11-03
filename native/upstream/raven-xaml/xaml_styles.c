@@ -2641,6 +2641,15 @@ __declspec(dllexport) HRESULT raven_style_default_attach(IInspectable *element)
 static const WCHAR solid_brush_class_name[] = L"Microsoft.UI.Xaml.Media.SolidColorBrush";
 struct solid_brush { IInspectable inspectable; LONG refs; __x_ABI_CWindows_CUI_CColor color; };
 static const IInspectableVtbl solid_brush_table;
+static const IInspectableVtbl acrylic_brush_table;
+struct acrylic_brush {
+	IInspectable inspectable;
+	LONG refs;
+	__x_ABI_CWindows_CUI_CColor fallback;
+	__x_ABI_CWindows_CUI_CColor tint;
+	INT32 background_source;
+	float tint_opacity, luminosity_opacity;
+};
 
 static HRESULT WINAPI solid_brush_query(IInspectable *self, REFIID iid, void **out)
 {
@@ -2707,9 +2716,111 @@ HRESULT raven_solid_brush_get_color(IInspectable *brush, __x_ABI_CWindows_CUI_CC
 	struct solid_brush *self = (struct solid_brush *)brush;
 	if (!brush || !color)
 		return E_POINTER;
-	if (brush->lpVtbl != &solid_brush_table)
+	if (brush->lpVtbl == &solid_brush_table) *color = self->color;
+	else if (brush->lpVtbl == &acrylic_brush_table) *color = ((struct acrylic_brush *)brush)->fallback;
+	else return S_FALSE;
+	return S_OK;
+}
+
+static HRESULT WINAPI acrylic_brush_name(IInspectable *self, HSTRING *out)
+{
+	static const WCHAR name[] = L"Microsoft.UI.Xaml.Media.AcrylicBrush";
+	(void)self;
+	return out ? WindowsCreateString(name, ARRAYSIZE(name) - 1, out) : E_POINTER;
+}
+static ULONG WINAPI acrylic_brush_addref(IInspectable *self) { return InterlockedIncrement(&((struct acrylic_brush *)self)->refs); }
+static ULONG WINAPI acrylic_brush_release(IInspectable *self)
+{
+	ULONG refs = InterlockedDecrement(&((struct acrylic_brush *)self)->refs);
+	if (!refs) HeapFree(GetProcessHeap(), 0, self);
+	return refs;
+}
+static const IInspectableVtbl acrylic_brush_table = {
+	solid_brush_query, acrylic_brush_addref, acrylic_brush_release, solid_brush_iids, acrylic_brush_name, solid_brush_trust,
+};
+
+HRESULT raven_acrylic_brush_create(IInspectable **out)
+{
+	struct acrylic_brush *brush;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	brush = ALLOC(sizeof *brush);
+	if (!brush) return E_OUTOFMEMORY;
+	memset(brush, 0, sizeof *brush);
+	brush->inspectable.lpVtbl = &acrylic_brush_table;
+	brush->refs = 1;
+	brush->tint_opacity = 0.5f;
+	brush->luminosity_opacity = -1.0f; /* unset */
+	*out = &brush->inspectable;
+	return S_OK;
+}
+
+static BOOL acrylic_property(const WCHAR *name, UINT32 length, const WCHAR *expected)
+{
+	return CompareStringOrdinal(name, (int)length, expected, -1, FALSE) == CSTR_EQUAL;
+}
+
+HRESULT raven_acrylic_brush_set_float(IInspectable *brush, const WCHAR *name, UINT32 length, float value)
+{
+	struct acrylic_brush *self = (struct acrylic_brush *)brush;
+	float *slot;
+	if (!brush || !name) return E_POINTER;
+	if (brush->lpVtbl != &acrylic_brush_table) return S_FALSE;
+	if (acrylic_property(name, length, L"TintOpacity")) slot = &self->tint_opacity;
+	else if (acrylic_property(name, length, L"TintLuminosityOpacity")) slot = &self->luminosity_opacity;
+	else return S_FALSE;
+	if (!(value >= 0.0f && value <= 1.0f)) return E_INVALIDARG;
+	*slot = value;
+	return S_OK;
+}
+
+HRESULT raven_acrylic_brush_set_text(IInspectable *brush, const WCHAR *name, UINT32 length, const WCHAR *value, UINT32 value_length)
+{
+	struct acrylic_brush *self = (struct acrylic_brush *)brush;
+	float number = 0.0f, factor = 0.1f;
+	BOOL fraction = FALSE, digit = FALSE;
+	if (!brush || !name || !value) return E_POINTER;
+	if (brush->lpVtbl != &acrylic_brush_table) return S_FALSE;
+	if (acrylic_property(name, length, L"BackgroundSource")) {
+		if (acrylic_property(value, value_length, L"Backdrop")) self->background_source = 0;
+		else if (acrylic_property(value, value_length, L"HostBackdrop")) self->background_source = 1;
+		else return E_INVALIDARG;
+		return S_OK;
+	}
+	if (!acrylic_property(name, length, L"TintOpacity") && !acrylic_property(name, length, L"TintLuminosityOpacity"))
 		return S_FALSE;
-	*color = self->color;
+	for (UINT32 i = 0; i < value_length; ++i) {
+		WCHAR c = value[i];
+		if (c == L'.' && !fraction) { fraction = TRUE; continue; }
+		if (c < L'0' || c > L'9') return E_INVALIDARG;
+		digit = TRUE;
+		if (fraction) { number += (c - L'0') * factor; factor *= 0.1f; }
+		else number = number * 10.0f + (c - L'0');
+		if (number > 1.0f) return E_INVALIDARG;
+	}
+	return digit ? raven_acrylic_brush_set_float(brush, name, length, number) : E_INVALIDARG;
+}
+
+HRESULT raven_acrylic_brush_set_color(IInspectable *brush, const WCHAR *name, UINT32 length, const __x_ABI_CWindows_CUI_CColor *value)
+{
+	struct acrylic_brush *self = (struct acrylic_brush *)brush;
+	if (!brush || !name || !value) return E_POINTER;
+	if (brush->lpVtbl != &acrylic_brush_table) return S_FALSE;
+	if (acrylic_property(name, length, L"FallbackColor") || acrylic_property(name, length, L"XamlCompositionBrushBase_FallbackColor")) self->fallback = *value;
+	else if (acrylic_property(name, length, L"TintColor")) self->tint = *value;
+	else return S_FALSE;
+	return S_OK;
+}
+
+/* The compositor has no acrylic effect yet; consumers read FallbackColor through the ordinary brush color path. */
+__declspec(dllexport) HRESULT raven_xaml_acrylic_state(IInspectable *brush, __x_ABI_CWindows_CUI_CColor *fallback,
+	__x_ABI_CWindows_CUI_CColor *tint, INT32 *source, float *opacity, float *luminosity)
+{
+	struct acrylic_brush *self = (struct acrylic_brush *)brush;
+	if (!brush || !fallback || !tint || !source || !opacity || !luminosity) return E_POINTER;
+	if (brush->lpVtbl != &acrylic_brush_table) return E_NOINTERFACE;
+	*fallback = self->fallback; *tint = self->tint; *source = self->background_source;
+	*opacity = self->tint_opacity; *luminosity = self->luminosity_opacity;
 	return S_OK;
 }
 

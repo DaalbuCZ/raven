@@ -37,6 +37,7 @@ static const struct stable_property_entry properties[] = {
 	/* SolidColorBrush.Color: the property the compiled theme dictionaries apply their kind-8 constants to (the brush
 	 * itself builds through the loader's create_known). Index verified against scripts/xbf-stable-indices.json. */
 	{476, L"SolidColorBrush_Color"},
+	{1960, L"XamlCompositionBrushBase_FallbackColor"},
 	{687, L"MergedDictionaries"},
 	{688, L"Source"},
 	{689, L"ThemeDictionaries"},
@@ -83,6 +84,7 @@ static const struct stable_property_entry properties[] = {
 };
 
 static const struct metadata_entry entries[] = {
+	{601, L"ElementTheme", L"Windows.UI.Xaml.ElementTheme"},
 	{31, L"Application", L"Windows.UI.Xaml.Application"},
 	{371, L"ResourceDictionary", L"Windows.UI.Xaml.ResourceDictionary"},
 	{141, L"Window", L"Windows.UI.Xaml.Window"},

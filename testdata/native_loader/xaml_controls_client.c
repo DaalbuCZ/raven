@@ -276,6 +276,35 @@ static size_t build_metadata_document(unsigned char *doc)
 	return 308;
 }
 
+/* The document-named AcrylicBrush and properties used by Shapr3D's Colors.xbf. */
+static size_t build_acrylic_document(unsigned char *doc)
+{
+	static const char *strings[] = {"Microsoft.UI.Xaml.Media", "AcrylicBrush", "BackgroundSource", "TintColor", "TintLuminosityOpacity", "TintOpacity"};
+	size_t at = 132, table, nodes;
+	memset(doc, 0, 1024);
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 12, 2); put32(doc, 16, 1);
+	put64(doc, 20, at - 12); put32(doc, at, 6); at += 4;
+	for (unsigned int i = 0; i < 6; ++i) at = put_text(doc, at, strings[i]);
+	put64(doc, 28, at - 12); at += 4; /* assemblies */
+	put64(doc, 36, at - 12); put32(doc, at, 1); at += 12; /* namespace name string 0 */
+	put64(doc, 44, at - 12); put32(doc, at, 1); put32(doc, at + 12, 1); at += 16;
+	put64(doc, 52, at - 12); put32(doc, at, 4); at += 4;
+	for (unsigned int i = 0; i < 4; ++i) { put32(doc, at + 8, i + 2); at += 12; }
+	put64(doc, 60, at - 12); at += 4;
+	put32(doc, 4, (uint32_t)(at - 12)); table = at; at += 12; nodes = at;
+	put32(doc, table, 1);
+	doc[at++] = 0x14; doc[at++] = 0; doc[at++] = 0;
+	doc[at++] = 0x1b; doc[at++] = 0; doc[at++] = 0; at = put_constant_string(doc, at, "HostBackdrop");
+	doc[at++] = 0x1a; at = put_stable(doc, at, 1960); doc[at++] = 8; put32(doc, at, 0xff112233); at += 4;
+	doc[at++] = 0x1a; doc[at++] = 1; doc[at++] = 0; doc[at++] = 8; put32(doc, at, 0xff445566); at += 4;
+	doc[at++] = 0x1b; doc[at++] = 2; doc[at++] = 0; at = put_constant_string(doc, at, "0.75");
+	doc[at++] = 0x1a; doc[at++] = 3; doc[at++] = 0; doc[at++] = 3; put32(doc, at, 0x3f333333); at += 4;
+	doc[at++] = 0x21;
+	put32(doc, table + 8, (uint32_t)(at - nodes)); put32(doc, 8, (uint32_t)(at - table));
+	return at;
+}
+
 /* A Frame document with two property nodes: a name and a cache size. */
 static size_t build_frame_properties(unsigned char *doc)
 {
@@ -503,9 +532,7 @@ static size_t build_dictionary_brush_document(unsigned char *doc)
 	return at;
 }
 
-/* The colour structs the real Colors.xbf declares with PushScopeCreateTypeWithConstant (node 22): the type is
- * Windows.UI.Color (stable 42) and the constant beside it the kind-8 packed #ff3c3c3c. The struct is not activatable, so
- * the loader boxes it and the keyed insertion stores it under "AccentKey". */
+/* A boxed color resource applied to SolidColorBrush.Color by a static resource reference. */
 static size_t build_dictionary_color_document(unsigned char *doc)
 {
 	size_t at = 168;
@@ -533,6 +560,11 @@ static size_t build_dictionary_color_document(unsigned char *doc)
 	doc[at++] = 0x02; /* EndInitPopScope */
 	doc[at++] = 0x0a; /* AddToDictionaryWithKey "AccentKey" */
 	at = put_constant_string(doc, at, "AccentKey");
+	doc[at++] = 0x14; at = put_stable(doc, at, 265); /* SolidColorBrush */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 476); /* Color from static resource */
+	at = put_constant_string(doc, at, "AccentKey");
+	doc[at++] = 0x21;
+	at = put_string_constant(doc, at, 0x0a, "ColorBrush");
 	doc[at++] = 0x21; /* close the dictionary scope */
 	doc[at++] = 0x21; /* close the grid scope */
 	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
@@ -540,9 +572,7 @@ static size_t build_dictionary_color_document(unsigned char *doc)
 	return at;
 }
 
-/* A ResourceDictionary as the page root holding both value forms the real Colors.xbf declares: "BrushKey" is a
- * SolidColorBrush whose Color came from a kind-8 constant, "AccentKey" a boxed Windows.UI.Color struct from node 22. The
- * dictionary is the root, so the fixture reads both back through the map. */
+/* A dictionary root holding the brush, color and ElementTheme value forms in Colors.xbf. */
 static size_t build_dictionary_values_document(unsigned char *doc)
 {
 	size_t at = 168;
@@ -576,7 +606,75 @@ static size_t build_dictionary_values_document(unsigned char *doc)
 	doc[at++] = 0x02; /* EndInitPopScope */
 	doc[at++] = 0x0a; /* AddToDictionaryWithKey "AccentKey" */
 	at = put_constant_string(doc, at, "AccentKey");
+	doc[at++] = 0x16; at = put_stable(doc, at, 601); /* ElementTheme.Dark */
+	doc[at++] = 0x0b; doc[at++] = 0x59; doc[at++] = 0x02; /* raw stable enum type index */
+	put32(doc, at, 2); at += 4;
+	doc[at++] = 0x02;
+	at = put_string_constant(doc, at, 0x0a, "ThemeKey");
 	doc[at++] = 0x21; /* close the dictionary scope */
+	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
+	put32(doc, 164, (uint32_t)(at - 168));
+	return at;
+}
+
+/* Resolve each system accent color through the same static-resource brush path as Colors.xbf. */
+static size_t build_accent_palette_document(unsigned char *doc)
+{
+	static const char *keys[] = {"SystemAccentColorLight3", "SystemAccentColorLight2", "SystemAccentColorLight1",
+		"SystemAccentColor", "SystemAccentColorDark1", "SystemAccentColorDark2", "SystemAccentColorDark3"};
+	size_t at = 168;
+	memset(doc, 0, 2048);
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144); put32(doc, 12, 2); put32(doc, 16, 1);
+	put64(doc, 20, 0x78); put64(doc, 28, 0x7c); put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84); put64(doc, 52, 0x88); put64(doc, 60, 0x8c);
+	put32(doc, 156, 1); put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 371);
+	for (unsigned int i = 0; i < 7; ++i) {
+		char entry[] = "Accent0";
+		entry[6] = (char)('0' + i);
+		doc[at++] = 0x14; at = put_stable(doc, at, 265);
+		doc[at++] = 0x1e; at = put_stable(doc, at, 476);
+		at = put_constant_string(doc, at, keys[i]);
+		doc[at++] = 0x21;
+		at = put_string_constant(doc, at, 0x0a, entry);
+	}
+	doc[at++] = 0x21;
+	put32(doc, 8, (uint32_t)(4 + 8 + at - 168));
+	put32(doc, 164, (uint32_t)(at - 168));
+	return at;
+}
+
+/* Resolve the same enum resource into an integer property and an object-valued Content property. */
+static size_t build_enum_resource_document(unsigned char *doc)
+{
+	size_t at = 168;
+	for (size_t index = 0; index < 300; ++index) doc[index] = 0;
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144); put32(doc, 12, 2); put32(doc, 16, 1);
+	put64(doc, 20, 0x78); put64(doc, 28, 0x7c); put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84); put64(doc, 52, 0x88); put64(doc, 60, 0x8c);
+	put32(doc, 156, 1); put32(doc, 160, 0);
+	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* Grid */
+	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* Resources */
+	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* ResourceDictionary */
+	doc[at++] = 0x16; at = put_stable(doc, at, 601);
+	doc[at++] = 0x0b; doc[at++] = 0x59; doc[at++] = 0x02;
+	put32(doc, at, 2); at += 4;
+	doc[at++] = 0x02;
+	at = put_string_constant(doc, at, 0x0a, "ThemeKey");
+	doc[at++] = 0x21;
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 509); /* Frame */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 1047); /* CacheSize */
+	at = put_constant_string(doc, at, "ThemeKey");
+	doc[at++] = 0x21;
+	doc[at++] = 0x07; at = put_stable(doc, at, 648); /* Children */
+	doc[at++] = 0x14; at = put_stable(doc, at, 540); /* Button */
+	doc[at++] = 0x1e; at = put_stable(doc, at, 832); /* Content */
+	at = put_constant_string(doc, at, "ThemeKey");
+	doc[at++] = 0x21;
+	doc[at++] = 0x21;
 	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
 	put32(doc, 164, (uint32_t)(at - 168));
 	return at;
@@ -641,6 +739,85 @@ static size_t build_deferred_theme_document(unsigned char *doc)
 	doc[at++] = 0x21;
 	put32(doc, 8, (uint32_t)(4 + 8 * 2 + (at - 160)));
 	put32(doc, 156, (uint32_t)(at - 160));
+	return at;
+}
+
+/* Theme dictionaries load the same static system color under different effective themes. */
+static size_t build_deferred_palette_document(unsigned char *doc)
+{
+	static const char *theme_names[] = {"Light", "Dark", "HighContrast"};
+	size_t at = 192, ends[5];
+	memset(doc, 0, 768);
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144); put32(doc, 12, 2); put32(doc, 16, 1);
+	put64(doc, 20, 0x78); put64(doc, 28, 0x7c); put64(doc, 36, 0x80);
+	put64(doc, 44, 0x84); put64(doc, 52, 0x88); put64(doc, 60, 0x8c);
+	put32(doc, 156, 4);
+	doc[at++] = 0x14; at = put_stable(doc, at, 371);
+	doc[at++] = 0x13; at = put_stable(doc, at, 689);
+	for (unsigned int i = 0; i < 3; ++i) {
+		doc[at++] = 0x14; at = put_stable(doc, at, 371);
+		doc[at++] = 0x0f; doc[at++] = (unsigned char)(i + 1);
+		doc[at++] = 0; doc[at++] = 0; doc[at++] = 10;
+		for (unsigned int j = 0; j < 6; ++j) doc[at++] = 0;
+		doc[at++] = 0x21;
+		at = put_string_constant(doc, at, 0x0a, theme_names[i]);
+	}
+	doc[at++] = 0x21; doc[at++] = 0x21;
+	ends[0] = 0; ends[1] = at - 192;
+	for (unsigned int i = 0; i < 3; ++i) {
+		doc[at++] = 0x14; at = put_stable(doc, at, 371);
+		doc[at++] = 0x14; at = put_stable(doc, at, 265);
+		doc[at++] = 0x1e; at = put_stable(doc, at, 476);
+		at = put_constant_string(doc, at, "SystemAltLowColor");
+		doc[at++] = 0x21;
+		at = put_string_constant(doc, at, 0x0a, "Brush");
+		doc[at++] = 0x21;
+		ends[i + 2] = at - 192;
+	}
+	for (unsigned int i = 0; i < 4; ++i) {
+		put32(doc, 160 + 8 * i, (uint32_t)ends[i]);
+		put32(doc, 164 + 8 * i, (uint32_t)ends[i + 1]);
+	}
+	put32(doc, 8, (uint32_t)(at - 156));
+	return at;
+}
+
+/* v3 maps are unordered; aliases share a token and a later brush references the earlier mapped color. */
+static size_t build_mapped_dictionary_document(unsigned char *doc, BOOL explicit_key)
+{
+	size_t at = 176, deferred;
+	memset(doc, 0, 300);
+	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
+	put32(doc, 4, 144);
+	put64(doc, 20, 56); put64(doc, 28, 108); put64(doc, 36, 112);
+	put64(doc, 44, 116); put64(doc, 52, 120); put64(doc, 60, 124);
+	put32(doc, 68, 3); put32(doc, 72, 8);
+	doc[76] = 'G'; doc[78] = 'r'; doc[80] = 'e'; doc[82] = 'e';
+	doc[84] = 't'; doc[86] = 'i'; doc[88] = 'n'; doc[90] = 'g';
+	put32(doc, 92, 5); doc[96] = 'L'; doc[98] = 'i'; doc[100] = 'g'; doc[102] = 'h'; doc[104] = 't';
+	put32(doc, 106, 5); doc[110] = 'A'; doc[112] = 'l'; doc[114] = 'i'; doc[116] = 'a'; doc[118] = 's';
+	put32(doc, 156, 2);
+	doc[at++] = 0x14; at = put_stable(doc, at, 371);
+	doc[at++] = 0x0f; doc[at++] = 1; doc[at++] = 0; doc[at++] = 0; doc[at++] = 10;
+	doc[at++] = 3;
+	doc[at++] = 1; doc[at++] = 0; doc[at++] = 12; /* Light -> brush */
+	doc[at++] = 2; doc[at++] = 0; doc[at++] = 3;  /* Alias -> color */
+	doc[at++] = 0; doc[at++] = 0; doc[at++] = 3;  /* Greeting -> same color */
+	for (unsigned int i = 0; i < 5; ++i) doc[at++] = 0;
+	doc[at++] = 0x21;
+	deferred = at - 176;
+	doc[at++] = 0x14; at = put_stable(doc, at, 371);
+	doc[at++] = 0x16; at = put_stable(doc, at, 42); doc[at++] = 8;
+	put32(doc, at, 0xff3c3c3c); at += 4; doc[at++] = 0x02;
+	if (explicit_key) { doc[at++] = 0x0a; doc[at++] = 5; doc[at++] = 0; doc[at++] = 0; }
+	doc[187] = (unsigned char)(at - 176 - deferred);
+	doc[at++] = 0x14; at = put_stable(doc, at, 265);
+	doc[at++] = 0x1e; at = put_stable(doc, at, 476); doc[at++] = 5; doc[at++] = 0; doc[at++] = 0;
+	doc[at++] = 0x02; doc[at++] = 0x21;
+	put32(doc, 160, 0); put32(doc, 164, (uint32_t)deferred);
+	put32(doc, 168, (uint32_t)deferred); put32(doc, 172, (uint32_t)(at - 176));
+	put32(doc, 8, (uint32_t)(at - 156));
 	return at;
 }
 
@@ -2294,26 +2471,45 @@ int raven_entry(void)
 		merged_app->lpVtbl->Release(merged_app);
 	}
 
-	/* The theme-dictionary value forms the real Shapr3D Colors.xbf carries. A dictionary root holds a SolidColorBrush
-	 * whose Color came from a kind-8 constant and a boxed Windows.UI.Color from node 22; both read back through the map,
-	 * the brush by its runtime class and its colour, the struct by the engine's colour reader. A second document applies
+	/* The theme-dictionary value forms the real Shapr3D Colors.xbf carries. A dictionary root holds a SolidColorBrush,
+	 * a boxed Windows.UI.Color and a boxed ElementTheme, all read back through the map. A second document applies
 	 * the brush to a TextBlock.Foreground through SetValueFromStaticResource — the application path a theme brush
 	 * travels — and the element hands the brush object back. */
 	{
 		/* Windows.UI.Color's four-byte ABI, declared locally because the hand headers carry no projection of it. */
 		struct fixture_color { BYTE A, R, G, B; } read;
 		typedef HRESULT (*brush_color_function)(IInspectable *, struct fixture_color *);
+		typedef HRESULT (*enum_value_function)(IInspectable *, INT32 *);
 		typedef IInspectable *(*boxed_string_function)(const WCHAR *, UINT32);
 		unsigned char values_fixture[300], brush_fixture[300];
-		IInspectable *values_root = NULL, *brush_root = NULL, *brush_entry = NULL, *accent_entry = NULL;
+		IInspectable *values_root = NULL, *brush_root = NULL, *brush_entry = NULL, *accent_entry = NULL, *theme_entry = NULL;
 		brush_color_function brush_color = NULL, color_value = NULL;
+		enum_value_function enum_value = NULL;
 		boxed_string_function boxed_string = NULL;
 		HSTRING brush_name = NULL, accent_name = NULL;
 		__FIMap_2_IInspectable_IInspectable *values_map = NULL;
 		brush_color = (brush_color_function)GetProcAddress(component, "raven_xaml_solid_brush_color");
 		color_value = (brush_color_function)GetProcAddress(component, "raven_xaml_color_value");
+		enum_value = (enum_value_function)GetProcAddress(component, "raven_xaml_enum_value");
 		boxed_string = (boxed_string_function)GetProcAddress(component, "raven_xaml_boxed_string_create");
-		if (!brush_color || !color_value || !boxed_string) return 778;
+		if (!brush_color || !color_value || !enum_value || !boxed_string) return 778;
+		{
+			typedef HRESULT (*acrylic_state_function)(IInspectable *, struct fixture_color *, struct fixture_color *, INT32 *, float *, float *);
+			acrylic_state_function acrylic_state = (acrylic_state_function)GetProcAddress(component, "raven_xaml_acrylic_state");
+			unsigned char acrylic_fixture[1024];
+			IInspectable *acrylic = NULL;
+			struct fixture_color fallback, tint, render_color;
+			INT32 source = -1;
+			float opacity = 0, luminosity = 0;
+			HSTRING name = NULL;
+			if (!acrylic_state || load(acrylic_fixture, (uint32_t)build_acrylic_document(acrylic_fixture), &acrylic) != S_OK || !acrylic) return 830;
+			if (acrylic->lpVtbl->GetRuntimeClassName(acrylic, &name) != S_OK || !same(name, L"Microsoft.UI.Xaml.Media.AcrylicBrush", 36)) return 831;
+			WindowsDeleteString(name);
+			if (acrylic_state(acrylic, &fallback, &tint, &source, &opacity, &luminosity) != S_OK || source != 1 || opacity < 0.699f || opacity > 0.701f || luminosity != 0.75f) return 832;
+			if (fallback.A != 0xff || fallback.R != 0x11 || fallback.G != 0x22 || fallback.B != 0x33 || tint.A != 0xff || tint.R != 0x44 || tint.G != 0x55 || tint.B != 0x66) return 833;
+			if (brush_color(acrylic, &render_color) != S_OK || memcmp(&fallback, &render_color, sizeof fallback)) return 834;
+			acrylic->lpVtbl->Release(acrylic);
+		}
 		if (load(values_fixture, (uint32_t)build_dictionary_values_document(values_fixture), &values_root) != S_OK ||
 			!values_root) return 779;
 		if (values_root->lpVtbl->QueryInterface(values_root, &IID___FIMap_2_IInspectable_IInspectable,
@@ -2322,11 +2518,14 @@ int raven_entry(void)
 		{
 			IInspectable *brush_key = boxed_string(L"BrushKey", 8);
 			IInspectable *accent_key = boxed_string(L"AccentKey", 9);
-			if (!brush_key || !accent_key) return 781;
+			IInspectable *theme_key = boxed_string(L"ThemeKey", 8);
+			if (!brush_key || !accent_key || !theme_key) return 781;
 			if (values_map->lpVtbl->Lookup(values_map, brush_key, &brush_entry) != S_OK || !brush_entry) return 781;
 			if (values_map->lpVtbl->Lookup(values_map, accent_key, &accent_entry) != S_OK || !accent_entry) return 782;
+			if (values_map->lpVtbl->Lookup(values_map, theme_key, &theme_entry) != S_OK || !theme_entry) return 794;
 			brush_key->lpVtbl->Release(brush_key);
 			accent_key->lpVtbl->Release(accent_key);
+			theme_key->lpVtbl->Release(theme_key);
 		}
 		if (brush_entry->lpVtbl->GetRuntimeClassName(brush_entry, &brush_name) != S_OK || !brush_name) return 783;
 		if (!same(brush_name, L"Microsoft.UI.Xaml.Media.SolidColorBrush", 39)) return 783;
@@ -2340,7 +2539,159 @@ int raven_entry(void)
 		if (color_value(accent_entry, &read) != S_OK) return 786;
 		if (read.A != 0xff || read.R != 0x3c || read.G != 0x3c || read.B != 0x3c) return 786;
 		accent_entry->lpVtbl->Release(accent_entry);
+		{
+			HSTRING name = NULL;
+			INT32 value = 0;
+			if (theme_entry->lpVtbl->GetRuntimeClassName(theme_entry, &name) != S_OK || !name) return 795;
+			if (!same(name, L"Windows.UI.Xaml.ElementTheme", 28)) return 795;
+			WindowsDeleteString(name);
+			if (enum_value(theme_entry, &value) != S_OK || value != 2) return 796;
+			if (enum_value((IInspectable *)values_map, &value) == S_OK) return 797;
+			theme_entry->lpVtbl->Release(theme_entry);
+		}
 		values_map->lpVtbl->Release(values_map);
+		/* A v3 map inserts an earlier color and its alias before a later brush resolves it. */
+		{
+			unsigned char mapped_fixture[300];
+			IInspectable *root = NULL, *color = NULL, *alias = NULL, *brush = NULL;
+			IInspectable *color_key = boxed_string(L"Greeting", 8), *alias_key = boxed_string(L"Alias", 5), *brush_key = boxed_string(L"Light", 5);
+			load_into_function mapped_load_into = (load_into_function)GetProcAddress(component, "raven_xaml_load_into");
+			__FIMap_2_IInspectable_IInspectable *map = NULL;
+			size_t length = build_mapped_dictionary_document(mapped_fixture, FALSE);
+			if (!mapped_load_into || !color_key || !alias_key || !brush_key || load(mapped_fixture, (uint32_t)length, &root) != S_OK || !root) return 851;
+			if (root->lpVtbl->QueryInterface(root, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK || !map) return 852;
+			if (map->lpVtbl->Lookup(map, color_key, &color) != S_OK || !color || map->lpVtbl->Lookup(map, alias_key, &alias) != S_OK || alias != color) return 853;
+			if (map->lpVtbl->Lookup(map, brush_key, &brush) != S_OK || !brush || brush_color(brush, &read) != S_OK || read.A != 0xff || read.R != 0x3c || read.G != 0x3c || read.B != 0x3c) return 854;
+			brush->lpVtbl->Release(brush); alias->lpVtbl->Release(alias); color->lpVtbl->Release(color);
+			color_key->lpVtbl->Release(color_key); alias_key->lpVtbl->Release(alias_key); brush_key->lpVtbl->Release(brush_key);
+			map->lpVtbl->Release(map);
+			mapped_fixture[187] = 0x7f; /* first map token extends beyond the deferred stream */
+			if (mapped_load_into(mapped_fixture, (uint32_t)length, root) != E_INVALIDARG) return 855;
+			mapped_fixture[187] = 4; /* inside the color node's type operand, not at a node boundary */
+			if (mapped_load_into(mapped_fixture, (uint32_t)length, root) != E_INVALIDARG) return 858;
+			root->lpVtbl->Release(root);
+			root = NULL; alias = NULL; brush = NULL; map = NULL;
+			length = build_mapped_dictionary_document(mapped_fixture, TRUE);
+			if (load(mapped_fixture, (uint32_t)length, &root) != S_OK || !root ||
+				root->lpVtbl->QueryInterface(root, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK || !map) return 856;
+			alias_key = boxed_string(L"Alias", 5); brush_key = boxed_string(L"Light", 5);
+			if (!alias_key || !brush_key || map->lpVtbl->Lookup(map, alias_key, &alias) != S_OK || !alias ||
+				map->lpVtbl->Lookup(map, brush_key, &brush) != S_OK || !brush || brush_color(brush, &read) != S_OK || read.R != 0x3c) return 857;
+			brush->lpVtbl->Release(brush); alias->lpVtbl->Release(alias);
+			alias_key->lpVtbl->Release(alias_key); brush_key->lpVtbl->Release(brush_key);
+			map->lpVtbl->Release(map); root->lpVtbl->Release(root);
+		}
+		/* The seven accent names resolve to distinct ordered slots of a configured or default palette. */
+		{
+			static const BYTE defaults[7][3] = {{0x99,0xeb,0xff},{0x4c,0xc2,0xff},{0x1a,0x98,0xed},
+				{0x00,0x78,0xd4},{0x00,0x5f,0xb8},{0x00,0x3e,0x92},{0x00,0x21,0x5e}};
+			typedef LSTATUS (WINAPI *reg_get_value_function)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID, LPDWORD);
+			unsigned char accent_fixture[2048], palette[32];
+			DWORD size = sizeof palette, type = 0;
+			HMODULE advapi = LoadLibraryW(L"advapi32.dll");
+			reg_get_value_function get_value = advapi ? (reg_get_value_function)GetProcAddress(advapi, "RegGetValueW") : NULL;
+			BOOL configured = get_value && get_value(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+				L"AccentPalette", RRF_RT_REG_BINARY, &type, palette, &size) == ERROR_SUCCESS && size == sizeof palette && type == REG_BINARY;
+			IInspectable *root = NULL;
+			__FIMap_2_IInspectable_IInspectable *map = NULL;
+			if (load(accent_fixture, (uint32_t)build_accent_palette_document(accent_fixture), &root) != S_OK || !root) return 840;
+			if (root->lpVtbl->QueryInterface(root, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK || !map) return 841;
+			for (unsigned int i = 0; i < 7; ++i) {
+				WCHAR name[] = L"Accent0";
+				IInspectable *key, *brush = NULL;
+				const BYTE *expected = configured ? &palette[i * 4] : defaults[i];
+				name[6] = (WCHAR)('0' + i);
+				key = boxed_string(name, 7);
+				if (!key || map->lpVtbl->Lookup(map, key, &brush) != S_OK || !brush) return 842;
+				if (brush_color(brush, &read) != S_OK || read.A != 0xff || read.R != expected[0] || read.G != expected[1] || read.B != expected[2]) return 843 + (int)i;
+				brush->lpVtbl->Release(brush); key->lpVtbl->Release(key);
+			}
+			map->lpVtbl->Release(map); root->lpVtbl->Release(root);
+			if (advapi) FreeLibrary(advapi);
+		}
+		/* Each deferred dictionary resolves its own palette, independent of the requested theme. */
+		{
+			unsigned char palette_fixture[768];
+			IInspectable *root = NULL, *theme_map_object = NULL;
+			__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
+			__FIMap_2_IInspectable_IInspectable *themes = NULL;
+			if (load(palette_fixture, (uint32_t)build_deferred_palette_document(palette_fixture), &root) != S_OK || !root) return 815;
+			if (root->lpVtbl->QueryInterface(root, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary) != S_OK || !dictionary) return 816;
+			if (dictionary->lpVtbl->get_ThemeDictionaries(dictionary, (uint64_t)(uintptr_t)&theme_map_object) != S_OK || !theme_map_object) return 817;
+			if (theme_map_object->lpVtbl->QueryInterface(theme_map_object, &IID___FIMap_2_IInspectable_IInspectable, (void **)&themes) != S_OK || !themes) return 818;
+			for (unsigned int i = 0; i < 3; ++i) {
+				const WCHAR *theme = i == 0 ? L"Light" : i == 1 ? L"Dark" : L"HighContrast";
+				IInspectable *theme_key = boxed_string(theme, i == 0 ? 5 : i == 1 ? 4 : 12);
+				IInspectable *brush_key = boxed_string(L"Brush", 5), *theme_dictionary = NULL, *brush = NULL;
+				__FIMap_2_IInspectable_IInspectable *map = NULL;
+				if (!theme_key || !brush_key || themes->lpVtbl->Lookup(themes, theme_key, &theme_dictionary) != S_OK || !theme_dictionary) return 819;
+				if (theme_dictionary->lpVtbl->QueryInterface(theme_dictionary, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK || !map) return 820;
+				if (map->lpVtbl->Lookup(map, brush_key, &brush) != S_OK || !brush) return 821;
+				if (brush_color(brush, &read) != S_OK || read.A != 0x33 || read.R != (i ? 0 : 0xff) || read.G != read.R || read.B != read.R) return 822;
+				brush->lpVtbl->Release(brush); map->lpVtbl->Release(map); theme_dictionary->lpVtbl->Release(theme_dictionary);
+				brush_key->lpVtbl->Release(brush_key); theme_key->lpVtbl->Release(theme_key);
+			}
+			themes->lpVtbl->Release(themes); theme_map_object->lpVtbl->Release(theme_map_object);
+			dictionary->lpVtbl->Release(dictionary); root->lpVtbl->Release(root);
+		}
+		/* A boxed Color resource must supply the actual bytes to a brush's Color property. */
+		{
+			unsigned char color_fixture[260];
+			IInspectable *root = NULL, *dictionary = NULL, *key = NULL, *brush = NULL;
+			__FIMap_2_IInspectable_IInspectable *map = NULL;
+			resources_get_function get_resources = (resources_get_function)GetProcAddress(component, "raven_xaml_element_get_resources");
+			if (!get_resources || load(color_fixture, (uint32_t)build_dictionary_color_document(color_fixture), &root) != S_OK || !root) return 810;
+			if (get_resources(root, &dictionary) != S_OK || !dictionary) return 811;
+			if (dictionary->lpVtbl->QueryInterface(dictionary, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK || !map) return 812;
+			key = boxed_string(L"ColorBrush", 10);
+			if (!key || map->lpVtbl->Lookup(map, key, &brush) != S_OK || !brush) return 813;
+			if (brush_color(brush, &read) != S_OK || read.A != 0xff || read.R != 0x3c || read.G != 0x3c || read.B != 0x3c) return 814;
+			brush->lpVtbl->Release(brush);
+			key->lpVtbl->Release(key);
+			map->lpVtbl->Release(map);
+			dictionary->lpVtbl->Release(dictionary);
+			root->lpVtbl->Release(root);
+		}
+		{
+			unsigned char resource_fixture[300];
+			IInspectable *root = NULL, *children_object = NULL, *frame_object = NULL, *button_object = NULL, *content = NULL;
+			panel1 *panel = NULL;
+			frame1 *frame = NULL;
+			content_control1 *button = NULL;
+			struct fixture_vector *children;
+			INT32 cache = 0, value = 0;
+			if (load(resource_fixture, (uint32_t)build_enum_resource_document(resource_fixture), &root) != S_OK || !root) return 800;
+			if (root->lpVtbl->QueryInterface(root, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel, (void **)&panel) != S_OK || !panel) return 801;
+			if (panel->lpVtbl->get_Children(panel, (uint64_t)(uintptr_t)&children_object) != S_OK || !children_object) return 802;
+			panel->lpVtbl->Release(panel);
+			children = (struct fixture_vector *)children_object;
+			if (children->lpVtbl->GetAt(children, 0, &frame_object) != S_OK || !frame_object) return 803;
+			if (children->lpVtbl->GetAt(children, 1, &button_object) != S_OK || !button_object) return 804;
+			children->lpVtbl->Release(children);
+			if (frame_object->lpVtbl->QueryInterface(frame_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame, (void **)&frame) != S_OK || !frame) return 805;
+			if (frame->lpVtbl->get_CacheSize(frame, (uint64_t)(uintptr_t)&cache) != S_OK || cache != 2) return 806;
+			frame->lpVtbl->Release(frame);
+			frame_object->lpVtbl->Release(frame_object);
+			if (button_object->lpVtbl->QueryInterface(button_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl, (void **)&button) != S_OK || !button) return 807;
+			if (button->lpVtbl->get_Content(button, (uint64_t)(uintptr_t)&content) != S_OK || !content) return 808;
+			if (enum_value(content, &value) != S_OK || value != 2) return 809;
+			content->lpVtbl->Release(content);
+			button->lpVtbl->Release(button);
+			button_object->lpVtbl->Release(button_object);
+			root->lpVtbl->Release(root);
+		}
+		/* The enum payload must name the same type as the object being created. */
+		{
+			size_t length = build_dictionary_values_document(values_fixture), index;
+			IInspectable *invalid_root = NULL;
+			for (index = 168; index + 5 < length; ++index)
+				if (values_fixture[index] == 0x16 && values_fixture[index + 1] == 0x59 &&
+					values_fixture[index + 2] == 0x82 && values_fixture[index + 3] == 0x0b)
+					break;
+			if (index + 5 >= length) return 798;
+			values_fixture[index + 4] = 0x58;
+			if (load(values_fixture, (uint32_t)length, &invalid_root) != E_INVALIDARG || invalid_root) return 799;
+		}
 		/* The application path: the resolved brush lands on the TextBlock's Foreground and reads back as the same brush. */
 		if (load(brush_fixture, (uint32_t)build_dictionary_brush_document(brush_fixture), &brush_root) != S_OK ||
 			!brush_root) return 787;
