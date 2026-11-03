@@ -2632,6 +2632,65 @@ __declspec(dllexport) HRESULT raven_style_default_attach(IInspectable *element)
 	return raven_xaml_element_put_style(element, (IInspectable *)style);
 }
 
+/* The platform's default styles.
+ *
+ * The OS theme resources — the surface Windows serves from Windows.UI.Xaml.Resources.*.dll and this engine reimplements —
+ * define the named default styles compiled documents base their own on: the Default*Style family and the named
+ * typography styles. They are authored here with the TargetType the platform's names carry and no setter content: the
+ * setters the real ones have are the OS's, not ours to copy (the plan's default-styles decision), the styles that base
+ * on them bring their own setters, and a control styled only by the platform style keeps its own authored defaults.
+ * The styles are shared, sealed and built once, the way the constructor defaults above are. */
+static const struct platform_style {
+	const WCHAR *key;
+	const WCHAR *target;
+} platform_styles[] = {
+	{L"DefaultButtonStyle", button_target},
+	{L"DefaultTextBoxStyle", L"Windows.UI.Xaml.Controls.TextBox"},
+	{L"DefaultToggleSwitchStyle", L"Windows.UI.Xaml.Controls.ToggleSwitch"},
+	{L"DefaultAppBarButtonStyle", L"Windows.UI.Xaml.Controls.AppBarButton"},
+	{L"DefaultCommandBarStyle", L"Windows.UI.Xaml.Controls.CommandBar"},
+	{L"PaneToggleButtonStyle", button_target},
+	{L"BaseTextBlockStyle", textblock_target},
+	{L"BodyTextBlockStyle", textblock_target},
+	{L"CaptionTextBlockStyle", textblock_target},
+	{L"TitleTextBlockStyle", textblock_target},
+	{L"SubtitleTextBlockStyle", textblock_target},
+};
+
+static struct style_object *platform_built[ARRAYSIZE(platform_styles)];
+static LONG platform_ready;
+
+static void build_platform_styles(void)
+{
+	for (UINT32 index = 0; index < ARRAYSIZE(platform_styles); ++index)
+		platform_built[index] = author_default(platform_styles[index].target, NULL, 0);
+}
+
+__declspec(dllexport) HRESULT raven_xaml_platform_resource(const WCHAR *key, UINT32 length, IInspectable **out)
+{
+	if (!key || !out)
+		return E_POINTER;
+	*out = NULL;
+	if (InterlockedCompareExchange(&platform_ready, 1, 0) == 0) {
+		build_platform_styles();
+		InterlockedExchange(&platform_ready, 2);
+	} else {
+		while (InterlockedCompareExchange(&platform_ready, 2, 2) != 2)
+			Sleep(0);
+	}
+	for (UINT32 index = 0; index < ARRAYSIZE(platform_styles); ++index) {
+		if ((UINT32)lstrlenW(platform_styles[index].key) == length &&
+			CompareStringOrdinal(key, (int)length, platform_styles[index].key, -1, FALSE) == CSTR_EQUAL) {
+			if (!platform_built[index])
+				return E_OUTOFMEMORY;
+			*out = (IInspectable *)platform_built[index];
+			IInspectable_AddRef(*out);
+			return S_OK;
+		}
+	}
+	return S_FALSE;
+}
+
 /* SolidColorBrush: the media brush the theme dictionaries build. The class surface the engine serves is the one the
  * compiled documents name — the XBFs' media namespace is Microsoft.UI.Xaml.Media, so that is the runtime class the
  * object answers with — and its Color the loader applies from a kind-8 constant. The engine's own readers

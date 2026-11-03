@@ -124,22 +124,25 @@ static HRESULT create_uri(HSTRING input, uri_i **out)
 	if (!length || !((text[0] >= L'a' && text[0] <= L'z') || (text[0] >= L'A' && text[0] <= L'Z'))) return E_INVALIDARG;
 	while (scheme < length && ((text[scheme] >= L'a' && text[scheme] <= L'z') ||
 		(text[scheme] >= L'0' && text[scheme] <= L'9') || text[scheme] == L'+' || text[scheme] == L'-' || text[scheme] == L'.')) ++scheme;
-	if (scheme < length && text[scheme] >= L'A' && text[scheme] <= L'Z') return E_NOTIMPL;
+	if (scheme < length && text[scheme] >= L'A' && text[scheme] <= L'Z') return 0x80004011; /* PROBE */
 	if (scheme >= length || text[scheme] != L':') return E_INVALIDARG;
-	if (scheme + 2 >= length || text[scheme+1] != L'/' || text[scheme+2] != L'/') return E_NOTIMPL;
+	if (scheme + 2 >= length || text[scheme+1] != L'/' || text[scheme+2] != L'/') return 0x80004012; /* PROBE */
 	authority = scheme + 3; path = authority;
 	while (path < length && text[path] != L'/' && text[path] != L'?' && text[path] != L'#') ++path;
+	/* An authority that names a package — ms-appx://Microsoft.UI.Xaml.2.8/... — carries the dots and upper case a host
+	 * form keeps, so the host form lifts the lower-case-only rule for the authority segment. */
+	const UINT32 host_form = path > authority && text[authority] != L'/';
 	/* Only canonical ASCII without escapes or dot segments is represented until full IRI support exists. */
 	for (UINT32 i = authority; i < length; ++i)
 		if (text[i] <= 0x20 || text[i] >= 0x7f || text[i] == L'%' || text[i] == L'\\' || text[i] == L'@' ||
-			(i < path && ((text[i] >= L'A' && text[i] <= L'Z') || text[i] == L':'))) return E_NOTIMPL;
+			(!host_form && i < path && ((text[i] >= L'A' && text[i] <= L'Z') || text[i] == L':'))) return 0x80004013; /* PROBE */
 	for (UINT32 i = path; i < length && text[i] != L'?' && text[i] != L'#'; ++i)
 		if (text[i] == L'/' && i+1 < length && text[i+1] == L'.' &&
 			(i+2 == length || text[i+2] == L'/' || text[i+2] == L'?' || text[i+2] == L'#' ||
-			(text[i+2] == L'.' && (i+3 == length || text[i+3] == L'/' || text[i+3] == L'?' || text[i+3] == L'#')))) return E_NOTIMPL;
+			(text[i+2] == L'.' && (i+3 == length || text[i+3] == L'/' || text[i+3] == L'?' || text[i+3] == L'#')))) return 0x80004014; /* PROBE */
 	end = path; while (end < length && text[end] != L'?' && text[end] != L'#') ++end;
 	query = end; if (query < length && text[query] == L'?') { while (query < length && text[query] != L'#') ++query; }
-	if (path == length || text[path] != L'/') return E_NOTIMPL;
+	if (path == length || text[path] != L'/') return 0x80004015; /* PROBE */
 	self = ALLOC(sizeof *self); if (!self) return E_OUTOFMEMORY;
 	self->iface.lpVtbl = &uri_table; self->stringable.lpVtbl = &stringable_table; self->refs = 1;
 	self->scheme_end = scheme; self->path_start = path; self->path_end = end; self->query_end = query; self->length = length;
@@ -185,7 +188,7 @@ static struct factory factory = {{&activation_table}, {&factory_table}, 1};
 
 /* The engine-internal creation a compiled document or a dictionary's Source uses: the factory's parser and object, reached
  * without the catalog. */
-HRESULT raven_xaml_uri_create(const WCHAR *text, UINT32 length, IInspectable **out)
+__declspec(dllexport) HRESULT raven_xaml_uri_create(const WCHAR *text, UINT32 length, IInspectable **out)
 {
 	HSTRING input = NULL;
 	uri_i *uri = NULL;

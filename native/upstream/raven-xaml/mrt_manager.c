@@ -309,7 +309,7 @@ static BOOL body_matches(struct pri_section_body *body, const char *identifier)
 {
 	UINT32 i;
 	for (i = 0; i < 16 && identifier[i]; ++i)
-		if (pri_state.file[body->start + i] != (BYTE)identifier[i])
+		if (active_pri->file[body->start + i] != (BYTE)identifier[i])
 			return FALSE;
 	return !identifier[i];
 }
@@ -778,7 +778,7 @@ static HRESULT pri_lookup_blob(const WCHAR *name, UINT32 name_length, const BYTE
 	WCHAR path[PRI_MAX_PATH_UNITS];
 	UINT32 path_length, first, count;
 	for (UINT32 i = 0; i < active_pri->entry_count; ++i) {
-		if ((pri_state.entries[i].flags & 0x10) || !entry_path(i, path, ARRAYSIZE(path), &path_length)) continue;
+		if ((active_pri->entries[i].flags & 0x10) || !entry_path(i, path, ARRAYSIZE(path), &path_length)) continue;
 		if (CompareStringOrdinal(name, (int)name_length, path, (int)path_length, TRUE) != CSTR_EQUAL) continue;
 		if (!candidate_range(i, &first, &count) || !count) return E_BOUNDS;
 		const BYTE *candidate = active_pri->candidates + first * 8;
@@ -833,7 +833,7 @@ HRESULT raven_pri_open_map(const WCHAR *package, UINT32 package_length, const WC
 	map->package_length = package_length;
 	map->tried = TRUE;
 	if (!read_file(path, &data, &length))
-		return S_FALSE; /* no index where the manifest dependency says one should be; the map stays empty */
+		return S_FALSE;
 	/* parse_index_into reads the section directory through the active map, so the parse runs against the new state */
 	active_pri = &map->state;
 	const BOOL parsed = parse_index_into(&map->state, data, length);

@@ -63,6 +63,7 @@ struct load_context {
 	size_t table; /* absolute offset of the substream count */
 	size_t nodes; /* absolute offset of the first substream's nodes */
 	uint32_t count;
+	int tolerant; /* a framework dictionary's merge skips what the engine cannot store instead of refusing the document */
 };
 
 enum value_kind { value_none, value_string, value_bool, value_integer, value_float, value_color, value_enum };
@@ -772,6 +773,10 @@ static HRESULT resolve_resource(const struct scope *stack, size_t depth, int the
 	}
 	if (!effective_theme) requested_theme_name(&effective_theme, &effective_theme_length);
 	result = raven_xaml_system_color(key, length, effective_theme, effective_theme_length, out);
+	if (result != S_FALSE)
+		return result;
+	/* Below every dictionary: the platform's own default styles, which compiled documents base their styles on. */
+	result = raven_xaml_platform_resource(key, length, out);
 	return result == S_FALSE ? E_BOUNDS : result;
 }
 
@@ -846,6 +851,23 @@ static HRESULT add_to_dictionary(IInspectable *object, const struct value *key, 
 		value_object = value;
 	else if (constant && constant->kind == value_string && constant->text)
 		value_object = raven_xaml_boxed_string(constant->text, constant->length);
+	else if (constant && constant->kind == value_color) {
+		/* The value constants the framework dictionaries key directly: a packed ARGB colour boxes into the engine's
+		 * colour value, the same object the node-22 choreography builds for the app's own dictionaries. */
+		__x_ABI_CWindows_CUI_CColor color;
+		color.A = (BYTE)((constant->integer >> 24) & 0xff);
+		color.R = (BYTE)((constant->integer >> 16) & 0xff);
+		color.G = (BYTE)((constant->integer >> 8) & 0xff);
+		color.B = (BYTE)(constant->integer & 0xff);
+		if (FAILED(raven_color_value_create(&color, &value_object)))
+			value_object = NULL;
+	} else if (constant && constant->kind == value_enum) {
+		/* An enum constant boxes through the engine's enum value, the runtime class the stable table names. */
+		const WCHAR *enum_name = raven_xaml_class_by_stable(constant->enum_type);
+		if (enum_name && FAILED(raven_enum_value_create(enum_name, (UINT32)lstrlenW(enum_name),
+			(INT32)constant->integer, &value_object)))
+			value_object = NULL;
+	}
 	if (!value_object) {
 		result = E_NOTIMPL;
 		goto done;
@@ -1164,6 +1186,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
 	IInspectable *last_object = NULL;
+	BOOL nested_failed = FALSE;
 	IInspectable *completed_value = NULL;
 
 	IInspectable *pending_object = NULL;
@@ -1264,7 +1287,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						set_application_resources(scope->object, completed_value) :
 						raven_xaml_element_apply_value(scope->object, pending_name, pending_length, completed_value);
 					pending_name = NULL;
-					if (target && applied != S_OK) {
+					if (target && applied != S_OK && !context->tolerant) {
 						if (scope->object)
 							IInspectable_Release(scope->object);
 						status = FAILED(applied) ? applied : E_NOTIMPL;
@@ -1367,7 +1390,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					status = raven_enum_value_create(enum_name, (UINT32)lstrlenW(enum_name), (INT32)value.integer, &object);
 				}
 			}
-			if (target && (FAILED(status) || !object)) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
+			if (target && (FAILED(status) || !object) && !context->tolerant) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
 			/* The skip convention: a type the runtime cannot build is an unapplied value when no target demands it, and
 			 * a failed create must not poison the rest of the load. A malformed reference (E_INVALIDARG: the metadata
 			 * does not name a type at all) is not a skip — it refuses the document. */
@@ -1476,7 +1499,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					IInspectable_AddRef(object);
 				}
 			} else status = create_reference(m, reference, &object);
-			if (target && (FAILED(status) || !object)) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
+			if (target && (FAILED(status) || !object) && !context->tolerant) { if (SUCCEEDED(status)) status = E_UNEXPECTED; goto done; }
 			/* The skip convention: a type the runtime cannot build is an unapplied value when no target demands it, and
 			 * a failed create must not poison the rest of the load. A malformed reference (E_INVALIDARG: the metadata
 			 * does not name a type at all) is not a skip — it refuses the document. */
@@ -1494,7 +1517,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				} else {
 					if (pending_name && depth) {
 						HRESULT applied = raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
-						if (target && applied != S_OK) {
+						if (target && applied != S_OK && !context->tolerant) {
 							IInspectable_Release(object);
 							status = FAILED(applied) ? applied : E_NOTIMPL;
 							goto done;
@@ -1558,8 +1581,8 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				goto done;
 			if (depth && value.kind == value_string) {
 				HRESULT applied = raven_xaml_element_set_name(stack[depth - 1].object, value.text, value.length);
-				if (target && applied != S_OK) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
-			} else if (target) { status = E_NOTIMPL; goto done; }
+				if (target && applied != S_OK && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+			} else if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 7: case 19: case 32: {
@@ -1584,7 +1607,9 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					if (FAILED(status)) goto done;
 					memset(&stack[depth], 0, sizeof stack[depth]);
 					stack[depth].object = collection; stack[depth].kind = 5; ++depth;
-				} else {
+				} else if (!context->tolerant) {
+					/* The framework documents push collections the engine does not model (VisualStateGroups among
+					 * them); the tolerant merge skips the scope and the values under it, the skip convention. */
 					status = E_NOTIMPL; goto done;
 				}
 			} else {
@@ -1610,7 +1635,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				 * when the entry is read, the way a compiled App.xaml names a resource another dictionary defines. */
 				IInspectable *reference = NULL;
 				if (value.kind != value_string || !value.text) {
-					if (target) { status = E_NOTIMPL; goto done; }
+					if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 					break;
 				}
 				status = raven_xaml_resource_reference_create(value.text, value.length, kind == 35, &reference);
@@ -1620,7 +1645,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				pending_token = (uint32_t)(node_at - begin) + 1;
 				break;
 			}
-			if (target) { status = E_NOTIMPL; goto done; }
+			if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 10: {
@@ -1667,7 +1692,12 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				if (deferred) IInspectable_Release(deferred);
 				IInspectable_Release(pending_theme_dictionary);
 				pending_theme_dictionary = NULL;
-				if (target && FAILED(loaded)) { status = loaded; goto done; }
+				if (target && FAILED(loaded)) {
+					/* the nested load recorded its own node; the outer record must not overwrite it */
+					nested_failed = TRUE;
+					status = loaded;
+					goto done;
+				}
 			}
 			status = add_to_dictionary(depth ? stack[depth - 1].object : NULL, &key, value_object,
 				pending_value_valid ? &pending_value : NULL);
@@ -1681,7 +1711,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			 * activate, an unresolvable type) leaves the dictionary without the key when no target demands the
 			 * document complete; with a target the miss is refused. */
 			if (FAILED(status)) {
-				if (target) goto done;
+				if (target && !context->tolerant) goto done;
 				status = S_OK;
 			}
 			break;
@@ -1759,7 +1789,8 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					}
 					if (deferred)
 						IInspectable_Release(deferred);
-					if (target && FAILED(loaded)) {
+					if (target && FAILED(loaded) && !context->tolerant) {
+						nested_failed = TRUE;
 						status = loaded;
 						goto done;
 					}
@@ -1778,7 +1809,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			}
 			for (uint64_t index = 0; index < (uint64_t)statics + (uint64_t)themes; ++index)
 				next_u16(&r);
-			if (target) { status = E_NOTIMPL; goto done; }
+			if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 26: case 27: case 30: case 36: {
@@ -1811,8 +1842,8 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						IInspectable_Release(resolved);
 					}
 				}
-				if (target && applied != S_OK) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
-			} else if (target) { status = E_NOTIMPL; goto done; }
+				if (target && applied != S_OK && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+			} else if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 29: {
@@ -1826,14 +1857,17 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length)) &&
 				SUCCEEDED(type_reference_name(m, type_reference, &type_name, &type_length))) {
 				HRESULT applied = raven_xaml_element_set_type(stack[depth - 1].object, name, length, type_name, type_length);
-				if (target && applied != S_OK) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
-			} else if (target) { status = E_NOTIMPL; goto done; }
+				if (target && applied != S_OK && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+			} else if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		}
 		case 28: case 31: case 38:
 			next_u16(&r);
 			next_u16(&r);
-			if (target) { status = r.invalid ? E_INVALIDARG : E_NOTIMPL; goto done; }
+			/* TemplateBinding and the resolved-property forms apply when a template resolves them; a dictionary
+			 * document tolerates their presence the way it tolerates any value it cannot store. */
+			if (target && r.invalid) { status = E_INVALIDARG; goto done; }
+			if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		default: {
 			char message[] = "raven-xaml: unsupported XBF node 000\n";
@@ -1852,11 +1886,13 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 		}
 	}
 done:
-	if (FAILED(status)) {
+	/* The deepest failure is the evidence the caller wants: a nested load records its own node before the outer one
+	 * would overwrite it with the outer node. */
+	if (FAILED(status) && !nested_failed) {
 		last_failure_offset = (UINT32)node_at;
 		last_failure_status = status;
 	}
-	if (SUCCEEDED(status) && target && resource_map.remaining) {
+	if (SUCCEEDED(status) && target && resource_map.remaining && !context->tolerant) {
 		status = E_NOTIMPL;
 		for (uint32_t i = 0; i < resource_map.capacity; ++i)
 			if (resource_map.entries[i].token && !resource_map.entries[i].seen) { status = E_INVALIDARG; break; }
@@ -1877,6 +1913,12 @@ done:
 	return status;
 }
 
+/* The tolerant load the framework dictionary's merge uses: a document whose properties and objects the engine cannot
+ * all store still merges what it can. The loaders run on the calling thread only, so the flag rides in a static. The
+ * shape of the document is still validated; what is skipped is the application of values and objects the engine
+ * refuses, the skip convention the app-document walk already gives a load without a target. */
+static int g_tolerant_load;
+
 static HRESULT load_document(const void *data, uint32_t size, IInspectable **root, IInspectable *target)
 {
 	const uint8_t *bytes = (const uint8_t *)data;
@@ -1886,6 +1928,7 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 	struct load_context context;
 	HRESULT status;
 	BOOL target_used = FALSE;
+	context.tolerant = g_tolerant_load;
 	if (!root)
 		return E_POINTER;
 	*root = NULL;
@@ -1959,6 +2002,17 @@ __declspec(dllexport) HRESULT raven_xaml_load_into(const void *data, uint32_t si
 	IInspectable *root = NULL;
 	if (!target) return E_POINTER;
 	HRESULT result = load_document(data, size, &root, target);
+	if (root) IInspectable_Release(root);
+	return result;
+}
+
+__declspec(dllexport) HRESULT raven_xaml_load_into_tolerant(const void *data, uint32_t size, IInspectable *target)
+{
+	IInspectable *root = NULL;
+	if (!target) return E_POINTER;
+	g_tolerant_load = 1;
+	HRESULT result = load_document(data, size, &root, target);
+	g_tolerant_load = 0;
 	if (root) IInspectable_Release(root);
 	return result;
 }

@@ -114,10 +114,15 @@ HRESULT raven_color_value_of(IInspectable *object, __x_ABI_CWindows_CUI_CColor *
 HRESULT raven_enum_value_create(const WCHAR *type_name, UINT32 type_length, INT32 value, IInspectable **out);
 BOOL raven_enum_value_of(IInspectable *object, INT32 *value);
 HRESULT raven_xaml_system_color(const WCHAR *key, UINT32 length, const WCHAR *theme, UINT32 theme_length, IInspectable **out);
+/* The platform's authored default styles (the Default*Style family and the named typography styles the OS theme
+ * resources define), what a compiled document's BasedOn names: S_OK with the style, S_FALSE for any other key. */
+HRESULT raven_xaml_platform_resource(const WCHAR *key, UINT32 length, IInspectable **out);
 HRESULT raven_xaml_application_current(IInspectable **out);
 HRESULT raven_xaml_window_current(IInspectable **out);
 HRESULT raven_launch_arguments_create(IInspectable **out);
 HRESULT raven_xaml_load_into(const void *data, uint32_t size, IInspectable *target);
+/* The tolerant form: the framework dictionary's merge skips what the engine cannot apply instead of refusing. */
+HRESULT raven_xaml_load_into_tolerant(const void *data, uint32_t size, IInspectable *target);
 BOOL raven_xaml_loader_notify(DWORD reason, void *reserved);
 HRESULT raven_pri_get_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length);
 /* A package dependency's own resource map: registered from the manifest's PackageDependency elements with the index

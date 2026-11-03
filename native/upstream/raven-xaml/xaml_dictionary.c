@@ -383,6 +383,10 @@ static LONG source_depth;
 extern const WCHAR *raven_xaml_get_current_theme(UINT32 *length);
 extern void raven_xaml_set_pending_theme(const WCHAR *theme, UINT32 length);
 
+/* The framework merge adopts its documents tolerantly: the app's own Source loads refuse what the engine cannot apply,
+ * the framework dictionary keeps what it can. The loaders run on the calling thread only. */
+static int g_tolerant_adopt;
+
 static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
 {
 	static const WCHAR scheme[] = L"ms-appx://";
@@ -458,7 +462,10 @@ static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
 	UINT32 current_theme_length = 0;
 	const WCHAR *current_theme = raven_xaml_get_current_theme(&current_theme_length);
 	raven_xaml_set_pending_theme(current_theme, current_theme_length);
-	result = raven_xaml_load_into(blob, bytes, (IInspectable *)&loaded->resource);
+	if (g_tolerant_adopt)
+		result = raven_xaml_load_into_tolerant(blob, bytes, (IInspectable *)&loaded->resource);
+	else
+		result = raven_xaml_load_into(blob, bytes, (IInspectable *)&loaded->resource);
 	raven_xaml_set_pending_theme(NULL, 0);
 	if (FAILED(result))
 		goto done;
@@ -1432,13 +1439,14 @@ HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out)
  * framework package's own index through the host form of the ms-appx URI. A load that fails (a file the index does not
  * carry, a document the loader refuses) leaves that dictionary out of the merge — the missing keys then behave like the
  * missing keys they are, the way an absent framework package would. */
-static const WCHAR framework_themes[][48] = {
+static const WCHAR framework_themes[][64] = {
 	L"Microsoft.UI.Xaml/Themes/21h1_themeresources.xaml",
 	L"Microsoft.UI.Xaml/Themes/21h1_generic.xaml",
 };
 
 static void merge_framework_dictionaries(struct dictionary *dictionary, const WCHAR *package, UINT32 package_length)
 {
+	g_tolerant_adopt = 1;
 	for (UINT32 file = 0; file < ARRAYSIZE(framework_themes); ++file) {
 		static const WCHAR head[] = L"ms-appx://";
 		static const WCHAR tail[] = L"/";
@@ -1480,9 +1488,12 @@ static void merge_framework_dictionaries(struct dictionary *dictionary, const WC
 				result = E_OUTOFMEMORY;
 		}
 		dictionary_release(loaded);
-		if (FAILED(result))
+		if (FAILED(result)) {
+			g_tolerant_adopt = 0;
 			return;
+		}
 	}
+	g_tolerant_adopt = 0;
 }
 
 HRESULT raven_xaml_dictionary_create_controls_resources(IInspectable **out)
