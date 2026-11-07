@@ -989,3 +989,10 @@ CRT void raven_operator_delete(void *block) { free(block); }
 __asm__(".section .drectve\n\t.ascii \" -export:??2@YAPEAX_K@Z=raven_operator_new -export:??_U@YAPEAX_K@Z=raven_operator_new\"\n"
 	"\t.ascii \" -export:??3@YAXPEAX@Z=raven_operator_delete -export:??_V@YAXPEAX@Z=raven_operator_delete\"\n\t.text");
 #endif
+
+CRT char *_strrev(char *text)
+{
+	char *left = text, *right = text + strlen(text);
+	while (left < right && left < --right) { char c = *left; *left++ = *right; *right = c; }
+	return text;
+}

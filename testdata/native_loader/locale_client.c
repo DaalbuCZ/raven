@@ -19,6 +19,13 @@ static BOOL CALLBACK locale_found(LPWSTR name, DWORD flags, LPARAM parameter)
 	return FALSE;
 }
 
+static DWORD WINAPI language_thread(void *unused)
+{
+	(void)unused;
+	if (GetThreadUILanguage() != 0x409 || SetThreadUILanguage(0x40c) != 0x40c || GetThreadUILanguage() != 0x40c) return 1;
+	return 0;
+}
+
 int raven_entry(void)
 {
 	WCHAR text[64];
@@ -64,6 +71,15 @@ int raven_entry(void)
 	SetLastError(0);
 	if (EnumSystemLocalesEx(locale_found, 0x80000000, 0, NULL) || GetLastError() != ERROR_INVALID_FLAGS || enumerated != 2)
 		return 16;
+	{
+		if (GetThreadUILanguage() != 0x409 || SetThreadUILanguage(0x407) != 0x407 || GetThreadUILanguage() != 0x407) return 60;
+		HANDLE thread = CreateThread(NULL, 0, language_thread, NULL, 0, NULL);
+		DWORD code = 1;
+		if (!thread || WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 || !GetExitCodeThread(thread, &code) || code ||
+			GetThreadUILanguage() != 0x407 || SetThreadUILanguage(0xffff) != 0 || GetThreadUILanguage() != 0x407 ||
+			SetThreadUILanguage(0) != 0x409 || SetThreadUILanguage(0x409) != 0x409) return 61;
+		CloseHandle(thread);
+	}
 	if (!IsValidLocaleName(L"en-US") || !IsValidLocaleName(L"EN-us") || IsValidLocaleName(L"invalid-locale") || IsValidLocaleName(L"en-US-extra"))
 		return 17;
 	/* Names convert to identifiers and back; the culture-neutral "x-none" is no locale. */

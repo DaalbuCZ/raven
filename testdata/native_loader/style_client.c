@@ -22,8 +22,8 @@
  * stage runs after those: the statics come through the engine-internal export and through RoGetActivationFactory (the
  * cataloged class name resolves the same singleton), two DPs register with defaults carried on hand-rolled
  * IPropertyMetadata objects, the metadata readers round-trip name, TypeName, OwnerType and the default value's identity,
- * the duplicate (owner, name) contract refuses, the same name under another owner registers, RegisterAttached answers
- * E_NOTIMPL, UnsetValue is one identity-stable sentinel, and a Setter carrying a DP applies through put_Style to the same
+ * the duplicate (owner, name) contract refuses, the same name under another owner registers, RegisterAttached registers
+ * and rejects duplicates, UnsetValue is one identity-stable sentinel, and a Setter carrying a DP applies through put_Style to the same
  * pixels the name-string setters reach — the DP's registered name flowing into the same (name, value) pair store, read
  * back through setter_count/setter_at. The ControlTemplate stage runs after those: a Style setter named "Template" carries
  * the ControlTemplate object itself through the same (name, value) store, the button routes it to the store put_Template
@@ -1358,7 +1358,8 @@ int raven_entry(void)
 		WindowsDeleteString(owner_type.Name);
 		if (result != E_INVALIDARG)
 			return 165;
-		if (WindowsCreateString(grid_name, ARRAYSIZE(grid_name) - 1, &owner_type.Name) != S_OK)
+		if (WindowsCreateString(L"Double", (UINT32)lstrlenW(L"Double"), &property_type.Name) != S_OK ||
+			WindowsCreateString(grid_name, ARRAYSIZE(grid_name) - 1, &owner_type.Name) != S_OK)
 			return 166;
 		owner_type.Kind = TypeKind_Metadata;
 		result = dp_statics->lpVtbl->Register(dp_statics, font_key, property_type, owner_type, NULL, &grid_dp);
@@ -1367,10 +1368,13 @@ int raven_entry(void)
 		if (result != S_OK || !grid_dp)
 			return 167;
 	}
-	/* RegisterAttached answers the documented failure: no attached-property store exists to register into */
+	/* Attached registrations retain a distinct name and obey the same duplicate contract. */
 	{
 		type_name_s property_type, owner_type;
+		HSTRING attached_name = NULL;
+		dp_i *attached_dp = NULL;
 		HRESULT result;
+		if (WindowsCreateString(L"FixtureAttached", 15, &attached_name) != S_OK) return 168;
 		if (WindowsCreateString(L"Double", (UINT32)lstrlenW(L"Double"), &property_type.Name) != S_OK)
 			return 168;
 		property_type.Kind = TypeKind_Primitive;
@@ -1379,10 +1383,15 @@ int raven_entry(void)
 			return 168;
 		}
 		owner_type.Kind = TypeKind_Metadata;
-		result = dp_statics->lpVtbl->RegisterAttached(dp_statics, font_key, property_type, owner_type, NULL, &grid_dp);
+		result = dp_statics->lpVtbl->RegisterAttached(dp_statics, attached_name, property_type, owner_type, NULL, &attached_dp);
+		if (result != S_OK || !attached_dp) return 169;
+		attached_dp->lpVtbl->Release(attached_dp);
+		attached_dp = NULL;
+		result = dp_statics->lpVtbl->RegisterAttached(dp_statics, attached_name, property_type, owner_type, NULL, &attached_dp);
+		WindowsDeleteString(attached_name);
 		WindowsDeleteString(property_type.Name);
 		WindowsDeleteString(owner_type.Name);
-		if (result != E_NOTIMPL)
+		if (result != E_INVALIDARG || attached_dp)
 			return 169;
 	}
 	/* UnsetValue: one identity-stable sentinel across the calls */

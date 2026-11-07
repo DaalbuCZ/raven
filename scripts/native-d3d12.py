@@ -18,15 +18,19 @@ import sys
 
 def main():
     raven, workload, vkd3d, dxvk, work = map(Path, sys.argv[1:6])
-    gpu = len(sys.argv) > 6 and sys.argv[6] == "gpu"
+    gpu = "gpu" in sys.argv[6:]
+    runtime = "runtime" in sys.argv[6:]
     shutil.rmtree(work, ignore_errors=True)
     run, prefix = work / "run", work / "prefix"
     run.mkdir(parents=True)
-    for name in ("d3d12.dll", "d3d12core.dll"):
-        shutil.copy(vkd3d / name, run / name)
-    shutil.copy(dxvk / "dxgi.dll", run / "dxgi.dll")
+    if not runtime:
+        for name in ("d3d12.dll", "d3d12core.dll"):
+            shutil.copy(vkd3d / name, run / name)
+        shutil.copy(dxvk / "dxgi.dll", run / "dxgi.dll")
     shutil.copy(workload, run / "device.exe")
     env = os.environ | {"RAVEN_PREFIX": str(prefix)}
+    if runtime:
+        env.pop("RAVEN_D3D_DIRECTORY", None)
     lavapipe = Path("/usr/share/vulkan/icd.d/lvp_icd.json")
     if not gpu and "VK_DRIVER_FILES" not in env and lavapipe.exists():
         env["VK_DRIVER_FILES"] = str(lavapipe)

@@ -18,6 +18,7 @@ HRESULT raven_desktop_create(__x_ABI_CWindows_CUI_CCore_CICoreWindow *owner, str
 HRESULT raven_desktop_close(struct raven_desktop_window *window);
 void raven_desktop_free(struct raven_desktop_window *window);
 HRESULT raven_desktop_handle(struct raven_desktop_window *window, HWND *out);
+HRESULT raven_desktop_minimum_size(struct raven_desktop_window *window, __x_ABI_CWindows_CFoundation_CSize size);
 HRESULT raven_desktop_bounds(struct raven_desktop_window *window, __x_ABI_CWindows_CFoundation_CRect *out);
 HRESULT raven_desktop_pointer_position(struct raven_desktop_window *window, __x_ABI_CWindows_CFoundation_CPoint *out);
 HRESULT raven_desktop_capture(struct raven_desktop_window *window, BOOL capture);

@@ -30,6 +30,8 @@ public:
 		bool parent_exists = false;
 	};
 	std::optional<Resolved> resolve(std::u16string_view path) const;
+	// The manifest beside the image identifies its package root; fixtures may put it under the image stem.
+	std::optional<std::u16string> application_package_root(std::u16string_view image_path) const;
 	// DOS spelling of a host path inside a mapped drive.
 	std::u16string dos(const std::filesystem::path &host) const;
 	// User name shown to the guest; the host login name keeps profiles of different accounts apart.

@@ -1,6 +1,21 @@
 #include <windows.h>
 
 static DWORD tls, fls;
+static volatile LONG callbacks, stale_values;
+
+static VOID NTAPI destroy_value(void *value)
+{
+	if (value == (void *)0x5678)
+		InterlockedIncrement(&callbacks);
+}
+
+static void NTAPI thread_notification(PVOID module, DWORD reason, PVOID reserved)
+{
+	(void)module; (void)reserved;
+	if (reason == DLL_THREAD_DETACH && FlsGetValue(fls))
+		InterlockedIncrement(&stale_values);
+}
+static PIMAGE_TLS_CALLBACK notification __attribute__((section(".CRT$XLB"), used)) = thread_notification;
 
 // A new thread starts with empty slots, even when it gets the thread block of one that ended.
 static DWORD WINAPI worker(void *parameter)
@@ -16,7 +31,7 @@ static DWORD WINAPI worker(void *parameter)
 int main(void)
 {
 	tls = TlsAlloc();
-	fls = FlsAlloc(NULL);
+	fls = FlsAlloc(destroy_value);
 	if (tls == TLS_OUT_OF_INDEXES || fls == FLS_OUT_OF_INDEXES)
 		return 1;
 	for (int round = 0; round < 32; round++) {
@@ -28,5 +43,5 @@ int main(void)
 		if (code)
 			return 10 + round;
 	}
-	return 0;
+	return callbacks == 32 && !stale_values ? 0 : 50;
 }

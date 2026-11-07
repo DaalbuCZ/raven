@@ -2,7 +2,10 @@
 #define INITGUID
 #define CINTERFACE
 #define COBJMACROS
+#define WIDL_using_Windows_ApplicationModel_Core
 #include <windows.h>
+#include <roapi.h>
+#include <windows.applicationmodel.core.h>
 #include <winstring.h>
 #include <activation.h>
 #include "windows_ui_xaml_application.h"
@@ -13,6 +16,7 @@
 
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
+typedef void (__cdecl *last_failure_function)(UINT32 *, HRESULT *);
 typedef HRESULT (WINAPI *load_function)(const void *, uint32_t, IInspectable **);
 HRESULT WINAPI GetRestrictedErrorInfo(void **info);
 
@@ -61,7 +65,28 @@ static HRESULT WINAPI callback_invoke(struct callback *self, void *parameters)
 {
 	IInspectable *params = (IInspectable *)parameters;
 	IInspectable *queried = NULL;
+	static const WCHAR core_name[] = L"Windows.ApplicationModel.Core.CoreApplication";
+	HSTRING key = NULL;
+	ICoreApplication *core = NULL;
+	ICoreApplicationView *view = NULL, *again = NULL;
+	ICoreApplicationView3 *third = NULL;
+	ICoreApplicationViewTitleBar *titlebar = NULL;
+	boolean extended = FALSE;
 	if (!params) return E_POINTER;
+	if (WindowsCreateString(core_name, ARRAYSIZE(core_name)-1, &key) != S_OK ||
+		RoGetActivationFactory(key, &IID_ICoreApplication, (void **)&core) != S_OK || !core ||
+		ICoreApplication_GetCurrentView(core, &view) != S_OK || !view ||
+		ICoreApplication_GetCurrentView(core, &again) != S_OK || again != view) return E_FAIL;
+	if (ICoreApplicationView_QueryInterface(view, &IID_ICoreApplicationView3, (void **)&third) != S_OK || !third ||
+		ICoreApplicationView3_get_TitleBar(third, &titlebar) != S_OK || !titlebar ||
+		ICoreApplicationViewTitleBar_put_ExtendViewIntoTitleBar(titlebar, TRUE) != S_OK ||
+		ICoreApplicationViewTitleBar_get_ExtendViewIntoTitleBar(titlebar, &extended) != S_OK || !extended) return E_FAIL;
+	ICoreApplicationViewTitleBar_Release(titlebar);
+	ICoreApplicationView3_Release(third);
+	ICoreApplicationView_Release(again);
+	ICoreApplicationView_Release(view);
+	ICoreApplication_Release(core);
+	WindowsDeleteString(key);
 	if (params->lpVtbl->QueryInterface(params, &IID__x_ABI_CWindows_CUI_CXaml_CIApplicationInitializationCallbackParams,
 		(void **)&queried) != S_OK || !queried) return E_NOINTERFACE;
 	queried->lpVtbl->Release(queried);

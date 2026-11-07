@@ -73,13 +73,13 @@ static int equal_iid(REFIID left, const IID *right)
 
 /* Method slots the engine does not implement yet answer E_NOTIMPL. Each stub carries the exact signature of its slot, so a call
  * never depends on an argument count the metadata did not give. */
-#define STUB0(iface, name) static HRESULT WINAPI name(iface *This) { (void)This;return E_NOTIMPL; }
-#define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) { (void)This; (void)a1;return E_NOTIMPL; }
+#define STUB0(iface, name) static HRESULT WINAPI name(iface *This) { (void)This;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
+#define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) { (void)This; (void)a1;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB2(iface, name) \
-	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) { (void)This; (void)a1; (void)a2;return E_NOTIMPL; }
+	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) { (void)This; (void)a1; (void)a2;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB3(iface, name) \
 	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2, uint64_t a3) \
-	{ (void)This; (void)a1; (void)a2; (void)a3;return E_NOTIMPL; }
+	{ (void)This; (void)a1; (void)a2; (void)a3;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 struct application;
 
@@ -99,7 +99,7 @@ struct application {
 	IInspectable *outer;
 	LONG exited;
 	INT32 requested_theme;
-	struct raven_event_list suspending, resuming;
+	struct raven_event_list suspending, resuming, unhandled_exception;
 	/* The ResourceDictionary the application assigns through put_Resources; a reference the application object owns. */
 	IInspectable *resources;
 };
@@ -171,11 +171,11 @@ static HRESULT WINAPI application1_put_RequestedTheme(xaml_application1 *iface, 
 	((struct application1_part *)iface)->owner->requested_theme = (INT32)value;
 	return S_OK;
 }
-STUB2(xaml_application1, application1_add_UnhandledException)
-STUB1(xaml_application1, application1_remove_UnhandledException)
+
 #define APPLICATION_EVENT(NAME, FIELD) \
 	static HRESULT WINAPI application1_add_##NAME(xaml_application1 *iface, uint64_t handler, uint64_t token) \
 	{ \
+		{ char note[64]; wsprintfA(note, "raven-app: add_" #NAME " reached\n"); OutputDebugStringA(note); } \
 		return raven_event_add(&((struct application1_part *)iface)->owner->FIELD, (IUnknown *)(uintptr_t)handler, \
 			(EventRegistrationToken *)(uintptr_t)token); \
 	} \
@@ -187,6 +187,7 @@ STUB1(xaml_application1, application1_remove_UnhandledException)
 	}
 APPLICATION_EVENT(Suspending, suspending)
 APPLICATION_EVENT(Resuming, resuming)
+APPLICATION_EVENT(UnhandledException, unhandled_exception)
 STUB1(xaml_application2, application2_get_FocusVisualKind)
 STUB1(xaml_application2, application2_put_FocusVisualKind)
 STUB1(xaml_application2, application2_get_RequiresPointerMode)
@@ -260,6 +261,7 @@ static ULONG application_release(struct application *self)
 	if (!refs) {
 		raven_event_close(&self->suspending);
 		raven_event_close(&self->resuming);
+		raven_event_close(&self->unhandled_exception);
 		DeleteCriticalSection(&self->suspending.lock);
 		DeleteCriticalSection(&self->resuming.lock);
 		if (self->resources)
@@ -492,6 +494,7 @@ static struct application *create_application(IInspectable *outer)
 	application->outer = outer;
 	InitializeCriticalSection(&application->suspending.lock);
 	InitializeCriticalSection(&application->resuming.lock);
+	InitializeCriticalSection(&application->unhandled_exception.lock);
 	InterlockedIncrement(&raven_xaml_objects);
 	return application;
 }
@@ -692,9 +695,13 @@ static HRESULT WINAPI statics_Start(xaml_application_statics *iface, uint64_t ca
 		params_release((application_params *)parameters);
 		return E_ILLEGAL_METHOD_CALL;
 	}
-	result = invoke((void *)(uintptr_t)callback, (IInspectable *)parameters);
+	result = raven_application_enter_xaml();
+	if (SUCCEEDED(result)) {
+		result = invoke((void *)(uintptr_t)callback, (IInspectable *)parameters);
+		if (SUCCEEDED(result)) result = start_application();
+		raven_application_leave_xaml();
+	}
 	params_release((application_params *)parameters);
-	if (SUCCEEDED(result)) result = start_application();
 	InterlockedExchange((LONG *)&startup_thread, 0);
 	return result;
 }

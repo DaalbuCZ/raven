@@ -6,6 +6,7 @@
 #include <winstring.h>
 #include <activation.h>
 #include <windows.applicationmodel.h>
+#include <windows.storage.h>
 
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
@@ -28,6 +29,16 @@ static int same_text(HSTRING value, const WCHAR *expected)
 
 int raven_entry(void)
 {
+	{
+		HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+		HMODULE (WINAPI *load_packaged)(const WCHAR *, DWORD) = kernel ? (void *)GetProcAddress(kernel, "LoadPackagedLibrary") : NULL;
+		if (!load_packaged) return 45;
+		HMODULE library = load_packaged(L"fixture-winrt", 0);
+		if (!library || !GetProcAddress(library, "DllGetActivationFactory")) return 46;
+		FreeLibrary(library);
+		if (load_packaged(L"..\\fixture-winrt.dll", 0) || GetLastError() != ERROR_INVALID_PARAMETER) return 47;
+		if (load_packaged(L"fixture-winrt.dll", 1) || GetLastError() != ERROR_INVALID_PARAMETER) return 48;
+	}
 	static const WCHAR name[] = L"Windows.ApplicationModel.Package";
 	HMODULE runtime = LoadLibraryW(L"combase.dll");
 	initialize_function RoInitialize = runtime ? (initialize_function)GetProcAddress(runtime, "RoInitialize") : NULL;
@@ -46,20 +57,86 @@ int raven_entry(void)
 	if (FAILED(RoInitialize(1))) return 1;
 	if (WindowsCreateString(name, ARRAYSIZE(name) - 1, &class_key) != S_OK || !class_key) return 21;
 	if (RoGetActivationFactory(class_key, &IID_IActivationFactory, (void **)&activation) != S_OK || !activation) return 2;
+	{
+		IUnknown *agile = NULL, *base = NULL;
+		if (activation->lpVtbl->QueryInterface(activation, &IID_IAgileObject, (void **)&agile) != S_OK || !agile ||
+			agile->lpVtbl->QueryInterface(agile, &IID_IUnknown, (void **)&base) != S_OK || base != (IUnknown *)activation) return 49;
+		base->lpVtbl->Release(base);
+		agile->lpVtbl->Release(agile);
+	}
 	/* a second activation of the class hands out the same factory object */
 	if (RoGetActivationFactory(class_key, &IID_IActivationFactory, (void **)&activation_again) != S_OK ||
 		activation_again != activation) return 3;
 	if (activation->lpVtbl->QueryInterface(activation, &IID___x_ABI_CWindows_CApplicationModel_CIPackageStatics,
 		(void **)&statics) != S_OK || !statics) return 4;
 	/* the package of the process is a singleton: two asks answer the same object */
+	/* The immutable singleton may be projected across apartments. */
+
 	if (statics->lpVtbl->get_Current(statics, &current) != S_OK || !current) return 5;
 	if (statics->lpVtbl->get_Current(statics, &current_again) != S_OK || current_again != current) return 6;
+	{
+		IUnknown *agile = NULL, *base = NULL;
+		if (current->lpVtbl->QueryInterface(current, &IID_IAgileObject, (void **)&agile) != S_OK || !agile ||
+			agile->lpVtbl->QueryInterface(agile, &IID_IUnknown, (void **)&base) != S_OK || base != (IUnknown *)current) return 50;
+		base->lpVtbl->Release(base);
+		agile->lpVtbl->Release(agile);
+	}
 	if (current->lpVtbl->GetRuntimeClassName(current, &text) != S_OK ||
 		!same_text(text, L"Windows.ApplicationModel.Package")) return 7;
 	WindowsDeleteString(text);
 	text = NULL;
-	if (current->lpVtbl->QueryInterface(current, &IID___x_ABI_CWindows_CApplicationModel_CIPackageId, (void **)&id) != S_OK ||
-		!id) return 8;
+	if (current->lpVtbl->get_Id(current, &id) != S_OK || !id) return 8;
+	{
+		IUnknown *id_identity = NULL, *package_identity = NULL;
+		void *wrong = NULL;
+		if (id->lpVtbl->QueryInterface(id, &IID_IUnknown, (void **)&id_identity) != S_OK || id_identity != (IUnknown *)id ||
+			current->lpVtbl->QueryInterface(current, &IID_IUnknown, (void **)&package_identity) != S_OK || package_identity == id_identity ||
+			id->lpVtbl->QueryInterface(id, &IID___x_ABI_CWindows_CApplicationModel_CIPackage, &wrong) != E_NOINTERFACE || wrong ||
+			current->lpVtbl->QueryInterface(current, &IID___x_ABI_CWindows_CApplicationModel_CIPackageId, &wrong) != E_NOINTERFACE || wrong) return 51;
+		id_identity->lpVtbl->Release(id_identity);
+		package_identity->lpVtbl->Release(package_identity);
+	}
+	{
+		__x_ABI_CWindows_CStorage_CIStorageFolder *location = NULL, *again = NULL;
+		__x_ABI_CWindows_CStorage_CIStorageItem *item = NULL;
+		__FIAsyncOperation_1_Windows__CStorage__CStorageFile *operation = NULL;
+		__x_ABI_CWindows_CStorage_CIStorageFile *created = NULL;
+		HSTRING name = NULL, path = NULL;
+		if (current->lpVtbl->get_InstalledLocation(current, &location) != S_OK || !location ||
+			current->lpVtbl->get_InstalledLocation(current, &again) != S_OK || again != location ||
+			location->lpVtbl->QueryInterface(location, &IID___x_ABI_CWindows_CStorage_CIStorageItem, (void **)&item) != S_OK || !item ||
+			item->lpVtbl->get_Path(item, &path) != S_OK || !WindowsGetStringLen(path) ||
+			GetFileAttributesW(WindowsGetStringRawBuffer(path, NULL)) == INVALID_FILE_ATTRIBUTES ||
+			WindowsCreateString(L"raven-package-readonly.txt", 26, &name) != S_OK ||
+			location->lpVtbl->CreateFileAsync(location, name, CreationCollisionOption_ReplaceExisting, &operation) != S_OK || !operation ||
+			operation->lpVtbl->GetResults(operation, &created) != E_ACCESSDENIED || created) return 52;
+		operation->lpVtbl->Release(operation);
+		WindowsDeleteString(name);
+		{
+			static const WCHAR leaf[] = L"raven-package-protected.tmp";
+			WCHAR full[MAX_PATH];
+			const WCHAR *root = WindowsGetStringRawBuffer(path, NULL);
+			if (lstrlenW(root) + 1 + ARRAYSIZE(leaf) >= MAX_PATH) return 53;
+			lstrcpyW(full, root); lstrcatW(full, L"\\"); lstrcatW(full, leaf);
+			HANDLE file = CreateFileW(full, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+			if (file == INVALID_HANDLE_VALUE) return 54;
+			CloseHandle(file);
+			__x_ABI_CWindows_CStorage_CIStorageItem *file_item = NULL;
+			__x_ABI_CWindows_CFoundation_CIAsyncAction *deletion = NULL;
+			operation = NULL;
+			if (WindowsCreateString(leaf, ARRAYSIZE(leaf) - 1, &name) != S_OK ||
+				location->lpVtbl->GetFileAsync(location, name, &operation) != S_OK || !operation ||
+				operation->lpVtbl->GetResults(operation, &created) != S_OK || !created ||
+				created->lpVtbl->QueryInterface(created, &IID___x_ABI_CWindows_CStorage_CIStorageItem, (void **)&file_item) != S_OK || !file_item ||
+				file_item->lpVtbl->DeleteAsyncOverloadDefaultOptions(file_item, &deletion) != S_OK || !deletion ||
+				deletion->lpVtbl->GetResults(deletion) != E_ACCESSDENIED || GetFileAttributesW(full) == INVALID_FILE_ATTRIBUTES) return 55;
+			deletion->lpVtbl->Release(deletion); file_item->lpVtbl->Release(file_item); created->lpVtbl->Release(created);
+			operation->lpVtbl->Release(operation); WindowsDeleteString(name);
+			if (!DeleteFileW(full)) return 56;
+		}
+		WindowsDeleteString(path);
+		item->lpVtbl->Release(item); again->lpVtbl->Release(again); location->lpVtbl->Release(location);
+	}
 	if (id->lpVtbl->get_Name(id, &text) != S_OK || !same_text(text, L"Raven.Fixture")) return 9;
 	WindowsDeleteString(text);
 	text = NULL;
@@ -118,6 +195,25 @@ int raven_entry(void)
 		WindowsDeleteString(full);
 		WindowsDeleteString(publisher_id);
 		WindowsDeleteString(family);
+	}
+	{
+		static const WCHAR *classes[] = { L"Fixture.PackagedClass", L"Fixture.WrongCategory", L"Fixture.Traversal" };
+		static const HRESULT results[] = { S_OK, REGDB_E_CLASSNOTREG, E_INVALIDARG };
+		for (UINT32 i = 0; i < ARRAYSIZE(classes); ++i) {
+			HSTRING key = NULL;
+			IActivationFactory *packaged = NULL;
+			if (WindowsCreateString(classes[i], lstrlenW(classes[i]), &key) != S_OK) return 40;
+			HRESULT result = RoGetActivationFactory(key, &IID_IActivationFactory, (void **)&packaged);
+			WindowsDeleteString(key);
+			if (result != results[i]) return 41 + i;
+			if (i == 0) {
+				HSTRING actual = NULL;
+				if (!packaged || packaged->lpVtbl->GetRuntimeClassName(packaged, &actual) != S_OK ||
+					!same_text(actual, L"Fixture.PackagedClass")) return 44;
+				WindowsDeleteString(actual);
+				packaged->lpVtbl->Release(packaged);
+			}
+		}
 	}
 	display->lpVtbl->Release(display);
 	id->lpVtbl->Release(id);

@@ -181,7 +181,7 @@ static HRESULT timer_arm(struct timer *self, BOOL restart)
 {
 	struct queue *queue = self->queue;
 	UINT64 milliseconds = interval_ms(self), now = GetTickCount64();
-	if (milliseconds > ~(UINT64)0 - now) return E_INVALIDARG;
+	if (milliseconds > ~(UINT64)0 - now) { OutputDebugStringA("raven-xaml: dispatcher delay overflow\n"); return E_INVALIDARG; }
 	UINT_PTR id = 0x40000000U | (UINT32)InterlockedIncrement(&next_timer_id);
 	UINT delay = milliseconds > USER_TIMER_MAXIMUM ? USER_TIMER_MAXIMUM : (UINT)milliseconds;
 	if (!SetTimer(queue->hwnd, id, delay, NULL)) return last_error();
@@ -212,7 +212,7 @@ static HRESULT WINAPI timer_interval(IDispatcherQueueTimer *iface, TimeSpan *out
 }
 static HRESULT WINAPI timer_put_interval(IDispatcherQueueTimer *iface, TimeSpan value)
 {
-	if (value.Duration < 0) return E_INVALIDARG;
+	if (value.Duration < 0) { OutputDebugStringA("raven-xaml: dispatcher negative delay\n"); return E_INVALIDARG; }
 	struct timer *self = (void *)iface;
 	EnterCriticalSection(&self->queue->lock);
 	TimeSpan previous = self->interval;
@@ -388,7 +388,7 @@ static HRESULT WINAPI queue_enqueue_priority(IDispatcherQueue *iface, Dispatcher
 	case DispatcherQueuePriority_Low: rank = CoreDispatcherPriority_Low; break;
 	case DispatcherQueuePriority_Normal: rank = CoreDispatcherPriority_Normal; break;
 	case DispatcherQueuePriority_High: rank = CoreDispatcherPriority_High; break;
-	default: return E_INVALIDARG;
+	default: OutputDebugStringA("raven-xaml: dispatcher priority refused\n"); return E_INVALIDARG;
 	}
 	struct work *work = new_work();
 	if (!work) return E_OUTOFMEMORY;
@@ -487,7 +487,7 @@ static HRESULT WINAPI shutdown_get_deferral(IDispatcherQueueShutdownStartingEven
 	/* Refusal: the immediate CoreWindow-owned close (raven_dispatcher_queue_close) finishes synchronously on the
 	 * window thread and cannot wait for a deferral. Deferrals are honored on the controller's own pump, where the
 	 * close work is an ordinary queued item that can be re-posted. */
-	if (!self->deferral_ok) return E_NOTIMPL;
+	if (!self->deferral_ok) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	return queue_deferral_create(self->queue, out);
 }
 static const IDispatcherQueueShutdownStartingEventArgsVtbl shutdown_table = {
@@ -1153,6 +1153,19 @@ static HRESULT WINAPI dedicated_create(IDispatcherQueueControllerStatics *iface,
 	}
 	*out = &controller->iface;
 	return S_OK;
+}
+/* The native CoreMessaging entry point uses the same dedicated controller as the WinRT factory. */
+struct dispatcher_queue_options { DWORD size, thread_type, apartment_type; };
+__declspec(dllexport) HRESULT WINAPI CreateDispatcherQueueController(struct dispatcher_queue_options options,
+	IDispatcherQueueController **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (options.size != sizeof options || (options.thread_type != 1 && options.thread_type != 2) || options.apartment_type > 2)
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at dispatcher_queue.c:1165\n"); return E_INVALIDARG; }
+	/* shortcut: current-thread queues and explicit COM apartments need their own lifecycle; implement before accepting them. */
+	if (options.thread_type != 1 || options.apartment_type != 0) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
+	return dedicated_create(NULL, out);
 }
 static const IActivationFactoryVtbl factory_table = {
 	factory_interface_query, factory_addref, factory_release, factory_iids, factory_class, factory_trust, factory_activate

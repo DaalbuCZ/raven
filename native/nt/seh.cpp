@@ -284,6 +284,36 @@ public:
 					if (offset != 0x98)
 						std::fprintf(stderr, " %llx", (unsigned long long)load64(origin, offset));
 				std::fprintf(stderr, "\n");
+				// The .NET dead-reference marker (0xBAADF00D at object+0x10) dereferenced: show the dead object itself.
+				if (load64(origin, 0x80) == 0xffffffffbaadf00dULL) {
+					try {
+						const auto object = load64(origin, 0xb0);
+						const auto bytes = context.process.read_memory(object, 128);
+						std::fprintf(stderr, "raven:   dead object %llx", (unsigned long long)object);
+						for (size_t at = 0; at < bytes.size(); at += 8) {
+							uint64_t value = 0;
+							std::memcpy(&value, bytes.data() + at, 8);
+							std::fprintf(stderr, " %016llx", (unsigned long long)value);
+						}
+						uint64_t vtable = 0;
+						std::memcpy(&vtable, bytes.data(), 8);
+						const auto *owner = unwinder.module_at(vtable);
+						if (owner)
+							std::fprintf(stderr, " (vtable in %s+%llx)", owner->name.c_str(), (unsigned long long)(vtable - owner->loaded.base()));
+						std::fprintf(stderr, "\n");
+					} catch (const std::exception &) {
+					}
+				}
+				// A call through a null interface pointer faults with the requested interface id in Rdx; show it.
+				if (load64(origin, 0x80) == 0) {
+					try {
+						const auto iid = context.process.read_memory(load64(origin, 0x88), 16);
+						std::fprintf(stderr, "raven:   null interface call asks %08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+							le32(iid, 0), le32(iid, 4) >> 16, le32(iid, 4) & 0xffffU,
+							iid[8], iid[9], iid[10], iid[11], iid[12], iid[13], iid[14], iid[15]);
+					} catch (const std::exception &) {
+					}
+				}
 			}
 			if (le32(record, 0) == 0xe06d7363U && le32(record, 0x18) >= 4) {
 				// A C++ exception names the types it can be caught as, from its throw information, and shows the start of the thrown object.

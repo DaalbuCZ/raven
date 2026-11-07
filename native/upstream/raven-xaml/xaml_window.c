@@ -293,7 +293,7 @@ static HRESULT WINAPI window_compositor(xaml_window3 *iface, uint64_t out)
 		return E_POINTER;
 	*(void **)(uintptr_t)out = NULL;
 	/* The composition layer is a later stage. */
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI window_ui_context(xaml_window4 *iface, uint64_t out)
@@ -302,7 +302,7 @@ static HRESULT WINAPI window_ui_context(xaml_window4 *iface, uint64_t out)
 	if (!out)
 		return E_POINTER;
 	*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const __x_ABI_CWindows_CUI_CXaml_CIWindowVtbl window1_table = {

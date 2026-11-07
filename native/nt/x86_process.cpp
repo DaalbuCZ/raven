@@ -18,6 +18,7 @@
 #include "actctx.h"
 #include "child_process.h"
 #include "paths.h"
+#include "text.h"
 #include "x86_compat_api.h"
 #include "registry_words.h"
 #include "system_exports.h"
@@ -797,6 +798,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativePaths paths(prefix);
 	paths.set_wow64(true);
+	if (const auto root = paths.application_package_root(launch->image_path)) module_api.set_package_root(to_utf8(*root));
 	paths.set_package_roots([&registry] { return virtual_package_roots(registry); });
 	if (!launch->directory.empty())
 		paths.set_current(launch->directory);

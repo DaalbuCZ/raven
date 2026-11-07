@@ -1,5 +1,6 @@
 #include <string>
 #include "loader.h"
+#include "apiset.h"
 #include "providers.h"
 
 #include <algorithm>
@@ -27,6 +28,7 @@ int main(int argc,char **argv)
 {
 	try {
 		check(argc==3 || argc==4,"bootstrap, lifecycle directory and optional PE32 fixture required");
+		check(raven::apiset_host("api-ms-win-core-version-l1-1-1.dll") == "version.dll", "version API set host differs");
 		const std::filesystem::path directory=argv[2];
 		const auto client=read_file(directory/"client.exe"),base=read_file(directory/"base.dll"),dependent=read_file(directory/"dependent.dll");
 		const std::array<std::string_view,1> native{"kernel32.dll"};

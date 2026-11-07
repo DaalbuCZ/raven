@@ -31,6 +31,7 @@
 #include "windows_ui_xaml_style.h"
 #include <stdint.h>
 #include <winstring.h>
+#include "xbf_type_names.h"
 static const WCHAR *g_current_effective_theme;
 static UINT32 g_current_effective_theme_length;
 static const WCHAR *g_pending_effective_theme;
@@ -62,6 +63,7 @@ struct load_context {
 	const struct metadata *m;
 	size_t table; /* absolute offset of the substream count */
 	size_t nodes; /* absolute offset of the first substream's nodes */
+	size_t size; /* complete document bytes retained by deferred dictionaries */
 	uint32_t count;
 	int tolerant; /* a framework dictionary's merge skips what the engine cannot store instead of refusing the document */
 };
@@ -146,7 +148,7 @@ static HRESULT read_string_ref(struct reader *r, const WCHAR **text, UINT32 *len
 {
 	const int32_t size = next_i32(r);
 	if (r->invalid || size < 0 || (size_t)size > (r->end - r->at) / 2)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:151\n"); return E_INVALIDARG; }
 	*text = (const WCHAR *)(const void *)(r->data + r->at);
 	*length = (UINT32)size;
 	r->at += (size_t)size * 2;
@@ -174,11 +176,11 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 	m->data = data;
 	m->size = size;
 	if (start + 56 > size)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:179\n"); return E_INVALIDARG; }
 	for (int index = 0; index < 6; ++index) {
 		offsets[index] = read_u64(data + start + 8 + index * 8);
 		if (offsets[index] > size - start || size - start - (size_t)offsets[index] < 4)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:183\n"); return E_INVALIDARG; }
 	}
 	m->strings = start + (size_t)offsets[0];
 	m->assemblies = start + (size_t)offsets[1];
@@ -197,7 +199,7 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 		!metadata_bounds(m, m->types + 4, m->type_count, 12) ||
 		!metadata_bounds(m, m->properties + 4, m->property_count, 12) ||
 		!metadata_bounds(m, m->xmlns + 4, m->xmlns_count, 4))
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:202\n"); return E_INVALIDARG; }
 	/* Test both encodings independently: a bad plain-string interpretation must not reject a terminated table. */
 	for (int terminated = 0; terminated < 2; ++terminated) {
 		BOOL valid = TRUE;
@@ -218,28 +220,28 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 			return S_OK;
 		}
 	}
-	return E_INVALIDARG;
+	{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:223\n"); return E_INVALIDARG; }
 }
 
 static HRESULT metadata_string(const struct metadata *m, uint32_t id, const WCHAR **text, UINT32 *length)
 {
 	size_t position = m->strings + 4;
 	if (id >= m->string_count)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:230\n"); return E_INVALIDARG; }
 	for (uint32_t index = 0; index < id; ++index) {
 		int32_t size;
 		if (position + 4 > m->size)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:234\n"); return E_INVALIDARG; }
 		size = (int32_t)read_u32(m->data + position);
 		if (size < 0)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:237\n"); return E_INVALIDARG; }
 		position += 4 + (size_t)size * 2 + (m->null_terminated ? 2 : 0);
 	}
 	if (position + 4 > m->size)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:241\n"); return E_INVALIDARG; }
 	*length = read_u32(m->data + position);
 	if ((size_t)*length * 2 > m->size - (position + 4))
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:244\n"); return E_INVALIDARG; }
 	*text = (const WCHAR *)(const void *)(m->data + position + 4);
 	return S_OK;
 }
@@ -259,37 +261,37 @@ static HRESULT metadata_type_name(const struct metadata *m, uint32_t id, WCHAR *
 	const WCHAR *namespace_text = NULL, *name_text = NULL;
 	UINT32 namespace_length = 0, name_length = 0;
 	if (id >= m->type_count)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:264\n"); return E_INVALIDARG; }
 	position = m->types + 4 + (size_t)id * 12;
 	namespace_kind = read_u32(m->data + position);
 	namespace_id = read_u32(m->data + position + 4);
 	name_id = read_u32(m->data + position + 8);
 	if (FAILED(metadata_string(m, name_id, &name_text, &name_length)))
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:270\n"); return E_INVALIDARG; }
 	if (namespace_kind == 2) {
 		if (namespace_id >= m->xmlns_count)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:273\n"); return E_INVALIDARG; }
 		namespace_name_id = read_u32(m->data + m->xmlns + 4 + (size_t)namespace_id * 4);
 		if (FAILED(metadata_string(m, namespace_name_id, &namespace_text, &namespace_length)) ||
 			namespace_length < ARRAYSIZE(using_prefix) - 1 ||
 			CompareStringOrdinal(namespace_text, ARRAYSIZE(using_prefix) - 1, using_prefix, -1, TRUE) != CSTR_EQUAL)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:278\n"); return E_INVALIDARG; }
 		namespace_text += ARRAYSIZE(using_prefix) - 1;
 		namespace_length -= ARRAYSIZE(using_prefix) - 1;
 		if (!namespace_length)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:282\n"); return E_INVALIDARG; }
 		for (UINT32 index = 0; index < namespace_length; ++index)
 			if (namespace_text[index] == L';')
-				return E_INVALIDARG;
+				{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:285\n"); return E_INVALIDARG; }
 	} else {
 		if (namespace_id >= m->namespace_count)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:288\n"); return E_INVALIDARG; }
 		namespace_name_id = read_u32(m->data + m->namespaces + 4 + (size_t)namespace_id * 8 + 4);
 		if (FAILED(metadata_string(m, namespace_name_id, &namespace_text, &namespace_length)))
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:291\n"); return E_INVALIDARG; }
 	}
 	if ((size_t)namespace_length + 1 + name_length + 1 > capacity)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:294\n"); return E_INVALIDARG; }
 	for (UINT32 index = 0; index < namespace_length; ++index)
 		buffer[index] = namespace_text[index];
 	buffer[namespace_length] = L'.';
@@ -306,27 +308,21 @@ static HRESULT metadata_type_short_name(const struct metadata *m, uint32_t id, c
 	size_t position;
 	uint32_t name_id;
 	if (id >= m->type_count)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:311\n"); return E_INVALIDARG; }
 	position = m->types + 4 + (size_t)id * 12;
 	name_id = read_u32(m->data + position + 8);
 	return metadata_string(m, name_id, name, length);
 }
 
-/* A compiled type reference in either form: a stable index into the class table or an index into the document's own type
- * table. The stable table names the full runtime class, so the short name is what follows its last dot. */
+/* A type-valued property can name a framework type even when the engine cannot instantiate that class. */
 static HRESULT type_reference_name(const struct metadata *m, uint16_t reference, const WCHAR **name, UINT32 *length)
 {
 	if (reference & 0x8000) {
-		const WCHAR *class_name = raven_xaml_class_by_stable(reference & 0x7FFF);
-		const WCHAR *short_name;
-		if (!class_name)
+		const UINT32 index = reference & 0x7fff;
+		if (index >= ARRAYSIZE(xbf_type_names) || !xbf_type_names[index])
 			return CLASS_E_CLASSNOTAVAILABLE;
-		short_name = class_name;
-		for (const WCHAR *at = class_name; *at; ++at)
-			if (*at == L'.')
-				short_name = at + 1;
-		*name = short_name;
-		*length = (UINT32)lstrlenW(short_name);
+		*name = xbf_type_names[index];
+		*length = (UINT32)lstrlenW(*name);
 		return S_OK;
 	}
 	return metadata_type_short_name(m, reference, name, length);
@@ -337,7 +333,7 @@ static HRESULT metadata_property_name(const struct metadata *m, uint32_t id, con
 	size_t position;
 	uint32_t name_id;
 	if (id >= m->property_count)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:336\n"); return E_INVALIDARG; }
 	position = m->properties + 4 + (size_t)id * 12;
 	name_id = read_u32(m->data + position + 8);
 	return metadata_string(m, name_id, name, length);
@@ -376,7 +372,7 @@ static HRESULT create_reference(const struct metadata *m, uint16_t reference, II
 		return known != CLASS_E_CLASSNOTAVAILABLE ? known : made;
 	}
 	if (FAILED(metadata_type_name(m, reference, buffer, MAX_NAME, &length)))
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:375\n"); return E_INVALIDARG; }
 	{
 		const HRESULT known = create_known(buffer, length, out);
 		if (known != CLASS_E_CLASSNOTAVAILABLE)
@@ -462,7 +458,7 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	case 5: {
 		const uint16_t reference = next_u16(r);
 		if (r->invalid)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:461\n"); return E_INVALIDARG; }
 		if (reference & 0x8000)
 			return S_OK;
 		v->kind = value_string;
@@ -470,12 +466,12 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	}
 	case 6:
 		if (r->end - r->at < 16)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:469\n"); return E_INVALIDARG; }
 		r->at += 16;
 		break;
 	case 7:
 		if (r->end - r->at < 8)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:474\n"); return E_INVALIDARG; }
 		r->at += 8;
 		break;
 	case 11:
@@ -496,7 +492,7 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	case 10:
 		return S_OK;
 	default:
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	}
 	return r->invalid ? E_INVALIDARG : S_OK;
 }
@@ -506,6 +502,7 @@ static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 lengt
 	static const WCHAR name_property[] = L"Name";
 	static const WCHAR source_property[] = L"Source";
 	__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
+
 	if (length == ARRAYSIZE(name_property) - 1 && CompareStringOrdinal(name, (int)length, name_property, -1, FALSE) == CSTR_EQUAL) {
 		if (value->kind == value_string)
 			return raven_xaml_element_set_name(object, value->text, value->length);
@@ -578,7 +575,7 @@ static HRESULT use_target(const struct metadata *m, uint16_t reference, IInspect
 	} else {
 		if (reference & 0x8000) {
 			expected = raven_xaml_class_by_stable(reference & 0x7fff);
-			if (!expected) return E_NOTIMPL;
+			if (!expected) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 			length = (UINT32)lstrlenW(expected);
 		} else {
 			result = metadata_type_name(m, reference, buffer, ARRAYSIZE(buffer), &length);
@@ -641,16 +638,19 @@ struct ambient_frame {
 	struct ambient_frame *previous;
 };
 static DWORD ambient_tls = TLS_OUT_OF_INDEXES;
+static DWORD deferred_tls = TLS_OUT_OF_INDEXES;
 
 BOOL raven_xaml_loader_notify(DWORD reason, void *reserved)
 {
 	(void)reserved;
 	if (reason == DLL_PROCESS_ATTACH) {
 		ambient_tls = TlsAlloc();
-		return ambient_tls != TLS_OUT_OF_INDEXES;
+		deferred_tls = TlsAlloc();
+		return ambient_tls != TLS_OUT_OF_INDEXES && deferred_tls != TLS_OUT_OF_INDEXES;
 	}
 	if (reason == DLL_PROCESS_DETACH && ambient_tls != TLS_OUT_OF_INDEXES) {
 		TlsFree(ambient_tls);
+		if (deferred_tls != TLS_OUT_OF_INDEXES) TlsFree(deferred_tls);
 		ambient_tls = TLS_OUT_OF_INDEXES;
 	}
 	return TRUE;
@@ -710,6 +710,16 @@ static void requested_theme_name(const WCHAR **name, UINT32 *length)
 #define RESOURCE_HOPS 16
 
 static BOOL is_map_object(IInspectable *object);
+static HRESULT materialize_resource(IInspectable *dictionary, const WCHAR *key, UINT32 length);
+static HRESULT lookup_resource(IInspectable *dictionary, const WCHAR *key, UINT32 length,
+	const WCHAR *theme, UINT32 theme_length, IInspectable **out)
+{
+	HRESULT result = materialize_resource(dictionary, key, length);
+	if (FAILED(result) && result != E_BOUNDS) return result;
+	/* StaticResource shares initial theme selection; ThemeResource can also reevaluate after a theme change. */
+	return raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out);
+}
+
 static HRESULT resolve_resource(const struct scope *stack, size_t depth, int theme_resource, const WCHAR *key,
 	UINT32 length, IInspectable **out, int hops, const WCHAR *effective_theme, UINT32 effective_theme_length);
 
@@ -736,18 +746,16 @@ static HRESULT resolve_resource(const struct scope *stack, size_t depth, int the
 	IInspectable *dictionary = NULL;
 	HRESULT result = E_BOUNDS;
 	*out = NULL;
-	if (theme_resource) {
-		if (effective_theme) { theme = effective_theme; theme_length = effective_theme_length; }
-		else requested_theme_name(&theme, &theme_length);
-	}
+	if (effective_theme) { theme = effective_theme; theme_length = effective_theme_length; }
+	else requested_theme_name(&theme, &theme_length);
 	for (size_t index = depth; index; ) {
 		IInspectable *scope_object = stack[--index].object;
 		dictionary = raven_xaml_element_resources_existing(scope_object);
 		if (!dictionary && scope_object && is_map_object(scope_object)) dictionary = scope_object;
 		if (!dictionary)
 			continue;
-		result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
-			raven_xaml_dictionary_lookup(dictionary, key, length, out);
+		result = lookup_resource(dictionary, key, length, theme, theme_length, out);
+		if (FAILED(result) && result != E_BOUNDS) return result;
 		if (result == S_OK && *out)
 			return resolve_follow(stack, depth, *out, out, hops, effective_theme, effective_theme_length);
 	}
@@ -757,17 +765,17 @@ static HRESULT resolve_resource(const struct scope *stack, size_t depth, int the
 			dictionary = raven_xaml_element_resources_existing(scope_object);
 			if (!dictionary && scope_object && is_map_object(scope_object)) dictionary = scope_object;
 			if (!dictionary) continue;
-			result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
-				raven_xaml_dictionary_lookup(dictionary, key, length, out);
+			result = lookup_resource(dictionary, key, length, theme, theme_length, out);
+			if (FAILED(result) && result != E_BOUNDS) return result;
 			if (result == S_OK && *out)
 				return resolve_follow(stack, depth, *out, out, hops, effective_theme, effective_theme_length);
 		}
 	}
 	result = application_resources(&dictionary);
 	if (SUCCEEDED(result) && dictionary) {
-		result = theme_resource ? raven_xaml_dictionary_lookup_theme(dictionary, key, length, theme, theme_length, out) :
-			raven_xaml_dictionary_lookup(dictionary, key, length, out);
+		result = lookup_resource(dictionary, key, length, theme, theme_length, out);
 		IInspectable_Release(dictionary);
+		if (FAILED(result) && result != E_BOUNDS) return result;
 		if (result == S_OK && *out)
 			return resolve_follow(stack, depth, *out, out, hops, effective_theme, effective_theme_length);
 	}
@@ -778,6 +786,22 @@ static HRESULT resolve_resource(const struct scope *stack, size_t depth, int the
 	/* Below every dictionary: the platform's own default styles, which compiled documents base their styles on. */
 	result = raven_xaml_platform_resource(key, length, out);
 	return result == S_FALSE ? E_BOUNDS : result;
+}
+
+static void trace_resource_failure(const WCHAR *key, UINT32 length, IInspectable *value)
+{
+	HSTRING text = NULL;
+	OutputDebugStringA("raven-xaml: resource ");
+	if (SUCCEEDED(WindowsCreateString(key, length, &text))) {
+		OutputDebugStringW(WindowsGetStringRawBuffer(text, NULL));
+		WindowsDeleteString(text); text = NULL;
+	}
+	if (value && SUCCEEDED(value->lpVtbl->GetRuntimeClassName(value, &text))) {
+		OutputDebugStringA(" resolved as ");
+		OutputDebugStringW(WindowsGetStringRawBuffer(text, NULL));
+		WindowsDeleteString(text);
+	} else OutputDebugStringA(" was not resolved");
+	OutputDebugStringA("\n");
 }
 
 static HRESULT get_merged_dictionaries(IInspectable *object, IInspectable **out)
@@ -841,7 +865,7 @@ static HRESULT add_to_dictionary(IInspectable *object, const struct value *key, 
 	boolean replaced = FALSE;
 	HRESULT result;
 	if (!object || !key || key->kind != value_string || !key->text)
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	result = IInspectable_QueryInterface(object, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map);
 	if (FAILED(result))
 		return result;
@@ -868,6 +892,7 @@ static HRESULT add_to_dictionary(IInspectable *object, const struct value *key, 
 			(INT32)constant->integer, &value_object)))
 			value_object = NULL;
 	}
+
 	if (!value_object) {
 		result = E_NOTIMPL;
 		goto done;
@@ -895,9 +920,9 @@ static HRESULT add_with_implicit_key(IInspectable *object, IInspectable *value)
 	boolean replaced = FALSE;
 	HRESULT result;
 	if (!object || !value)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:923\n"); return E_INVALIDARG; }
 	if (FAILED(value->lpVtbl->QueryInterface(value, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style)) || !style)
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	target_type.Name = NULL;
 	target_type.Kind = TypeKind_Metadata;
 	result = style->lpVtbl->get_TargetType(style, &target_type);
@@ -907,12 +932,12 @@ static HRESULT add_with_implicit_key(IInspectable *object, IInspectable *value)
 	name = target_type.Name;
 	if (!name) {
 		WindowsDeleteString(name);
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	}
 	text = WindowsGetStringRawBuffer(name, &length);
 	if (!text || length <= 0) {
 		WindowsDeleteString(name);
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	}
 	result = IInspectable_QueryInterface(object, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map);
 	if (FAILED(result)) {
@@ -1023,6 +1048,7 @@ static int skip_predicates(struct reader *r)
 	if (r->invalid || count > 0x10000)
 		return 0;
 	for (uint32_t index = 0; index < count; ++index) {
+		next_vint(r); /* guarded object token */
 		const uint32_t guarded = (uint32_t)next_vint(r);
 		if (r->invalid || guarded > 0x10000)
 			return 0;
@@ -1034,43 +1060,143 @@ static int skip_predicates(struct reader *r)
 	return !r->invalid;
 }
 
-/* A Style_v2 setter entry: the property arrives either as a stable index or as a name string beside its owner document
- * type (the form a custom control's property takes), and the value either as a literal constant or as a theme/static
- * resource marker whose key the named substream's Setter nodes carry. The trailing byte of a resource entry travels with
- * it (its meaning is not established; every collected instance carries one). */
+/* Style_v2 setters carry a property and either a constant, string, or deferred stream offset. */
 static int skip_style_v2_setters(struct reader *r, const struct metadata *m)
 {
 	const uint32_t setters = (uint32_t)next_vint(r);
 	if (r->invalid || setters > 0x10000)
 		return 0;
 	for (uint32_t index = 0; index < setters; ++index) {
-		const uint8_t kind = next_byte(r);
-		if (r->invalid)
+		const uint32_t flags = (uint32_t)next_vint(r);
+		const uint32_t value_flags = flags & 0x6f;
+		if (r->invalid || flags > 0xff || (value_flags && (value_flags & (value_flags - 1))))
 			return 0;
-		if (kind & 0x10) {
-			next_u16(r); /* the property, by stable index */
-		} else {
-			next_u16(r); /* the property name string */
-			next_u16(r); /* the owner type, by document type index */
-		}
-		switch (kind & 0x0f) {
-		case 0: { /* a literal value, as a constant */
+		next_u16(r); /* resolved property, or property name */
+		if (!(flags & 0x10))
+			next_u16(r); /* owner type */
+		if (value_flags == 0x20) {
 			struct value ignored = {value_none, NULL, 0, 0, 0};
 			if (FAILED(read_constant(r, m, &ignored)))
 				return 0;
-			break;
-		}
-		case 1: /* a theme resource reference */
-		case 2: /* a static resource reference */
-			next_byte(r);
-			break;
-		default:
-			return 0;
+		} else if (value_flags == 0x04) {
+			next_u16(r); /* shared string */
+		} else if (value_flags) {
+			next_vint(r); /* deferred value or setter offset */
 		}
 		if (r->invalid)
 			return 0;
 	}
 	return 1;
+}
+
+/* The VisualStateGroupCollection custom runtime data (the CustomWriterRuntimeDataTypeIndex values 1-5, the shapes the
+ * microsoft-ui-xaml reader source publishes: VisualStateGroupCollection_v2..v5, and 420 for v1). The collections the
+ * engine does not model — the visual states of a template — are consumed to their end so the node stream continues;
+ * the deferred storyboards they name load through their own nodes. The field ladder follows the reader's version
+ * checks: the setter and trigger token vectors arrive from v2, the extendable and collection token vectors from v3,
+ * the static-resource trigger tokens only in v5, and the seen-name directives in v4 and v5. */
+static int skip_visual_state_group_collection(struct reader *r, const struct metadata *m, uint32_t type)
+{
+	uint32_t count, inner, i;
+	(void)m;
+	/* the state-to-group map: a vector of unsigned ints */
+	count = (uint32_t)next_vint(r);
+	for (i = 0; i < count; ++i) next_vint(r);
+	/* the visual states: a name string, a storyboard token, a bool, and the token vectors the version ladder adds */
+	count = (uint32_t)next_vint(r);
+	for (i = 0; i < count; ++i) {
+		struct value ignored = {value_none, NULL, 0, 0, 0};
+		next_u16(r); /* the state's name, a shared string reference */
+		next_vint(r); /* the deferred storyboard token */
+		if (FAILED(read_constant(r, m, &ignored))) /* hasStoryboard, a CValue */
+			return 0;
+		if (type != 420) {
+			uint32_t tokens = (uint32_t)next_vint(r);
+			for (inner = 0; inner < tokens; ++inner) next_vint(r);
+			tokens = (uint32_t)next_vint(r); /* the state trigger values: a vector of vectors of ints */
+			for (inner = 0; inner < tokens; ++inner) {
+				uint32_t values = (uint32_t)next_vint(r);
+				uint32_t v;
+				for (v = 0; v < values; ++v) next_vint(r);
+			}
+			if (type != 1) {
+				tokens = (uint32_t)next_vint(r);
+				for (inner = 0; inner < tokens; ++inner) next_vint(r);
+				tokens = (uint32_t)next_vint(r);
+				for (inner = 0; inner < tokens; ++inner) next_vint(r);
+				if (type == 5) {
+					tokens = (uint32_t)next_vint(r);
+					for (inner = 0; inner < tokens; ++inner) next_vint(r);
+				}
+			}
+		}
+		if (r->invalid)
+			return 0;
+	}
+	/* the groups: a name, a bool, a token */
+	count = (uint32_t)next_vint(r);
+	for (i = 0; i < count; ++i) {
+		struct value ignored = {value_none, NULL, 0, 0, 0};
+		next_u16(r);
+		if (FAILED(read_constant(r, m, &ignored)))
+			return 0;
+		next_vint(r);
+	}
+	/* the transitions: two name strings and a token */
+	count = (uint32_t)next_vint(r);
+	for (i = 0; i < count; ++i) {
+		next_u16(r);
+		next_u16(r);
+		next_vint(r);
+	}
+	/* unexpectedTokensDetected: a bool */
+	{
+		struct value ignored = {value_none, NULL, 0, 0, 0};
+		if (FAILED(read_constant(r, m, &ignored)))
+			return 0;
+	}
+	/* the transition lookup: a vector of (from, to, token) triples and a vector of ints */
+	count = (uint32_t)next_vint(r);
+	for (i = 0; i < count; ++i) {
+		next_vint(r);
+		next_vint(r);
+		next_vint(r);
+	}
+	count = (uint32_t)next_vint(r);
+	for (i = 0; i < count; ++i) next_vint(r);
+	/* the entire-collection token */
+	next_vint(r);
+	/* the seen-name directives of v4 and v5: a vector of name strings */
+	if (type == 4 || type == 5) {
+		count = (uint32_t)next_vint(r);
+		for (i = 0; i < count; ++i) next_u16(r);
+	}
+	return !r->invalid;
+}
+
+/* The DeferredElement custom runtime data (CustomWriterRuntimeDataTypeIndex 6 and 9, and 745 for v1, per the
+ * microsoft-ui-xaml reader source): the element's name, the properties it carries as literal values, and — from v3 —
+ * a realize flag. A deferred element's real content is the substream the node names; the engine consumes this payload
+ * so the node stream continues. */
+static int skip_deferred_element(struct reader *r, const struct metadata *m, uint32_t type)
+{
+	uint32_t count, i;
+	next_u16(r); /* the element's name, a shared string reference */
+	if (type != 745) {
+		count = (uint32_t)next_vint(r);
+		for (i = 0; i < count; ++i) {
+			struct value ignored = {value_none, NULL, 0, 0, 0};
+			next_u16(r); /* the property */
+			if (FAILED(read_constant(r, m, &ignored))) /* the literal value, a CValue */
+				return 0;
+		}
+		if (type != 6) {
+			struct value realize = {value_none, NULL, 0, 0, 0};
+			if (FAILED(read_constant(r, m, &realize))) /* the realize flag, a CValue */
+				return 0;
+		}
+	}
+	return !r->invalid;
 }
 
 /* The runtime-data payload of a SetCustomRuntimeData node, by the type index Microsoft's XBF reader dispatches on. The
@@ -1082,30 +1208,29 @@ static HRESULT read_custom_runtime_data(struct reader *r, const struct metadata 
 	int complete = 0;
 	switch (type) {
 	case 371: /* ResourceDictionary_v1 */
-		complete = skip_resource_map(r) && skip_token_vector(r) && skip_resource_map(r) &&
+		complete = skip_resource_map(r) && skip_string_vector(r) && skip_resource_map(r) &&
 			skip_string_vector(r) && skip_string_vector(r);
 		break;
 	case 7: /* ResourceDictionary_v2 */
-		complete = skip_resource_map(r) && skip_token_vector(r) && skip_resource_map(r) && skip_string_vector(r);
+		complete = skip_resource_map(r) && skip_string_vector(r) && skip_resource_map(r) && skip_string_vector(r);
 		break;
 	case 10: /* ResourceDictionary_v3 */
-		complete = skip_resource_map(r) && skip_token_vector(r) && skip_resource_map(r) &&
+		complete = skip_resource_map(r) && skip_string_vector(r) && skip_resource_map(r) &&
 			skip_conditional_map(r) && skip_conditional_map(r);
 		break;
 	case 12: /* ResourceDictionary_v4 */
-		complete = skip_key_map(r) && skip_token_vector(r) && skip_conditional_key_map(r);
+		complete = skip_key_map(r) && skip_string_vector(r) && skip_conditional_key_map(r);
 		break;
 	case 8: /* Style_v2 */
 		complete = skip_style_v2_setters(r, m);
 		break;
 	default:
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	}
-	/* v3 and v4 also carry the objects declared under a conditional scope. */
 	if (complete && (type == 10 || type == 12))
 		complete = skip_predicates(r);
 	if (!complete || r->invalid)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1233\n"); return E_INVALIDARG; }
 	*type_index = type;
 	return S_OK;
 }
@@ -1128,22 +1253,87 @@ static int substream_range(const struct load_context *context, uint32_t index, s
 static UINT32 last_failure_offset;
 static HRESULT last_failure_status;
 
-struct resource_map_entry { uint32_t token; uint32_t key; BOOL seen; BOOL applied; };
+struct resource_map_entry { uint32_t token; uint32_t key; BOOL seen; BOOL applied; BOOL implicit; BOOL loading; size_t end; };
 struct resource_map { struct resource_map_entry *entries; uint32_t capacity; uint32_t remaining; };
+
+/* Active deferred dictionaries stay on the calling thread while a lookup realizes a later entry. */
+struct deferred_frame {
+	struct resource_map *map;
+	const struct metadata *m;
+	const struct load_context *context;
+	const struct scope *stack;
+	size_t *depth;
+	size_t begin, end;
+	int deferral_depth;
+	const WCHAR *theme;
+	UINT32 theme_length;
+	IInspectable *dictionary;
+	unsigned resource_depth;
+	struct deferred_frame *previous;
+};
+
+static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root,
+	IInspectable *target, BOOL *target_used, const struct load_context *context, int deferral_depth,
+	const WCHAR *effective_theme, UINT32 effective_theme_length, size_t map_start, size_t map_limit,
+	struct deferred_frame *entry_frame);
+
+static HRESULT materialize_resource(IInspectable *dictionary, const WCHAR *key, UINT32 length)
+{
+	for (struct deferred_frame *frame = TlsGetValue(deferred_tls); frame; frame = frame->previous) {
+		IInspectable *owner = frame->dictionary;
+		for (size_t i = 0; !owner && i < *frame->depth; ++i)
+			if (frame->stack[i].object && is_map_object(frame->stack[i].object)) owner = frame->stack[i].object;
+		if (owner != dictionary) continue;
+		for (uint32_t i = 0; i < frame->map->capacity; ++i) {
+			struct resource_map_entry *entry = &frame->map->entries[i];
+			const WCHAR *text;
+			UINT32 text_length;
+			IInspectable *root = NULL;
+			HRESULT result;
+			if (!entry->token || entry->applied) continue;
+			result = metadata_string(frame->m, entry->key, &text, &text_length);
+			if (FAILED(result)) return result;
+			if (entry->implicit) {
+				const WCHAR *short_name = text;
+				for (UINT32 j = 0; j < text_length; ++j) if (text[j] == L'.') short_name = text + j + 1;
+				text_length -= (UINT32)(short_name - text);
+				text = short_name;
+			}
+			if (length != text_length || memcmp(key, text, length * sizeof(WCHAR))) continue;
+			if (entry->loading || frame->resource_depth >= RESOURCE_HOPS) return E_INVALIDARG;
+			for (uint32_t j = 0; j < frame->map->capacity; ++j)
+				if (frame->map->entries[j].token == entry->token) frame->map->entries[j].loading = TRUE;
+			struct deferred_frame request = *frame;
+			request.dictionary = dictionary;
+			BOOL used = TRUE;
+			result = load_nodes(frame->m, frame->begin + entry->token - 1, frame->end, &root, dictionary, &used,
+				frame->context, frame->deferral_depth, frame->theme, frame->theme_length, 0, 0, &request);
+			if (root) IInspectable_Release(root);
+			for (uint32_t j = 0; j < frame->map->capacity; ++j)
+				if (frame->map->entries[j].token == entry->token) frame->map->entries[j].loading = FALSE;
+			return FAILED(result) ? result : entry->applied ? S_OK : E_BOUNDS;
+		}
+	}
+	return E_BOUNDS;
+}
 
 /* ResourceDictionary_v3 maps keys to offsets of value-creation nodes within its deferred stream. */
 static HRESULT resource_map_init(struct resource_map *map, const struct metadata *m, size_t start, size_t limit,
 	size_t stream_size)
 {
-	struct reader r = {m->data, start, limit, 0};
-	uint32_t count, capacity = 1;
+	struct reader r = {m->data, start, limit, 0}, implicit;
+	uint32_t count, explicit_count, implicit_count, capacity = 1;
 	map->entries = NULL;
 	map->capacity = 0;
 	map->remaining = 0;
 	if (!start) return S_OK;
 	if (next_vint(&r) != 10) return E_INVALIDARG;
-	count = (uint32_t)next_vint(&r);
-	if (r.invalid || count > 0x10000) return E_INVALIDARG;
+	implicit = r;
+	if (!skip_resource_map(&implicit) || !skip_string_vector(&implicit)) return E_INVALIDARG;
+	implicit_count = (uint32_t)next_vint(&implicit);
+	explicit_count = (uint32_t)next_vint(&r);
+	if (r.invalid || implicit.invalid || implicit_count > 0x10000 || explicit_count > 0x10000) return E_INVALIDARG;
+	count = explicit_count + implicit_count;
 	if (!count) return S_OK;
 	while (capacity < count * 2) capacity <<= 1;
 	map->entries = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)capacity * sizeof *map->entries);
@@ -1151,6 +1341,7 @@ static HRESULT resource_map_init(struct resource_map *map, const struct metadata
 	map->capacity = capacity;
 	map->remaining = count;
 	for (uint32_t i = 0; i < count; ++i) {
+		if (i == explicit_count) r = implicit;
 		const uint16_t key = next_u16(&r);
 		const uint32_t offset = (uint32_t)next_vint(&r);
 		const WCHAR *text;
@@ -1158,14 +1349,144 @@ static HRESULT resource_map_init(struct resource_map *map, const struct metadata
 		if (r.invalid || offset >= stream_size || FAILED(metadata_string(m, key, &text, &length))) {
 			HeapFree(GetProcessHeap(), 0, map->entries);
 			map->entries = NULL;
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1352\n"); return E_INVALIDARG; }
 		}
 		slot = ((offset + 1) * 2654435761u) & (capacity - 1);
 		while (map->entries[slot].token) slot = (slot + 1) & (capacity - 1);
 		map->entries[slot].token = offset + 1;
 		map->entries[slot].key = key;
+		map->entries[slot].implicit = i >= explicit_count;
 	}
 	return S_OK;
+}
+
+struct deferred_stream {
+	LONG refs;
+	struct metadata metadata;
+	struct load_context context;
+	struct resource_map map;
+	size_t begin, end;
+	int deferral_depth;
+	HSTRING theme;
+};
+
+static void deferred_stream_release(void *context)
+{
+	struct deferred_stream *stream = context;
+	if (InterlockedDecrement(&stream->refs)) return;
+	HeapFree(GetProcessHeap(), 0, stream->map.entries);
+	HeapFree(GetProcessHeap(), 0, (void *)stream->metadata.data);
+	WindowsDeleteString(stream->theme);
+	HeapFree(GetProcessHeap(), 0, stream);
+}
+
+static HRESULT deferred_stream_realize(void *context, IInspectable *dictionary, UINT32 token)
+{
+	struct deferred_stream *stream = context;
+	struct deferred_frame *previous = TlsGetValue(deferred_tls);
+	struct deferred_frame request = {0};
+	IInspectable *root = NULL;
+	BOOL used = TRUE;
+	UINT32 theme_length = 0;
+	HRESULT result;
+	const size_t at = stream->begin + token - 1;
+	uint32_t slot = (token * 2654435761u) & (stream->map.capacity - 1);
+	if (at >= stream->end || (previous && previous->resource_depth >= RESOURCE_HOPS)) return E_INVALIDARG;
+	while (stream->map.entries[slot].token && stream->map.entries[slot].token != token)
+		slot = (slot + 1) & (stream->map.capacity - 1);
+	if (!stream->map.entries[slot].token || stream->map.entries[slot].loading) return E_INVALIDARG;
+	const BYTE kind = stream->metadata.data[at];
+	if (kind != 1 && kind != 4 && kind != 20 && kind != 21 && kind != 22 && kind != 34 && kind != 35)
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1400\n"); return E_INVALIDARG; }
+	InterlockedIncrement(&stream->refs);
+	for (uint32_t i = 0; i < stream->map.capacity; ++i)
+		if (stream->map.entries[i].token == token) stream->map.entries[i].loading = TRUE;
+	request.map = &stream->map;
+	request.m = &stream->metadata; request.context = &stream->context;
+	request.begin = stream->begin; request.end = stream->end;
+	request.deferral_depth = stream->deferral_depth;
+	request.dictionary = dictionary;
+	request.resource_depth = previous ? previous->resource_depth : 0;
+	const WCHAR *theme = stream->theme ? WindowsGetStringRawBuffer(stream->theme, &theme_length) : NULL;
+	result = load_nodes(&stream->metadata, at, stream->end, &root, dictionary, &used, &stream->context,
+		stream->deferral_depth, theme, theme_length, 0, 0, &request);
+	if (root) IInspectable_Release(root);
+	for (uint32_t i = 0; i < stream->map.capacity; ++i)
+		if (stream->map.entries[i].token == token) stream->map.entries[i].loading = FALSE;
+	if (SUCCEEDED(result) && !stream->map.entries[slot].applied) result = E_BOUNDS;
+	deferred_stream_release(stream);
+	return result;
+}
+
+/* Register compiled entries without constructing their values. Each entry owns a reference to the shared document. */
+static HRESULT load_dictionary_content(const struct metadata *m, size_t begin, size_t end, IInspectable **root,
+	IInspectable *target, BOOL *target_used, const struct load_context *context, int deferral_depth,
+	const WCHAR *theme, UINT32 theme_length, size_t map_start, size_t map_limit)
+{
+	struct deferred_stream *stream;
+	HRESULT result;
+	size_t first = end;
+	if (!map_start || !target)
+		return load_nodes(m, begin, end, root, target, target_used, context, deferral_depth,
+			theme, theme_length, map_start, map_limit, NULL);
+	stream = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *stream);
+	if (!stream) return E_OUTOFMEMORY;
+	stream->refs = 1;
+	stream->metadata = *m;
+	stream->metadata.data = HeapAlloc(GetProcessHeap(), 0, context->size);
+	if (!stream->metadata.data) { deferred_stream_release(stream); return E_OUTOFMEMORY; }
+	memcpy((void *)stream->metadata.data, m->data, context->size);
+	stream->context = *context; stream->context.m = &stream->metadata;
+	stream->begin = begin; stream->end = end; stream->deferral_depth = deferral_depth;
+	result = theme ? WindowsCreateString(theme, theme_length, &stream->theme) : S_OK;
+	if (SUCCEEDED(result)) result = resource_map_init(&stream->map, &stream->metadata, map_start, map_limit, end - begin);
+	if (FAILED(result)) { deferred_stream_release(stream); return result; }
+	if (!stream->map.capacity) {
+		deferred_stream_release(stream);
+		return load_nodes(m, begin, end, root, target, target_used, context, deferral_depth,
+			theme, theme_length, map_start, map_limit, NULL);
+	}
+	for (uint32_t i = 0; i < stream->map.capacity; ++i)
+		if (stream->map.entries[i].token && begin + stream->map.entries[i].token - 1 < first)
+			first = begin + stream->map.entries[i].token - 1;
+	/* The prefix declares namespaces and the dictionary itself, before any deferred value starts. */
+	result = load_nodes(&stream->metadata, begin, first, root, target, target_used, &stream->context,
+		deferral_depth, theme, theme_length, 0, 0, NULL);
+	for (uint32_t i = 0; SUCCEEDED(result) && i < stream->map.capacity; ++i) {
+		struct resource_map_entry *entry = &stream->map.entries[i];
+		const WCHAR *key;
+		UINT32 length;
+		if (!entry->token) continue;
+		result = metadata_string(&stream->metadata, entry->key, &key, &length);
+		if (FAILED(result)) break;
+		if (entry->implicit) {
+			const WCHAR *short_name = key;
+			for (UINT32 j = 0; j < length; ++j) if (key[j] == L'.') short_name = key + j + 1;
+			length -= (UINT32)(short_name - key); key = short_name;
+		}
+		InterlockedIncrement(&stream->refs);
+		result = raven_xaml_dictionary_defer(target, key, length, stream, entry->token,
+			deferred_stream_realize, deferred_stream_release);
+		if (FAILED(result)) deferred_stream_release(stream);
+	}
+	/* Named objects marked by the compiler must be created even if nobody requests their resource key. */
+	if (SUCCEEDED(result)) {
+		struct reader auto_entries = {stream->metadata.data, map_start, map_limit, 0};
+		next_vint(&auto_entries);
+		if (!skip_resource_map(&auto_entries)) result = E_INVALIDARG;
+		const uint32_t count = (uint32_t)next_vint(&auto_entries);
+		for (uint32_t i = 0; SUCCEEDED(result) && i < count; ++i) {
+			const uint16_t key_index = next_u16(&auto_entries);
+			const WCHAR *key;
+			UINT32 length;
+			IInspectable *value = NULL;
+			result = metadata_string(&stream->metadata, key_index, &key, &length);
+			if (SUCCEEDED(result)) result = raven_xaml_dictionary_lookup(target, key, length, &value);
+			if (value) IInspectable_Release(value);
+		}
+	}
+	deferred_stream_release(stream);
+	return result;
 }
 
 /* The diagnostic a probe or a test reads after a failed RavenXamlLoad: which node and why. Engine-internal, __cdecl. */
@@ -1177,12 +1498,16 @@ __declspec(dllexport) void __cdecl RavenXamlLastFailure(UINT32 *offset, HRESULT 
 
 static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, IInspectable **root,
 	IInspectable *target, BOOL *target_used, const struct load_context *context, int deferral_depth,
-	const WCHAR *effective_theme, UINT32 effective_theme_length, size_t map_start, size_t map_limit)
+	const WCHAR *effective_theme, UINT32 effective_theme_length, size_t map_start, size_t map_limit,
+	struct deferred_frame *entry_frame)
 {
 	struct reader r = {m->data, begin, end, 0};
 	struct scope stack[LOADER_DEPTH];
 	uint32_t scope_tokens[LOADER_DEPTH] = {0};
-	struct resource_map resource_map;
+	struct resource_map local_map;
+	struct resource_map *resource_map = entry_frame ? entry_frame->map : &local_map;
+	struct deferred_frame frame;
+	const size_t stream_begin = entry_frame ? entry_frame->begin : begin;
 	size_t depth = 0;
 	const WCHAR *pending_name = NULL;
 	IInspectable *last_object = NULL;
@@ -1198,30 +1523,52 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	BOOL pending_value_valid = FALSE;
 	UINT32 pending_length = 0;
 	HRESULT status = S_OK;
+	const WCHAR *previous_theme = g_current_effective_theme;
+	const UINT32 previous_theme_length = g_current_effective_theme_length;
 	/* The byte offset of the node being decoded: the last failure records it so a probe can name the form that refused
 	 * (RavenXamlLastFailure below); a nested Source load overwrites the outer document's record, which is the evidence
 	 * the caller wants — the deepest failure is the one that propagates. */
 	size_t node_at = begin;
+	if (!entry_frame) {
+		status = resource_map_init(resource_map, m, map_start, map_limit, end - begin);
+		if (FAILED(status)) return status;
+	} else {
+		stack[0] = (struct scope){entry_frame->dictionary, 0, NULL, NULL, 0};
+		IInspectable_AddRef(stack[0].object);
+		depth = 1;
+	}
+	frame = (struct deferred_frame){resource_map, m, context, stack, &depth, stream_begin, end, deferral_depth,
+		effective_theme, effective_theme_length, entry_frame ? entry_frame->dictionary : NULL, entry_frame ? entry_frame->resource_depth + 1 : 0,
+		TlsGetValue(deferred_tls)};
+	if (!TlsSetValue(deferred_tls, &frame)) {
+		if (entry_frame) IInspectable_Release(stack[0].object);
+		else HeapFree(GetProcessHeap(), 0, resource_map->entries);
+		return E_OUTOFMEMORY;
+	}
 	g_current_effective_theme = effective_theme;
 	g_current_effective_theme_length = effective_theme_length;
-	status = resource_map_init(&resource_map, m, map_start, map_limit, end - begin);
-	if (FAILED(status)) return status;
 	while (r.at < r.end) {
 		const uint8_t kind = next_byte(&r);
 		node_at = r.at - 1;
-		if (resource_map.capacity) {
-			uint32_t token = (uint32_t)(node_at - begin) + 1;
-			uint32_t slot = (token * 2654435761u) & (resource_map.capacity - 1);
-			while (resource_map.entries[slot].token) {
-				if (resource_map.entries[slot].token == token && !resource_map.entries[slot].seen) {
-					resource_map.entries[slot].seen = TRUE;
+		if (resource_map->capacity) {
+			uint32_t token = (uint32_t)(node_at - stream_begin) + 1;
+			uint32_t slot = (token * 2654435761u) & (resource_map->capacity - 1);
+			while (resource_map->entries[slot].token) {
+				if (resource_map->entries[slot].token == token) {
+					/* A forward lookup already built this entry; keep its object identity. */
+					if (resource_map->entries[slot].end) {
+						r.at = resource_map->entries[slot].end;
+						break;
+					}
+					resource_map->entries[slot].seen = TRUE;
 				}
-				slot = (slot + 1) & (resource_map.capacity - 1);
+				slot = (slot + 1) & (resource_map->capacity - 1);
 			}
 		}
+		if (r.at != node_at + 1) continue;
 		if (depth < LOADER_DEPTH && (kind == 1 || kind == 18 || kind == 19 ||
 			(kind >= 20 && kind <= 22) || (!depth && kind >= 23 && kind <= 25)))
-			scope_tokens[depth] = kind >= 20 && kind <= 22 ? (uint32_t)(node_at - begin) + 1 : 0;
+			scope_tokens[depth] = kind >= 20 && kind <= 22 ? (uint32_t)(node_at - stream_begin) + 1 : 0;
 		/* A pushed constant is the value of the dictionary entry the next keyed insertion consumes; any other node in
 		 * between leaves it unused, the way an ignored PushConstant always behaved. A provided resource reference is
 		 * consumed the same way. */
@@ -1299,24 +1646,26 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					/* A value a collection or map scope receives: the append or the keyed insertion takes it. */
 					if (last_object) IInspectable_Release(last_object);
 					last_object = scope->object;
-					if (resource_map.capacity && closed_token) {
+					if (resource_map->capacity && closed_token) {
 						uint32_t token = closed_token;
-						uint32_t slot = (token * 2654435761u) & (resource_map.capacity - 1);
+						uint32_t slot = (token * 2654435761u) & (resource_map->capacity - 1);
 						BOOL inserted = FALSE;
-						while (resource_map.entries[slot].token) {
-							if (resource_map.entries[slot].token == token) {
+						while (resource_map->entries[slot].token) {
+							if (resource_map->entries[slot].token == token) {
 								struct value key = {0};
 								key.kind = value_string;
-								status = metadata_string(m, resource_map.entries[slot].key, &key.text, &key.length);
-								if (SUCCEEDED(status)) status = add_to_dictionary(stack[depth - 1].object, &key, last_object, NULL);
+								status = metadata_string(m, resource_map->entries[slot].key, &key.text, &key.length);
+								if (SUCCEEDED(status)) status = resource_map->entries[slot].implicit ?
+									add_with_implicit_key(stack[depth - 1].object, last_object) :
+									add_to_dictionary(stack[depth - 1].object, &key, last_object, NULL);
 								if (FAILED(status)) goto done;
-								if (!resource_map.entries[slot].applied) {
-									resource_map.entries[slot].applied = TRUE;
-									--resource_map.remaining;
+								if (!resource_map->entries[slot].applied) {
+									resource_map->entries[slot].applied = TRUE;
+									--resource_map->remaining;
 								}
 								inserted = TRUE;
 							}
-							slot = (slot + 1) & (resource_map.capacity - 1);
+							slot = (slot + 1) & (resource_map->capacity - 1);
 						}
 						if (inserted && (r.at == r.end || (r.data[r.at] != 8 && r.data[r.at] != 9 && r.data[r.at] != 10))) {
 							IInspectable_Release(last_object);
@@ -1329,8 +1678,13 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 		case 8:
 			if (!depth || stack[depth - 1].kind != 3 || !last_object) {
 				/* With a target the document must hand the collection its value; without one the skip convention
-				 * applies (an object whose creation was skipped leaves nothing to append). */
-				if (target) { status = E_INVALIDARG; goto done; }
+				 * applies (an object whose creation was skipped leaves nothing to append, and a scope pushed
+				 * object-less over an unmodeled or unbuilt collection has nothing to receive it). */
+				if (target && !context->tolerant) { status = E_INVALIDARG; goto done; }
+				break;
+			}
+			if (!stack[depth - 1].object && (!target || context->tolerant)) {
+				IInspectable_Release(last_object); last_object = NULL;
 				break;
 			}
 			status = append_dictionary(stack[depth - 1].object, last_object);
@@ -1384,6 +1738,8 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					if (FAILED(status))
 						object = NULL;
 				}
+				if (FAILED(status) && !object && reference == (0x8000 | 52) && value.kind == value_float)
+					status = raven_double_value_create(value.real, &object);
 				if (FAILED(status) && !object && reference == (0x8000 | 601) && value.kind == value_enum) {
 					const WCHAR *enum_name = raven_xaml_class_by_stable(601);
 					if (value.enum_type != 601) { status = E_INVALIDARG; goto done; }
@@ -1581,6 +1937,21 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				goto done;
 			if (depth && value.kind == value_string) {
 				HRESULT applied = raven_xaml_element_set_name(stack[depth - 1].object, value.text, value.length);
+				/* A mapped resource can carry its key as x:Name even when it is not a FrameworkElement. */
+				if (applied == S_FALSE && resource_map->capacity && scope_tokens[depth - 1]) {
+					const uint32_t token = scope_tokens[depth - 1];
+					uint32_t slot = (token * 2654435761u) & (resource_map->capacity - 1);
+					while (resource_map->entries[slot].token) {
+						const WCHAR *key; UINT32 key_length;
+						if (resource_map->entries[slot].token == token &&
+							SUCCEEDED(metadata_string(m, resource_map->entries[slot].key, &key, &key_length)) &&
+							key_length == value.length && !memcmp(key, value.text, key_length * sizeof(WCHAR))) {
+							applied = S_OK;
+							break;
+						}
+						slot = (slot + 1) & (resource_map->capacity - 1);
+					}
+				}
 				if (target && applied != S_OK && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
 			} else if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
@@ -1591,26 +1962,44 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			UINT32 length = 0;
 			pending_name = NULL;
 			status = property_reference(m, reference, &name, &length);
-			if (FAILED(status)) { if (target) goto done; status = S_OK; break; }
+			if (FAILED(status)) {
+				if (status != CLASS_E_CLASSNOTAVAILABLE || (target && !context->tolerant)) goto done;
+				status = S_OK;
+				if (kind != 19) break;
+			}
 			if (kind == 19) {
 				IInspectable *collection = NULL;
 				if (!depth || depth == LOADER_DEPTH) {
 					status = E_NOTIMPL; goto done;
 				}
 				if (length == 18 && !memcmp(name, L"MergedDictionaries", 18 * sizeof(WCHAR))) {
+					if (!stack[depth - 1].object) {
+						/* a create the skip convention left unbuilt: the scope still pushes, object-less */
+						if (depth == LOADER_DEPTH) { status = E_INVALIDARG; goto done; }
+						memset(&stack[depth], 0, sizeof stack[depth]);
+						stack[depth].kind = 3; ++depth;
+						break;
+					}
 					status = get_merged_dictionaries(stack[depth - 1].object, &collection);
 					if (FAILED(status)) goto done;
 					memset(&stack[depth], 0, sizeof stack[depth]);
 					stack[depth].object = collection; stack[depth].kind = 3; ++depth;
 				} else if (length == 17 && !memcmp(name, L"ThemeDictionaries", 17 * sizeof(WCHAR))) {
+					if (!stack[depth - 1].object) {
+						if (depth == LOADER_DEPTH) { status = E_INVALIDARG; goto done; }
+						memset(&stack[depth], 0, sizeof stack[depth]);
+						stack[depth].kind = 5; ++depth;
+						break;
+					}
 					status = get_theme_dictionaries(stack[depth - 1].object, &collection);
 					if (FAILED(status)) goto done;
 					memset(&stack[depth], 0, sizeof stack[depth]);
 					stack[depth].object = collection; stack[depth].kind = 5; ++depth;
-				} else if (!context->tolerant) {
-					/* The framework documents push collections the engine does not model (VisualStateGroups among
-					 * them); the tolerant merge skips the scope and the values under it, the skip convention. */
-					status = E_NOTIMPL; goto done;
+				} else {
+					if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
+					/* An unsupported collection still owns a scope; its children must not pop the dictionary. */
+					memset(&stack[depth], 0, sizeof stack[depth]);
+					stack[depth].kind = 3; ++depth;
 				}
 			} else {
 				pending_name = name; pending_length = length;
@@ -1626,7 +2015,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				 * purpose keeps the old shortcut, which ignored it. */
 				pending_value = value;
 				pending_value_valid = TRUE;
-				pending_token = (uint32_t)(node_at - begin) + 1;
+				pending_token = (uint32_t)(node_at - stream_begin) + 1;
 				break;
 			}
 			if (kind == 34 || kind == 35) {
@@ -1642,7 +2031,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				if (FAILED(status)) goto done;
 				if (pending_object) IInspectable_Release(pending_object);
 				pending_object = reference;
-				pending_token = (uint32_t)(node_at - begin) + 1;
+				pending_token = (uint32_t)(node_at - stream_begin) + 1;
 				break;
 			}
 			if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
@@ -1656,22 +2045,22 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			/* The value the entry takes: the object the just-closed scope attached, else the reference a preceding
 			 * Provide node installed (nodes 34/35 are always followed by the keyed insertion), else a pushed constant. */
 			value_object = last_object ? last_object : pending_object;
-			if (resource_map.capacity && pending_token && !last_object) {
-				uint32_t slot = (pending_token * 2654435761u) & (resource_map.capacity - 1);
-				while (resource_map.entries[slot].token) {
-					if (resource_map.entries[slot].token == pending_token) {
+			if (resource_map->capacity && pending_token && !last_object) {
+				uint32_t slot = (pending_token * 2654435761u) & (resource_map->capacity - 1);
+				while (resource_map->entries[slot].token) {
+					if (resource_map->entries[slot].token == pending_token) {
 						struct value mapped_key = {0};
 						mapped_key.kind = value_string;
-						status = metadata_string(m, resource_map.entries[slot].key, &mapped_key.text, &mapped_key.length);
+						status = metadata_string(m, resource_map->entries[slot].key, &mapped_key.text, &mapped_key.length);
 						if (SUCCEEDED(status)) status = add_to_dictionary(depth ? stack[depth - 1].object : NULL, &mapped_key,
 							value_object, pending_value_valid ? &pending_value : NULL);
 						if (FAILED(status)) goto done;
-						if (!resource_map.entries[slot].applied) {
-							resource_map.entries[slot].applied = TRUE;
-							--resource_map.remaining;
+						if (!resource_map->entries[slot].applied) {
+							resource_map->entries[slot].applied = TRUE;
+							--resource_map->remaining;
 						}
 					}
-					slot = (slot + 1) & (resource_map.capacity - 1);
+					slot = (slot + 1) & (resource_map->capacity - 1);
 				}
 			}
 			if (pending_theme_dictionary && value_object == pending_theme_dictionary) {
@@ -1687,7 +2076,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					child_theme = key.text;
 					child_theme_length = key.length;
 				}
-				loaded = load_nodes(m, pending_theme_begin, pending_theme_end, &deferred, value_object,
+				loaded = load_dictionary_content(m, pending_theme_begin, pending_theme_end, &deferred, value_object,
 					&into_used, context, deferral_depth + 1, child_theme, child_theme_length, pending_map_start, pending_map_limit);
 				if (deferred) IInspectable_Release(deferred);
 				IInspectable_Release(pending_theme_dictionary);
@@ -1769,12 +2158,12 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 							&IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&current))) {
 						BOOL into_used = FALSE;
 						current->lpVtbl->Release(current);
-						loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, stack[depth - 1].object,
+						loaded = load_dictionary_content(m, deferred_begin, deferred_end, &deferred, stack[depth - 1].object,
 							&into_used, context, deferral_depth + 1, effective_theme, effective_theme_length,
 							runtime_type == 10 ? runtime_data : 0, r.end);
 					} else {
 						loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, NULL, NULL, context,
-							deferral_depth + 1, effective_theme, effective_theme_length, runtime_type == 10 ? runtime_data : 0, r.end);
+							deferral_depth + 1, effective_theme, effective_theme_length, runtime_type == 10 ? runtime_data : 0, r.end, NULL);
 						if (SUCCEEDED(loaded) && deferred) {
 							__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
 							if (SUCCEEDED(IInspectable_QueryInterface(deferred, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary,
@@ -1835,12 +2224,14 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					} else applied = apply_value(stack[depth - 1].object, name, length, &value);
 				} else if (value.kind == value_string && value.text) {
 					IInspectable *resolved = NULL;
-					if (SUCCEEDED(resolve_resource(stack, depth, kind == 36, value.text, value.length, &resolved, 0,
-						effective_theme, effective_theme_length)) &&
-						resolved) {
+					HRESULT resolved_status = resolve_resource(stack, depth, kind == 36, value.text, value.length, &resolved, 0,
+						effective_theme, effective_theme_length);
+					if (FAILED(resolved_status) && resolved_status != E_BOUNDS) { status = resolved_status; goto done; }
+					if (SUCCEEDED(resolved_status) && resolved) {
 						applied = raven_xaml_element_apply_value(stack[depth - 1].object, name, length, resolved);
+						if (target && !context->tolerant && applied != S_OK) trace_resource_failure(value.text, value.length, resolved);
 						IInspectable_Release(resolved);
-					}
+					} else if (target && !context->tolerant) trace_resource_failure(value.text, value.length, NULL);
 				}
 				if (target && applied != S_OK && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
 			} else if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
@@ -1884,25 +2275,41 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			status = E_INVALIDARG;
 			goto done;
 		}
+		if (entry_frame && depth == 1 && !last_object && !pending_object && !pending_value_valid) {
+			const uint32_t token = (uint32_t)(begin - stream_begin) + 1;
+			for (uint32_t i = 0; i < resource_map->capacity; ++i)
+				if (resource_map->entries[i].token == token) resource_map->entries[i].end = r.at;
+			break;
+		}
 	}
 done:
+	g_current_effective_theme = previous_theme;
+	g_current_effective_theme_length = previous_theme_length;
+	TlsSetValue(deferred_tls, frame.previous);
 	/* The deepest failure is the evidence the caller wants: a nested load records its own node before the outer one
 	 * would overwrite it with the outer node. */
-	if (FAILED(status) && !nested_failed) {
-		last_failure_offset = (UINT32)node_at;
-		last_failure_status = status;
-	}
-	if (SUCCEEDED(status) && target && resource_map.remaining && !context->tolerant) {
+	if (SUCCEEDED(status) && target && !entry_frame && resource_map->remaining && !context->tolerant) {
 		status = E_NOTIMPL;
-		for (uint32_t i = 0; i < resource_map.capacity; ++i)
-			if (resource_map.entries[i].token && !resource_map.entries[i].seen) { status = E_INVALIDARG; break; }
+		for (uint32_t i = 0; i < resource_map->capacity; ++i)
+			if (resource_map->entries[i].token && !resource_map->entries[i].seen) { status = E_INVALIDARG; break; }
 	}
 	if (SUCCEEDED(status) && target && (pending_name || last_object || pending_theme_dictionary)) status = E_INVALIDARG;
+	if (FAILED(status) && !nested_failed) {
+		char message[] = "raven-xaml: XBF failure at 00000000, status 00000000\n";
+		static const char hex[] = "0123456789abcdef";
+		last_failure_offset = (UINT32)node_at;
+		last_failure_status = status;
+		for (unsigned i = 0; i < 8; ++i) {
+			message[27 + i] = hex[((UINT32)node_at >> ((7 - i) * 4)) & 15];
+			message[44 + i] = hex[((UINT32)status >> ((7 - i) * 4)) & 15];
+		}
+		OutputDebugStringA(message);
+	}
 	if (last_object) IInspectable_Release(last_object);
 	if (completed_value) IInspectable_Release(completed_value);
 	if (pending_object) IInspectable_Release(pending_object);
 	if (pending_theme_dictionary) IInspectable_Release(pending_theme_dictionary);
-	if (resource_map.entries) HeapFree(GetProcessHeap(), 0, resource_map.entries);
+	if (!entry_frame && resource_map->entries) HeapFree(GetProcessHeap(), 0, resource_map->entries);
 	/* The scopes unwind without their deferred applications: a failed document never half-applies the templates it
 	 * declared, and the objects the unwind releases own the only references the deferred targets held through them. */
 	while (depth) {
@@ -1933,38 +2340,39 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 		return E_POINTER;
 	*root = NULL;
 	if (!bytes || size < 12 || bytes[0] != 'X' || bytes[1] != 'B' || bytes[2] != 'F' || bytes[3] != 0)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2343\n"); return E_INVALIDARG; }
 	metadata_size = read_u32(bytes + 4);
 	node_size = read_u32(bytes + 8);
 	if (metadata_size > size - 12)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2347\n"); return E_INVALIDARG; }
 	table = (size_t)12 + metadata_size;
 	if (node_size < 4 || (size_t)node_size > size - table)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2350\n"); return E_INVALIDARG; }
 	node_end = table + node_size;
 	status = metadata_parse(&metadata, bytes, table);
 	if (FAILED(status))
 		return status;
 	count = read_u32(bytes + table);
 	if ((size_t)count > (node_end - table - 4) / 8)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2357\n"); return E_INVALIDARG; }
 	substreams = table + 4 + (size_t)count * 8;
 	context.m = &metadata;
 	context.table = table;
 	context.nodes = substreams;
 	context.count = count;
+	context.size = size;
 	/* Validate every extent before creating any objects; a later invalid stream cannot leak the first root. */
 	for (uint32_t index = 0; index < count; ++index) {
 		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
 		const uint32_t line_offset = read_u32(bytes + table + 4 + (size_t)index * 8 + 4);
 		if (node_offset > line_offset || line_offset > node_end - substreams)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2369\n"); return E_INVALIDARG; }
 	}
-	for (uint32_t index = 0; index < count && (!target || index == 0); ++index) {
-		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
-		const uint32_t line_offset = read_u32(bytes + table + 4 + (size_t)index * 8 + 4);
+	if (count) {
+		const uint32_t node_offset = read_u32(bytes + table + 4);
+		const uint32_t line_offset = read_u32(bytes + table + 4 + 4);
 		const size_t begin = substreams + node_offset, end = substreams + line_offset;
-		status = load_nodes(&metadata, begin, end, root, target, &target_used, &context, 0, g_pending_effective_theme, g_pending_effective_theme_length, 0, 0);
+		status = load_nodes(&metadata, begin, end, root, target, &target_used, &context, 0, g_pending_effective_theme, g_pending_effective_theme_length, 0, 0, NULL);
 		if (FAILED(status)) {
 			if (*root) {
 				IInspectable_Release(*root);

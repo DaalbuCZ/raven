@@ -187,6 +187,36 @@ int raven_entry(void)
 	if (found != 4 || status > 0) return 55;
 	uregex_close(empty);
 
+	// English cardinal and ordinal categories and conjunction list patterns.
+	{
+		typedef void *(__cdecl *plural_open)(const char *, int, int *);
+		typedef int (__cdecl *plural_select)(const void *, double, WCHAR *, int, int *);
+		typedef void *(__cdecl *list_open)(const char *, int *);
+		typedef int (__cdecl *list_format)(const void *, const WCHAR *const *, const int *, int, WCHAR *, int, int *);
+		LOAD(i18n, plural_open, uplrules_openForType)
+		LOAD(i18n, plural_select, uplrules_select)
+		LOAD(i18n, close_function, uplrules_close)
+		LOAD(i18n, list_open, ulistfmt_open)
+		LOAD(i18n, list_format, ulistfmt_format)
+		LOAD(i18n, close_function, ulistfmt_close)
+		void *cardinal = uplrules_openForType("en_US", 0, &status);
+		void *ordinal = uplrules_openForType("en", 1, &status);
+		void *list = ulistfmt_open("en-US", &status);
+		const WCHAR *items[] = { L"red", L"green", L"blue" };
+		if (!cardinal || !ordinal || !list || status > 0 ||
+			uplrules_select(cardinal, 1.0, out, 64, &status) != 3 || lstrcmpW(out, L"one") ||
+			uplrules_select(cardinal, 1.5, out, 64, &status) != 5 || lstrcmpW(out, L"other") ||
+			uplrules_select(ordinal, 22.0, out, 64, &status) != 3 || lstrcmpW(out, L"two") ||
+			uplrules_select(ordinal, 13.0, out, 64, &status) != 5 || lstrcmpW(out, L"other") ||
+			ulistfmt_format(list, items, NULL, 3, out, 64, &status) != 20 || lstrcmpW(out, L"red, green, and blue")) return 57;
+		status = 0;
+		if (ulistfmt_format(list, items, NULL, 2, NULL, 0, &status) != 13 || status != 15) return 58;
+		status = 0;
+		if (uplrules_openForType("fr", 0, &status) || status != 16) return 59;
+		status = 0;
+		uplrules_close(cardinal); uplrules_close(ordinal); ulistfmt_close(list);
+	}
+
 	// A pattern that would run for ever stops with the time limit.
 	static const WCHAR nested[] = {'(', 'a', '+', ')', '+', 'b'};
 	WCHAR many[40];

@@ -727,6 +727,14 @@ CRT size_t wcrtomb(char *to, wchar_t c, void *state)
 	return 1;
 }
 
+/* The C locale only represents a single byte, as wcrtomb does above. */
+CRT size_t c32rtomb(char *to, unsigned int c, void *state)
+{
+	if (!to) return 1;
+	if (c > 255) { set_errno(42); return (size_t)-1; }
+	return wcrtomb(to, (wchar_t)c, state);
+}
+
 typedef struct {
 	char *decimal_point, *thousands_sep, *grouping, *int_curr_symbol, *currency_symbol, *mon_decimal_point, *mon_thousands_sep, *mon_grouping,
 		*positive_sign, *negative_sign;

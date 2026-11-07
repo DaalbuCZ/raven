@@ -82,6 +82,86 @@ static HRESULT settings_root_path(WCHAR *path, BOOL create)
 	return (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT) ? S_OK : HRESULT_FROM_WIN32(ERROR_DIRECTORY);
 }
 
+/* The override is private to the package, outside the public LocalSettings map. */
+static HRESULT language_override_path(WCHAR *path, BOOL create)
+{
+	HRESULT result = settings_root_path(path, create);
+	if (FAILED(result)) return result;
+	if (lstrlenW(path) + 48 >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+	lstrcatW(path, L"\\language-override.dat");
+	return S_OK;
+}
+
+/* shortcut: checks subtag shape but not the full BCP-47 registry, upgrade when language metadata is available. */
+static BOOL valid_language_override(const WCHAR *text, UINT32 length)
+{
+	UINT32 part = 0;
+	if (length > 85) return FALSE;
+	for (UINT32 i = 0; i < length; ++i) {
+		WCHAR c = text[i];
+		if (c == L'-') {
+			if (!part || part > 8) return FALSE;
+			part = 0;
+		} else if ((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
+			(i && c >= L'0' && c <= L'9')) ++part;
+		else return FALSE;
+	}
+	return !length || (part && part <= 8);
+}
+
+HRESULT raven_language_override_read(HSTRING *out)
+{
+	WCHAR path[MAX_PATH], text[86];
+	DWORD bytes = 0;
+	HANDLE file;
+	HRESULT result;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	result = language_override_path(path, FALSE);
+	if (FAILED(result)) {
+		if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) || result == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)) return S_OK;
+		return result;
+	}
+	file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE) {
+		DWORD error = GetLastError();
+		return error == ERROR_FILE_NOT_FOUND ? S_OK : HRESULT_FROM_WIN32(error);
+	}
+	if (!ReadFile(file, text, sizeof text, &bytes, NULL)) result = last_error();
+	else if ((bytes % sizeof(WCHAR)) || bytes > 85 * sizeof(WCHAR) || !valid_language_override(text, bytes / sizeof(WCHAR))) result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+	else result = WindowsCreateString(text, bytes / sizeof(WCHAR), out);
+	CloseHandle(file);
+	return result;
+}
+
+HRESULT raven_language_override_write(HSTRING value)
+{
+	WCHAR path[MAX_PATH], temporary[MAX_PATH];
+	UINT32 length = 0;
+	const WCHAR *text = WindowsGetStringRawBuffer(value, &length);
+	DWORD written = 0;
+	HRESULT result;
+	HANDLE file;
+	if (!valid_language_override(text, length)) { char line[128]; wsprintfA(line, "raven-storage: language override refused length %lu first %.8s\n", (unsigned long)length, text); OutputDebugStringA(line); return E_INVALIDARG; }
+	result = language_override_path(path, TRUE);
+	if (FAILED(result)) return result;
+	lstrcpyW(temporary, path);
+	UINT32 offset = lstrlenW(temporary);
+	temporary[offset++] = L'.';
+	UINT64 id = ((UINT64)GetCurrentProcessId() << 32) | (UINT32)InterlockedIncrement(&settings_sequence);
+	for (int i = 15; i >= 0; --i) temporary[offset++] = hex_digits[(id >> (i * 4)) & 15];
+	temporary[offset] = 0;
+	file = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE) return last_error();
+	if (!WriteFile(file, text, length * sizeof(WCHAR), &written, NULL)) result = last_error();
+	else if (written != length * sizeof(WCHAR)) result = HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+	else if (!FlushFileBuffers(file)) result = last_error();
+	if (!CloseHandle(file) && SUCCEEDED(result)) result = last_error();
+	if (SUCCEEDED(result) && !MoveFileExW(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) result = last_error();
+	if (FAILED(result)) DeleteFileW(temporary);
+	return result;
+}
+
 static HRESULT settings_containers_path(WCHAR *path, BOOL create)
 {
 	HRESULT result = settings_root_path(path, create);
@@ -184,7 +264,10 @@ static HRESULT settings_path(struct settings_object *self, HSTRING key, WCHAR *p
 	UINT32 length = 0;
 	const WCHAR *text = WindowsGetStringRawBuffer(key, &length);
 	UINT64 hash = 14695981039346656037ULL;
-	if (length > 255) return E_INVALIDARG;
+	if (length > 255) {
+		raven_trace_note("raven-storage: settings key longer than 255\n");
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:269\n"); return E_INVALIDARG; }
+	}
 	HRESULT result = settings_directory(self, path);
 	if (FAILED(result)) return result;
 	if (lstrlenW(path) + 1 + 16 + 4 + 26 >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
@@ -263,8 +346,11 @@ static HRESULT settings_encode(IInspectable *object, struct settings_record *rec
 	property_value_i *value = NULL;
 	property_type type;
 	HRESULT result;
-	if (!object || FAILED(IInspectable_QueryInterface(object, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue, (void **)&value)))
-		return E_INVALIDARG;
+	if (!object) { record->type = PropertyType_Empty; record->length = 0; return S_OK; }
+	if (FAILED(IInspectable_QueryInterface(object, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue, (void **)&value))) {
+		raven_trace_note("raven-storage: settings value is not a property value\n");
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:352\n"); return E_INVALIDARG; }
+	}
 	result = value->lpVtbl->get_Type(value, &type);
 	if (SUCCEEDED(result)) {
 		record->type = (UINT32)type;
@@ -288,7 +374,10 @@ static HRESULT settings_encode(IInspectable *object, struct settings_record *rec
 			}
 			break;
 		}
-		default: result = E_INVALIDARG; break;
+		default:
+			raven_trace_note("raven-storage: settings value type not stored\n");
+			result = E_INVALIDARG;
+			break;
 		}
 	}
 	value->lpVtbl->Release(value);
@@ -298,6 +387,11 @@ static HRESULT settings_encode(IInspectable *object, struct settings_record *rec
 static HRESULT settings_decode(const struct settings_record *record, IInspectable **out)
 {
 	property_statics_i *factory = NULL;
+	if (record->type == PropertyType_Empty) {
+		if (record->length) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+		*out = NULL;
+		return S_OK;
+	}
 	HRESULT result = raven_property_value_statics(&factory);
 	if (FAILED(result)) return result;
 	switch (record->type) {
@@ -348,7 +442,7 @@ static HRESULT settings_insert(struct settings_object *self, HSTRING key, IInspe
 	HANDLE file;
 	if (!replaced) return E_POINTER;
 	*replaced = FALSE;
-	if (length > 255) return E_INVALIDARG;
+	if (length > 255) { raven_trace_note("raven-storage: settings key longer than 255\n"); return E_INVALIDARG; }
 	result = settings_encode(value, &record);
 	if (FAILED(result)) return result;
 	result = settings_read(self, key, &previous, old_path);
@@ -357,7 +451,7 @@ static HRESULT settings_insert(struct settings_object *self, HSTRING key, IInspe
 		IInspectable *check = NULL;
 		result = settings_decode(&previous, &check);
 		if (FAILED(result)) return result;
-		IInspectable_Release(check);
+		if (check) IInspectable_Release(check);
 		*replaced = TRUE;
 	}
 	result = settings_path(self, key, path, temporary);
@@ -386,7 +480,7 @@ static HRESULT settings_remove(struct settings_object *self, HSTRING key)
 	if (FAILED(result)) return result;
 	result = settings_decode(&record, &check);
 	if (FAILED(result)) return result;
-	IInspectable_Release(check);
+	if (check) IInspectable_Release(check);
 	return DeleteFileW(path) ? S_OK : last_error();
 }
 
@@ -703,7 +797,7 @@ static HRESULT WINAPI settings_observed_add(__FIObservableMap_2_HSTRING_IInspect
 		return E_POINTER;
 	token->value = 0;
 	if (!handler)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:800\n"); return E_INVALIDARG; }
 	AcquireSRWLockExclusive(&self->lock);
 	if (self->handler_count == self->handler_capacity) {
 		const UINT32 capacity = self->handler_capacity ? self->handler_capacity * 2 : 4;
@@ -732,7 +826,7 @@ static HRESULT WINAPI settings_observed_remove(__FIObservableMap_2_HSTRING_IInsp
 	struct settings_object *self = SETTINGS_OWNER(iface, observable);
 	__FIMapChangedEventHandler_2_HSTRING_IInspectable *handler = NULL;
 	if (token.value == 0)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:829\n"); return E_INVALIDARG; }
 	AcquireSRWLockExclusive(&self->lock);
 	for (UINT32 index = 0; index < self->handler_count; ++index) {
 		if (self->handlers[index].token == token.value) {
@@ -958,7 +1052,13 @@ static HRESULT settings_open_child(struct settings_object *parent, HSTRING name,
 	if (!out) return E_POINTER;
 	*out = NULL;
 	if (!length || length > 255 || (disposition != ApplicationDataCreateDisposition_Always &&
-		disposition != ApplicationDataCreateDisposition_Existing)) return E_INVALIDARG;
+		disposition != ApplicationDataCreateDisposition_Existing)) {
+		char line[96];
+		wsprintfA(line, "raven-storage: open child refused length %lu disposition %lu\n",
+			(unsigned long)length, (unsigned long)disposition);
+		OutputDebugStringA(line);
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:1060\n"); return E_INVALIDARG; }
+	}
 	if (parent->depth >= 32) return HRESULT_FROM_WIN32(ERROR_DIRECTORY);
 	result = settings_directory(parent, parent_path);
 	if (FAILED(result)) return result;

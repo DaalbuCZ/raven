@@ -50,13 +50,38 @@ void raven_weak_source_init(struct raven_weak_source *weak, void *owner, LONG *o
 void raven_weak_source_disconnect(struct raven_weak_source *weak);
 extern const struct raven_weak_source_vtbl raven_weak_source_table;
 
+/* ---- Reference tracking (implemented in reference_tracker.c) ----
+ *
+ * The IReferenceTracker face most XAML framework objects carry and the .NET runtime negotiates with when a
+ * XAML object is handed to managed code; the traced Shapr3D run asks it of the Frame exactly once and treats
+ * the refusal as the prelude to tearing a cached managed wrapper down twice. The owner embeds the part and
+ * forwards its IUnknown exactly as the weak source does; the tracker notifications keep per-owner counters,
+ * and GetReferenceTrackerManager hands out the one process-wide manager. */
+#include "windows_ui_xaml_hosting_referencetracker.h"
+
+struct raven_tracker_part {
+	const __x_ABI_CWindows_CUI_CXaml_CHosting_CIReferenceTrackerVtbl *lpVtbl;
+	void *owner;
+	LONG *owner_refs;
+	raven_weak_query_fn owner_query;
+	uint32_t connected; /* tracker sources currently connected (Connect/DisconnectFromTrackerSource) */
+	int64_t tracker_refs; /* the AddRef/ReleaseFromTrackerSource balance */
+	boolean pegged;
+};
+
+void raven_tracker_part_init(struct raven_tracker_part *part, void *owner, LONG *owner_refs,
+	raven_weak_query_fn owner_query);
+
 /* The composition interfaces the rendering bridge passes between modules; only pointers appear here. */
 typedef struct __x_ABI_CWindows_CUI_CComposition_CICompositor __x_ABI_CWindows_CUI_CComposition_CICompositor;
 typedef struct __x_ABI_CWindows_CUI_CComposition_CIVisual __x_ABI_CWindows_CUI_CComposition_CIVisual;
 
 extern LONG raven_xaml_objects;
 HRESULT raven_current_window(__x_ABI_CWindows_CUI_CCore_CICoreWindow **out);
+HRESULT raven_window_minimum_size(__x_ABI_CWindows_CUI_CCore_CICoreWindow *window, __x_ABI_CWindows_CFoundation_CSize size);
 HRESULT raven_application_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_application_enter_xaml(void);
+void raven_application_leave_xaml(void);
 HRESULT raven_xaml_application_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_window_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_controls_factory(HSTRING name, IActivationFactory **out);
@@ -85,11 +110,21 @@ BOOL raven_xaml_resource_reference_key(IInspectable *object, const WCHAR **key, 
 HRESULT raven_xaml_element_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
 HRESULT raven_xaml_window_set_name(IInspectable *object, const WCHAR *text, UINT32 length);
 BOOL raven_xaml_window_notify(DWORD reason, void *reserved);
+HRESULT raven_language_override_read(HSTRING *out);
+HRESULT raven_language_override_write(HSTRING value);
+HRESULT raven_xaml_application_languages_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_xaml_globalization_preferences_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_resource_context_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_memory_manager_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_xaml_xml_dom_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_api_information_factory(HSTRING name, IActivationFactory **out);
+struct __x_ABI_CWindows_CStorage_CIStorageFolder;
+HRESULT raven_storage_installed_folder(const WCHAR *path, struct __x_ABI_CWindows_CStorage_CIStorageFolder **out);
 HRESULT raven_storage_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_style_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_automation_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_automation_properties_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_data_writer_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_dictionary_create_controls_resources(IInspectable **out);
 HRESULT raven_mrt_factory(HSTRING name, IActivationFactory **out);
@@ -109,6 +144,7 @@ HRESULT raven_acrylic_brush_set_float(IInspectable *brush, const WCHAR *name, UI
 HRESULT raven_acrylic_brush_set_color(IInspectable *brush, const WCHAR *name, UINT32 length, const __x_ABI_CWindows_CUI_CColor *value);
 /* The boxed Windows.UI.Color value (property_value.c): the struct a PushScopeCreateTypeWithConstant node carries is not
  * activatable, so the loader boxes the four bytes into this object. */
+HRESULT raven_double_value_create(DOUBLE value, IInspectable **out);
 HRESULT raven_color_value_create(const __x_ABI_CWindows_CUI_CColor *color, IInspectable **out);
 HRESULT raven_color_value_of(IInspectable *object, __x_ABI_CWindows_CUI_CColor *color);
 HRESULT raven_enum_value_create(const WCHAR *type_name, UINT32 type_length, INT32 value, IInspectable **out);
@@ -117,6 +153,10 @@ HRESULT raven_xaml_system_color(const WCHAR *key, UINT32 length, const WCHAR *th
 /* The platform's authored default styles (the Default*Style family and the named typography styles the OS theme
  * resources define), what a compiled document's BasedOn names: S_OK with the style, S_FALSE for any other key. */
 HRESULT raven_xaml_platform_resource(const WCHAR *key, UINT32 length, IInspectable **out);
+typedef HRESULT (*raven_resource_realize_fn)(void *context, IInspectable *dictionary, UINT32 token);
+typedef void (*raven_resource_release_fn)(void *context);
+HRESULT raven_xaml_dictionary_defer(IInspectable *dictionary, const WCHAR *key, UINT32 length, void *context,
+	UINT32 token, raven_resource_realize_fn realize, raven_resource_release_fn release);
 HRESULT raven_xaml_application_current(IInspectable **out);
 HRESULT raven_xaml_window_current(IInspectable **out);
 HRESULT raven_launch_arguments_create(IInspectable **out);
@@ -192,3 +232,7 @@ HRESULT raven_xaml_element_render_slot(IInspectable *object, UINT32 *row, UINT32
 HRESULT raven_xaml_elements_set_integer(IInspectable *object, const WCHAR *name, UINT32 length, int64_t value);
 
 #endif
+
+/* A member the component does not serve names itself in the trace, so the guest's next wall is legible. */
+void raven_trace_not_implemented(const char *function);
+void raven_trace_note(const char *text);

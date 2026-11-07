@@ -2043,8 +2043,156 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 								if (const auto value_text = describe_text(process, value); !value_text.empty())
 									std::cerr << " <" << value_text << '>';
 						}
+						if (std::getenv("RAVEN_STEP_REGS")) {
+							// Diagnosis aid: the register state at each stepped instruction, for decoding a failing
+							// interop round — the marshalling lookups carry the type and interface in registers.
+							const auto registers = process.context().registers;
+							std::cerr << std::hex << " @ " << rip << " | rax " << registers.rax << " rcx " << registers.rcx
+								<< " rdx " << registers.rdx << " r8 " << registers.r8 << " r9 " << registers.r9
+								<< " r10 " << registers.r10 << " r11 " << registers.r11 << std::dec;
+							if (const char *dump = std::getenv("RAVEN_STEP_DUMP")) {
+								// Diagnosis aid: MODULE+OFFSET — when the step lands there, dump memory at Rcx,
+								// the descriptor the failing .NET interop lookup dereferences.
+								const std::string where(dump);
+								const auto at = where.find('+');
+								if (at != std::string::npos) {
+									const uint64_t base = [&]() -> uint64_t {
+										for (const auto &[module_name, module] : modules.all())
+											if (module_name == where.substr(0, at))
+											return module->loaded.base();
+										return 0;
+									}();
+								if (base && rip == base + std::stoull(where.substr(at + 1), nullptr, 16)) {
+									// RAVEN_STEP_DUMP2 names a register (rbx, rdx, ...) to dump instead of Rcx.
+									uint64_t address = registers.rcx;
+									if (const char *second = std::getenv("RAVEN_STEP_DUMP2")) {
+										if (!strcmp(second, "rbx")) address = registers.rbx;
+										else if (!strcmp(second, "rdx")) address = registers.rdx;
+										else if (!strcmp(second, "r8")) address = registers.r8;
+									}
+									try {
+										const auto bytes = process.read_memory(address, 0x70);
+										std::cerr << "\nraven: descriptor at " << std::hex << address << ":";
+											for (size_t i = 0; i < bytes.size(); i += 8) {
+												uint64_t value = 0;
+												std::memcpy(&value, bytes.data() + i, 8);
+												std::cerr << ' ' << value;
+												// The descriptor's strings (the signature, the type name) ride the HSTRING arena.
+												if (const auto text = describe_text(process, value); !text.empty())
+													std::cerr << " <" << text << '>';
+											}
+											std::cerr << std::dec;
+											// The arena pointers the descriptor carries (the signature, the name) — dump raw.
+											for (size_t i = 0x20; i < 0x40; i += 8) {
+												uint64_t value = 0;
+												std::memcpy(&value, bytes.data() + i, 8);
+												if (value < 0x1000000)
+													continue;
+												try {
+													const auto inner = process.read_memory(value, 48);
+													std::cerr << "\nraven:   [" << std::hex << i << "] -> " << value << ":";
+													for (size_t j = 0; j < inner.size(); j += 8) {
+														uint64_t word = 0;
+														std::memcpy(&word, inner.data() + j, 8);
+														std::cerr << ' ' << word;
+													}
+													std::cerr << std::dec;
+												} catch (const std::exception &) {
+												}
+											}
+										} catch (const std::exception &) {
+										}
+									}
+								}
+							}
+						}
 						std::cerr << '\n';
 					});
+			}
+			// TEMPORARY DIAGNOSIS AID (Shapr3D interop wall): .NET Native call sites reach their interop
+			// helpers through .rdata indirect cells that carry only a fixup index in the file and are filled
+			// at module init, so which helper a failing call targets is not visible statically. When the API
+			// named by RAVEN_DUMP_CELLS is first entered, resolve every cell named by
+			// RAVEN_DUMP_CELLS_LIST="module:offset,module:offset,..." (module name as in the module set,
+			// hex offset) and print where it points.
+			if (const char *cells_api = std::getenv("RAVEN_DUMP_CELLS"); cells_api && api_name == cells_api) {
+				static bool cells_dumped = false;
+				const char *cells_list = std::getenv("RAVEN_DUMP_CELLS_LIST");
+				if (!cells_dumped && cells_list) {
+					cells_dumped = true;
+					const std::string list(cells_list);
+					for (size_t at = 0; at < list.size();) {
+						const auto comma = list.find(',', at);
+						const std::string item = list.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+						at = comma == std::string::npos ? list.size() : comma + 1;
+						const auto colon = item.find(':');
+						if (colon == std::string::npos)
+							continue;
+						const std::string module_name = item.substr(0, colon);
+						const uint64_t base = [&]() -> uint64_t {
+							for (const auto &[name, module] : modules.all())
+								if (name == module_name)
+									return module->loaded.base();
+							return 0;
+						}();
+						if (!base)
+							continue;
+						try {
+							const uint64_t cell = base + std::stoull(item.substr(colon + 1), nullptr, 16);
+							const auto bytes = process.read_memory(cell, 8);
+							uint64_t value = 0;
+							std::memcpy(&value, bytes.data(), 8);
+							std::cerr << "raven: cell " << item << " @ " << std::hex << cell << " = " << value;
+							for (const auto &[name, module] : modules.all())
+								if (value >= module->loaded.base() && value < module->loaded.base() + module->image.image_size)
+									std::cerr << " (" << name << "+0x" << value - module->loaded.base() << ')';
+							std::cerr << std::dec << '\n';
+						} catch (const std::exception &) {
+							std::cerr << "raven: cell " << item << " unreadable\n";
+						}
+					}
+				}
+			}
+			// TEMPORARY DIAGNOSIS AID (Shapr3D interop wall): SharedLibrary's interop marshalling fails on
+			// a runtime-created generic type no module carries marshalling data for (deterministically, on
+			// raven as on Windows), and the compiled marshallers report the failure by calling the shared
+			// factory at sharedlibrary.dll+0x847fd0, which builds the MissingInteropDataException and throws
+			// it — the throw that ends OnLaunched. With RAVEN_TOLERATE_MISSING_INTEROP the factory is
+			// replaced with a return of null, so the failing marshalling round runs on without the
+			// exception. What the guest does with an unmarshalled value is undefined; this only says
+			// whether the window pipeline can run past the wall.
+			static const bool tolerate_missing_interop = std::getenv("RAVEN_TOLERATE_MISSING_INTEROP") != nullptr;
+			static bool missing_interop_patched = false;
+			if (tolerate_missing_interop && !missing_interop_patched) {
+				for (const auto &[name, module] : modules.all())
+					if (name == "sharedlibrary.dll") {
+						missing_interop_patched = true;
+						try {
+							// The factory sits in the execute-only .text mapping; open it for the patch.
+							const std::vector<uint8_t> ret0{0x31, 0xc0, 0xc3}; // xor eax,eax; ret
+							const uint64_t factory = module->loaded.base() + 0x847fd0;
+							const auto before = process.read_memory(factory, 4);
+							if (before.size() == 4 && before[0] == 0x55 && before[1] == 0x53 && before[2] == 0x56 && before[3] == 0x57) {
+								process.protect_image(factory & ~uint64_t(0xfff), 0x1000, 0x7 /* RWX */);
+								process.write_memory(factory, ret0);
+								process.protect_image(factory & ~uint64_t(0xfff), 0x1000, 0x5 /* RX */);
+								std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP patched sharedlibrary.dll+847fd0 (MissingInteropData factory returns null)\n";
+							} else
+								std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP unexpected bytes at sharedlibrary.dll+847fd0, not patched\n";
+							// The shared marshalling-failure helper every compiled marshaller funnels through.
+							const uint64_t helper = module->loaded.base() + 0x8621c0;
+							const auto head = process.read_memory(helper, 5);
+							if (head.size() == 5 && head[0] == 0x53 && head[1] == 0x48 && head[2] == 0x83 && head[3] == 0xec && head[4] == 0x20) {
+								process.protect_image(helper & ~uint64_t(0xfff), 0x1000, 0x7 /* RWX */);
+								process.write_memory(helper, ret0);
+								process.protect_image(helper & ~uint64_t(0xfff), 0x1000, 0x5 /* RX */);
+								std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP patched sharedlibrary.dll+8621c0 (marshalling-failure helper returns null)\n";
+							} else
+								std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP unexpected bytes at sharedlibrary.dll+8621c0, not patched\n";
+						} catch (const std::exception &error) {
+							std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP patch failed: " << error.what() << '\n';
+						}
+					}
 			}
 			if (api_name=="RtlRaiseStatus")
 				return native_raise_rtl_exception(process,true);
@@ -2181,6 +2329,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	const auto prefix = NativePrefix::from_environment();
 	prefix.place_runtime_components(std::filesystem::path(bootstrap).parent_path());
 	NativePaths paths(prefix);
+	if (launch) if (const auto root = paths.application_package_root(launch->image_path)) module_api.set_package_root(to_utf8(*root));
 	if (launch && !launch->directory.empty())
 		paths.set_current(launch->directory);
 	desktop.set_section_source([&](uint64_t handle) -> std::optional<std::pair<int, uint64_t>> {
@@ -2748,6 +2897,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					std::cerr << "raven: library file not found: " << identity << '\n';
 				throw LoadFailure{126};
 			}
+			if (std::getenv("RAVEN_TRACE_DEBUG"))
+				std::cerr << "raven: mapped " << identity << " from " << (origin.empty() ? "<runtime>" : origin.string()) << '\n';
 			// A file that is no program image at all, a type library tried as a resource module first, is ERROR_BAD_EXE_FORMAT.
 			std::optional<PEImage> parsed;
 			try {
@@ -2969,7 +3120,24 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	});
 	// Thread notifications reach the executable's TLS callbacks first, then every loaded module in load order (reverse on exit).
 	threads.set_notifier([&](uint32_t reason) {
+		// The FLS callbacks run before the detach notifications, the way LdrShutdownThread orders them; a runtime
+		// that keeps its per-thread state in FLS cannot detach without them.
+		if (reason == 3 && kernel.fls && !std::getenv("RAVEN_SKIP_FLS_DETACH")) {
+			kernel.fls->detach(kernel.environment.thread_id(), kernel.call);
+			// FlsGetValue has a guest-side fast path reading this TEB array. Clear it
+			// alongside the host FLS state before DLL_THREAD_DETACH runs, or a CRT
+			// can free the callback's value again after its allocation has been reused.
+			const auto pointer = process.read_memory(kernel.environment.teb() + 0x17c8, 8);
+			uint64_t array = 0;
+			std::memcpy(&array, pointer.data(), sizeof(array));
+			if (array)
+				process.write_memory(array, std::vector<uint8_t>(0x8000, 0));
+		}
 		const auto notify = [&](const PEModule &module) {
+			if (std::getenv("RAVEN_TRACE_DEBUG")) {
+				const auto name = module.name;
+				std::cerr << "raven: notify " << name << " reason " << reason << "\n";
+			}
 			if (const auto stopped = notify_tls(module, reason); stopped.stop != NativeStop::returned)
 				throw stopped;
 			if ((module.image.characteristics & 0x2000) && module.image.entry && !module.runtime_api && !module.image.il_only()) {

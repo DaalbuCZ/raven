@@ -22,3 +22,10 @@ EXPORTS
 	uregex_setText = icu.uregex_setText
 	uregex_setUText = icu.uregex_setUText
 	uregex_start = icu.uregex_start
+
+	uplrules_openForType = icu.uplrules_openForType
+	uplrules_select = icu.uplrules_select
+	uplrules_close = icu.uplrules_close
+	ulistfmt_open = icu.ulistfmt_open
+	ulistfmt_format = icu.ulistfmt_format
+	ulistfmt_close = icu.ulistfmt_close

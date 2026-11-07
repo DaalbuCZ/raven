@@ -32,10 +32,25 @@
 #include <stddef.h>
 #include <windows.storage.h>
 #include <windows.storage.streams.h>
+#include <robuffer.h>
 #include "windows_storage.h"
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
+static void trace_not_implemented(const char *function)
+{
+	WCHAR message[128];
+	UINT32 at = 0;
+	static const WCHAR head[] = L"raven-storage not implemented: ";
+	for (const WCHAR *scan = head; *scan && at < ARRAYSIZE(message) - 1; ++scan)
+		message[at++] = *scan;
+	for (const char *scan = function; *scan && at < ARRAYSIZE(message) - 1; ++scan)
+		message[at++] = (WCHAR)*scan;
+	message[at] = 0;
+	if (GetEnvironmentVariableW(L"RAVEN_TRACE_DEBUG", NULL, 0))
+		OutputDebugStringW(message);
+}
+
 #ifndef E_ILLEGAL_METHOD_CALL
 #define E_ILLEGAL_METHOD_CALL ((HRESULT)0x8000000e)
 #endif
@@ -134,21 +149,21 @@ static BOOL executable_directory(WCHAR *path /* MAX_PATH */)
 
 /* The LocalState directory: created on demand, verified afterwards, so get_LocalFolder answers a directory that
  * exists by the time the call returns. */
-static BOOL ensure_local_state(WCHAR *path /* MAX_PATH */)
+static BOOL ensure_application_folder(WCHAR *path /* MAX_PATH */, const WCHAR *folder_name)
 {
 	WCHAR directory[MAX_PATH];
 	DWORD attributes;
 	if (!executable_directory(directory))
 		return FALSE;
-	if ((UINT32)lstrlenW(directory) + 1 + (UINT32)lstrlenW(local_state_name) + 1 >= MAX_PATH)
+	if ((UINT32)lstrlenW(directory) + 1 + (UINT32)lstrlenW(folder_name) + 1 >= MAX_PATH)
 		return FALSE;
 	lstrcpyW(path, directory);
 	lstrcatW(path, L"\\");
-	lstrcatW(path, local_state_name);
+	lstrcatW(path, folder_name);
 	attributes = GetFileAttributesW(path);
 	if (attributes != INVALID_FILE_ATTRIBUTES)
 		return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-	if (!CreateDirectoryW(path, NULL))
+	if (!CreateDirectoryW(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
 		return FALSE;
 	attributes = GetFileAttributesW(path);
 	return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -545,21 +560,175 @@ static const __x_ABI_CWindows_CFoundation_CIAsyncActionVtbl storage_action_table
 
 STORAGE_ASYNC_NEW(storage_action, async_action_i)
 
+typedef __x_ABI_CWindows_CStorage_CStreams_CIInputStream input_i;
+typedef __FIAsyncOperation_1_Windows__CStorage__CStreams__CIInputStream input_operation_i;
+typedef __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStreams__CIInputStream input_done_i;
+typedef __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32 read_operation_i;
+typedef __FIAsyncOperationWithProgressCompletedHandler_2_Windows__CStorage__CStreams__CIBuffer_UINT32 read_done_i;
+typedef __FIAsyncOperationProgressHandler_2_Windows__CStorage__CStreams__CIBuffer_UINT32 progress_i;
+typedef __x_ABI_CWindows_CStorage_CStreams_CIBuffer buffer_i;
+typedef __x_ABI_CWindows_CFoundation_CIClosable IClosable;
+typedef __x_ABI_CWindows_CFoundation_CIClosableVtbl IClosableVtbl;
+#define IID_IClosable IID___x_ABI_CWindows_CFoundation_CIClosable
+#define input_done_i_AddRef __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStreams__CIInputStream_AddRef
+#define input_done_i_Release __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStreams__CIInputStream_Release
+#define input_done_i_Invoke __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStreams__CIInputStream_Invoke
+#define read_done_i_AddRef __FIAsyncOperationWithProgressCompletedHandler_2_Windows__CStorage__CStreams__CIBuffer_UINT32_AddRef
+#define read_done_i_Release __FIAsyncOperationWithProgressCompletedHandler_2_Windows__CStorage__CStreams__CIBuffer_UINT32_Release
+#define read_done_i_Invoke __FIAsyncOperationWithProgressCompletedHandler_2_Windows__CStorage__CStreams__CIBuffer_UINT32_Invoke
+
+struct input_operation { input_operation_i iface; IAsyncInfo info; struct async_core core; input_i *result; };
+static const WCHAR input_operation_type_name[]=L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.Streams.IInputStream>";
+static void input_operation_free(struct input_operation *self) { if (self->result) self->result->lpVtbl->Release(self->result); }
+STORAGE_ASYNC_LIFETIME(input_operation,input_operation_i,&IID___FIAsyncOperation_1_Windows__CStorage__CStreams__CIInputStream,input_done_i)
+STORAGE_ASYNC_COMPLETED(input_operation,input_operation_i,input_done_i)
+STORAGE_ASYNC_FINISH(input_operation,input_operation_i,input_done_i)
+static HRESULT WINAPI input_operation_results(input_operation_i *iface,input_i **out)
+{
+	struct input_operation *self=(void *)iface;
+	if (!out) return E_POINTER; *out=NULL;
+	if (self->core.closed) return RO_E_CLOSED;
+	if (self->core.status==Started) return E_ILLEGAL_METHOD_CALL;
+	if (FAILED(self->core.error)) return self->core.error;
+	if ((*out=self->result)) (*out)->lpVtbl->AddRef(*out);
+	return S_OK;
+}
+static const __FIAsyncOperation_1_Windows__CStorage__CStreams__CIInputStreamVtbl input_operation_table={input_operation_query,input_operation_addref,input_operation_release,input_operation_iids,input_operation_class,input_operation_trust,input_operation_put_completed,input_operation_get_completed,input_operation_results};
+STORAGE_ASYNC_NEW(input_operation,input_operation_i)
+
+struct read_operation { read_operation_i iface; IAsyncInfo info; struct async_core core; buffer_i *result; progress_i *progress; };
+static const WCHAR read_operation_type_name[]=L"Windows.Foundation.IAsyncOperationWithProgress`2<Windows.Storage.Streams.IBuffer, UInt32>";
+static void read_operation_free(struct read_operation *self)
+{
+	if (self->result) self->result->lpVtbl->Release(self->result);
+	if (self->progress) self->progress->lpVtbl->Release(self->progress);
+}
+STORAGE_ASYNC_LIFETIME(read_operation,read_operation_i,&IID___FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32,read_done_i)
+STORAGE_ASYNC_COMPLETED(read_operation,read_operation_i,read_done_i)
+STORAGE_ASYNC_FINISH(read_operation,read_operation_i,read_done_i)
+static HRESULT WINAPI read_progress_put(read_operation_i *iface,progress_i *handler)
+{
+	struct read_operation *self=(void *)iface;
+	if (handler) handler->lpVtbl->AddRef(handler);
+	if (self->progress) self->progress->lpVtbl->Release(self->progress);
+	self->progress=handler; return S_OK;
+}
+static HRESULT WINAPI read_progress_get(read_operation_i *iface,progress_i **out)
+{
+	struct read_operation *self=(void *)iface;
+	if (!out) return E_POINTER;
+	if ((*out=self->progress)) (*out)->lpVtbl->AddRef(*out);
+	return S_OK;
+}
+static HRESULT WINAPI read_operation_results(read_operation_i *iface,buffer_i **out)
+{
+	struct read_operation *self=(void *)iface;
+	if (!out) return E_POINTER; *out=NULL;
+	if (self->core.closed) return RO_E_CLOSED;
+	if (self->core.status==Started) return E_ILLEGAL_METHOD_CALL;
+	if (FAILED(self->core.error)) return self->core.error;
+	if ((*out=self->result)) (*out)->lpVtbl->AddRef(*out);
+	return S_OK;
+}
+static const __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32Vtbl read_operation_table={read_operation_query,read_operation_addref,read_operation_release,read_operation_iids,read_operation_class,read_operation_trust,read_progress_put,read_progress_get,read_operation_put_completed,read_operation_get_completed,read_operation_results};
+STORAGE_ASYNC_NEW(read_operation,read_operation_i)
+
+struct file_input { input_i iface; IClosable closable; LONG refs; HANDLE handle; };
+static HRESULT WINAPI input_query(input_i *iface,REFIID iid,void **out)
+{
+	struct file_input *self=(void *)iface;
+	if (!out) return E_POINTER; *out=NULL;
+	if (equal_iid(iid,&IID_IUnknown) || equal_iid(iid,&IID_IInspectable) || equal_iid(iid,&IID_IAgileObject) || equal_iid(iid,&IID___x_ABI_CWindows_CStorage_CStreams_CIInputStream)) *out=iface;
+	else if (equal_iid(iid,&IID_IClosable)) *out=&self->closable;
+	else return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs); return S_OK;
+}
+static ULONG WINAPI input_addref(input_i *iface) { return InterlockedIncrement(&((struct file_input *)iface)->refs); }
+static ULONG WINAPI input_release(input_i *iface)
+{
+	struct file_input *self=(void *)iface; LONG refs=InterlockedDecrement(&self->refs);
+	if (!refs) { if (self->handle!=INVALID_HANDLE_VALUE) CloseHandle(self->handle); FREE(self); InterlockedDecrement(&raven_xaml_objects); }
+	return refs;
+}
+static HRESULT WINAPI input_iids(input_i *iface,ULONG *count,IID **out) { (void)iface; return inspectable_iids(count,out); }
+static HRESULT WINAPI input_name(input_i *iface,HSTRING *out) { (void)iface; return create_string(L"Windows.Storage.Streams.IInputStream",out); }
+static HRESULT WINAPI input_trust(input_i *iface,TrustLevel *out) { (void)iface; return inspectable_trust(out); }
+static HRESULT WINAPI input_read(input_i *iface,buffer_i *buffer,UINT32 count,__x_ABI_CWindows_CStorage_CStreams_CInputStreamOptions options,read_operation_i **out)
+{
+	struct file_input *self=(void *)iface; struct read_operation *operation; __x_Windows_CStorage_CStreams_CIBufferByteAccess *access=NULL;
+	UINT32 capacity=0; BYTE *bytes=NULL; DWORD taken=0; HRESULT result;
+	(void)options;
+	if (!out) return E_POINTER; *out=NULL;
+	if (!buffer) { raven_trace_note("raven-storage: null buffer\n"); return E_INVALIDARG; }
+	if (self->handle==INVALID_HANDLE_VALUE) return RO_E_CLOSED;
+	result=buffer->lpVtbl->get_Capacity(buffer,&capacity);
+	if (FAILED(result)) return result;
+	if (count>capacity) { raven_trace_note("raven-storage: count over capacity\n"); return E_INVALIDARG; }
+	result=buffer->lpVtbl->QueryInterface(buffer,&IID___x_Windows_CStorage_CStreams_CIBufferByteAccess,(void **)&access);
+	if (FAILED(result)) return result;
+	result=access->lpVtbl->Buffer(access,&bytes);
+	if (SUCCEEDED(result) && !ReadFile(self->handle,bytes,count,&taken,NULL)) result=last_error();
+	access->lpVtbl->Release(access);
+	if (SUCCEEDED(result)) result=buffer->lpVtbl->put_Length(buffer,taken);
+	if (!(operation=read_operation_new())) return E_OUTOFMEMORY;
+	if (SUCCEEDED(result)) { operation->result=buffer; buffer->lpVtbl->AddRef(buffer); }
+	read_operation_finish(&operation->iface,result,SUCCEEDED(result)?Completed:Error);
+	*out=&operation->iface; return S_OK;
+}
+static const __x_ABI_CWindows_CStorage_CStreams_CIInputStreamVtbl input_table={input_query,input_addref,input_release,input_iids,input_name,input_trust,input_read};
+static struct file_input *input_owner(IClosable *iface) { return CONTAINING_RECORD(iface,struct file_input,closable); }
+static HRESULT WINAPI input_close_query(IClosable *iface,REFIID iid,void **out) { return input_query(&input_owner(iface)->iface,iid,out); }
+static ULONG WINAPI input_close_addref(IClosable *iface) { return input_addref(&input_owner(iface)->iface); }
+static ULONG WINAPI input_close_release(IClosable *iface) { return input_release(&input_owner(iface)->iface); }
+static HRESULT WINAPI input_close_iids(IClosable *iface,ULONG *count,IID **out) { (void)iface; return inspectable_iids(count,out); }
+static HRESULT WINAPI input_close_name(IClosable *iface,HSTRING *out) { (void)iface; return create_string(L"Windows.Storage.Streams.IInputStream",out); }
+static HRESULT WINAPI input_close_trust(IClosable *iface,TrustLevel *out) { (void)iface; return inspectable_trust(out); }
+static HRESULT WINAPI input_close(IClosable *iface) { struct file_input *self=input_owner(iface); if (self->handle!=INVALID_HANDLE_VALUE) { CloseHandle(self->handle); self->handle=INVALID_HANDLE_VALUE; } return S_OK; }
+static const IClosableVtbl input_close_table={input_close_query,input_close_addref,input_close_release,input_close_iids,input_close_name,input_close_trust,input_close};
+
 /* The StorageFile: a name, the full path and the extension, bound to nothing but the file system itself. */
 #define FILE_NAME_MAX 96
 
 struct file_object {
 	file_i iface;
 	item_i item;
+	__x_ABI_CWindows_CStorage_CStreams_CIInputStreamReference input_reference;
 	LONG refs;
 	WCHAR name[FILE_NAME_MAX];
 	WCHAR path[MAX_PATH];
 	WCHAR type[FILE_NAME_MAX]; /* the extension with the dot, empty when the name carries none */
+	BOOL read_only;
 };
 
 static HRESULT WINAPI file_query(file_i *iface, REFIID iid, void **out);
 static ULONG WINAPI file_addref(file_i *iface);
 static ULONG WINAPI file_release(file_i *iface);
+
+typedef __x_ABI_CWindows_CStorage_CStreams_CIInputStreamReference input_reference_i;
+static struct file_object *file_reference_owner(input_reference_i *iface) { return CONTAINING_RECORD(iface,struct file_object,input_reference); }
+static HRESULT WINAPI file_reference_query(input_reference_i *iface,REFIID iid,void **out) { return file_query(&file_reference_owner(iface)->iface,iid,out); }
+static ULONG WINAPI file_reference_addref(input_reference_i *iface) { return file_addref(&file_reference_owner(iface)->iface); }
+static ULONG WINAPI file_reference_release(input_reference_i *iface) { return file_release(&file_reference_owner(iface)->iface); }
+static HRESULT WINAPI file_reference_iids(input_reference_i *iface,ULONG *count,IID **out) { (void)iface; return inspectable_iids(count,out); }
+static HRESULT WINAPI file_reference_name(input_reference_i *iface,HSTRING *out) { (void)iface; return create_string(file_class_name,out); }
+static HRESULT WINAPI file_reference_trust(input_reference_i *iface,TrustLevel *out) { (void)iface; return inspectable_trust(out); }
+static HRESULT WINAPI file_reference_open(input_reference_i *iface,input_operation_i **out)
+{
+	struct file_object *file=file_reference_owner(iface); struct input_operation *operation; struct file_input *stream;
+	HANDLE handle; HRESULT result;
+	if (!out) return E_POINTER; *out=NULL;
+	handle=CreateFileW(file->path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+	result=handle==INVALID_HANDLE_VALUE ? last_error() : S_OK;
+	if (!(operation=input_operation_new())) { if (handle!=INVALID_HANDLE_VALUE) CloseHandle(handle); return E_OUTOFMEMORY; }
+	if (SUCCEEDED(result)) {
+		stream=ALLOC(sizeof *stream);
+		if (!stream) { CloseHandle(handle); result=E_OUTOFMEMORY; }
+		else { stream->iface.lpVtbl=&input_table; stream->closable.lpVtbl=&input_close_table; stream->refs=1; stream->handle=handle; operation->result=&stream->iface; InterlockedIncrement(&raven_xaml_objects); }
+	}
+	input_operation_finish(&operation->iface,result,SUCCEEDED(result)?Completed:Error);
+	*out=&operation->iface; return S_OK;
+}
+static const __x_ABI_CWindows_CStorage_CStreams_CIInputStreamReferenceVtbl file_reference_table={file_reference_query,file_reference_addref,file_reference_release,file_reference_iids,file_reference_name,file_reference_trust,file_reference_open};
 
 /* The item part forwards its lifetime to the object, found the way the dispatcher's IAsyncInfo finds its action. */
 static struct file_object *file_item_owner(item_i *iface)
@@ -631,7 +800,7 @@ static HRESULT WINAPI file_get_content_type(file_i *iface, HSTRING *value)
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* The random access stream is the storage streams stage's work; the file itself is already openable through PathIO. */
@@ -643,7 +812,7 @@ static HRESULT WINAPI file_open_async(file_i *iface, __x_ABI_CWindows_CStorage_C
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_open_transacted_write_async(file_i *iface,
@@ -653,7 +822,7 @@ static HRESULT WINAPI file_open_transacted_write_async(file_i *iface,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_copy_overload_default(file_i *iface, folder_i *folder, file_operation_i **operation)
@@ -663,7 +832,7 @@ static HRESULT WINAPI file_copy_overload_default(file_i *iface, folder_i *folder
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_copy_overload_options(file_i *iface, folder_i *folder, HSTRING name,
@@ -675,7 +844,7 @@ static HRESULT WINAPI file_copy_overload_options(file_i *iface, folder_i *folder
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_copy_overload(file_i *iface, folder_i *folder, HSTRING name,
@@ -688,7 +857,7 @@ static HRESULT WINAPI file_copy_overload(file_i *iface, folder_i *folder, HSTRIN
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_copy_and_replace_async(file_i *iface, file_i *file, async_action_i **operation)
@@ -698,7 +867,7 @@ static HRESULT WINAPI file_copy_and_replace_async(file_i *iface, file_i *file, a
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_move_overload_default(file_i *iface, folder_i *folder, async_action_i **operation)
@@ -708,7 +877,7 @@ static HRESULT WINAPI file_move_overload_default(file_i *iface, folder_i *folder
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_move_overload_options(file_i *iface, folder_i *folder, HSTRING name,
@@ -720,7 +889,7 @@ static HRESULT WINAPI file_move_overload_options(file_i *iface, folder_i *folder
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_move_overload(file_i *iface, folder_i *folder, HSTRING name,
@@ -733,7 +902,7 @@ static HRESULT WINAPI file_move_overload(file_i *iface, folder_i *folder, HSTRIN
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_move_and_replace_async(file_i *iface, file_i *file, async_action_i **operation)
@@ -743,7 +912,7 @@ static HRESULT WINAPI file_move_and_replace_async(file_i *iface, file_i *file, a
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* The delete: real, for both option values — the emulated filesystem has no recycle bin, so PermanentDelete and the
@@ -760,8 +929,8 @@ static HRESULT WINAPI file_delete_with_option(file_i *iface, __x_ABI_CWindows_CS
 	(void)option;
 	if (!(action = storage_action_new()))
 		return E_OUTOFMEMORY;
-	if (!DeleteFileW(self->path)) {
-		result = last_error();
+	if (self->read_only || !DeleteFileW(self->path)) {
+		result = self->read_only ? E_ACCESSDENIED : last_error();
 		storage_action_finish(&action->iface, result, Error);
 	} else {
 		storage_action_finish(&action->iface, S_OK, Completed);
@@ -788,7 +957,7 @@ static HRESULT WINAPI file_item_rename_overload(item_i *iface, HSTRING name, asy
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_item_rename(item_i *iface, HSTRING name,
@@ -800,7 +969,7 @@ static HRESULT WINAPI file_item_rename(item_i *iface, HSTRING name,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_item_get_basic_properties(item_i *iface,
@@ -810,7 +979,7 @@ static HRESULT WINAPI file_item_get_basic_properties(item_i *iface,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* The item interface is the second part of the object, so the owner comes from the containing record, not the cast. */
@@ -831,7 +1000,7 @@ static HRESULT WINAPI file_item_get_attributes(item_i *iface, __x_ABI_CWindows_C
 	(void)iface;
 	if (!value)
 		return E_POINTER;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_item_get_date_created(item_i *iface, __x_ABI_CWindows_CFoundation_CDateTime *value)
@@ -840,7 +1009,7 @@ static HRESULT WINAPI file_item_get_date_created(item_i *iface, __x_ABI_CWindows
 	if (!value)
 		return E_POINTER;
 	ZeroMemory(value, sizeof *value);
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI file_item_is_of_type(item_i *iface, __x_ABI_CWindows_CStorage_CStorageItemTypes type,
@@ -850,7 +1019,7 @@ static HRESULT WINAPI file_item_is_of_type(item_i *iface, __x_ABI_CWindows_CStor
 	if (!value)
 		return E_POINTER;
 	(void)type;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const __x_ABI_CWindows_CStorage_CIStorageFileVtbl file_table = {
@@ -903,6 +1072,8 @@ static HRESULT WINAPI file_query(file_i *iface, REFIID iid, void **out)
 		*out = iface;
 	else if (equal_iid(iid, &IID___x_ABI_CWindows_CStorage_CIStorageItem))
 		*out = &((struct file_object *)iface)->item;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CStorage_CStreams_CIInputStreamReference))
+		*out = &((struct file_object *)iface)->input_reference;
 	else
 		return E_NOINTERFACE;
 	file_addref(iface);
@@ -927,7 +1098,7 @@ static ULONG WINAPI file_release(file_i *iface)
 
 /* A file object for a path under the folder: the name is the last path component, the type the extension from the
  * last dot in the name, dot included, as the documented FileType answers for a file without one too. */
-static HRESULT file_create(const WCHAR *path, file_i **out)
+static HRESULT file_create(const WCHAR *path, BOOL read_only, file_i **out)
 {
 	struct file_object *self;
 	const WCHAR *name_start = path;
@@ -944,12 +1115,14 @@ static HRESULT file_create(const WCHAR *path, file_i **out)
 			dot = walk;
 	}
 	if ((SIZE_T)(walk - name_start) >= FILE_NAME_MAX || (SIZE_T)(dot ? walk - dot : 0) >= FILE_NAME_MAX)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1118\n"); return E_INVALIDARG; }
 	if (!(self = ALLOC(sizeof *self)))
 		return E_OUTOFMEMORY;
 	self->iface.lpVtbl = (void *)&file_table;
 	self->item.lpVtbl = (void *)&file_item_table;
+	self->input_reference.lpVtbl = &file_reference_table;
 	self->refs = 1;
+	self->read_only = read_only;
 	lstrcpyW(self->name, name_start);
 	lstrcpyW(self->path, path);
 	if (dot)
@@ -987,14 +1160,14 @@ static HRESULT validate_item_name(HSTRING name, UINT32 *length)
 	const WCHAR *text = WindowsGetStringRawBuffer(name, length);
 	UINT32 i;
 	if (!*length)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1163\n"); return E_INVALIDARG; }
 	if (*length >= FILE_NAME_MAX)
 		return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
 	for (i = 0; i < *length; ++i)
 		if (text[i] == L'\\' || text[i] == L'/' || text[i] == L':')
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1168\n"); return E_INVALIDARG; }
 	if ((*length == 1 && text[0] == L'.') || (*length == 2 && text[0] == L'.' && text[1] == L'.'))
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1170\n"); return E_INVALIDARG; }
 	return S_OK;
 }
 
@@ -1005,6 +1178,7 @@ struct folder_object {
 	LONG refs;
 	WCHAR name[FILE_NAME_MAX];
 	WCHAR path[MAX_PATH];
+	BOOL read_only;
 };
 
 static HRESULT WINAPI folder_query(folder_i *iface, REFIID iid, void **out);
@@ -1088,7 +1262,7 @@ static HRESULT WINAPI folder_item_rename_overload(item_i *iface, HSTRING name, a
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_item_rename(item_i *iface, HSTRING name,
@@ -1100,7 +1274,7 @@ static HRESULT WINAPI folder_item_rename(item_i *iface, HSTRING name,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_item_delete(item_i *iface, __x_ABI_CWindows_CStorage_CStorageDeleteOption option,
@@ -1111,7 +1285,7 @@ static HRESULT WINAPI folder_item_delete(item_i *iface, __x_ABI_CWindows_CStorag
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_item_delete_overload(item_i *iface, async_action_i **operation)
@@ -1126,7 +1300,7 @@ static HRESULT WINAPI folder_item_get_basic_properties(item_i *iface,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_item_get_attributes(item_i *iface, __x_ABI_CWindows_CStorage_CFileAttributes *value)
@@ -1134,7 +1308,7 @@ static HRESULT WINAPI folder_item_get_attributes(item_i *iface, __x_ABI_CWindows
 	(void)iface;
 	if (!value)
 		return E_POINTER;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_item_get_date_created(item_i *iface, __x_ABI_CWindows_CFoundation_CDateTime *value)
@@ -1143,7 +1317,7 @@ static HRESULT WINAPI folder_item_get_date_created(item_i *iface, __x_ABI_CWindo
 	if (!value)
 		return E_POINTER;
 	ZeroMemory(value, sizeof *value);
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_item_is_of_type(item_i *iface, __x_ABI_CWindows_CStorage_CStorageItemTypes type,
@@ -1153,7 +1327,7 @@ static HRESULT WINAPI folder_item_is_of_type(item_i *iface, __x_ABI_CWindows_CSt
 	if (!value)
 		return E_POINTER;
 	(void)type;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* CreateFileAsync: an empty file, created or replaced per the collision option, and the operation that already
@@ -1175,6 +1349,7 @@ static HRESULT WINAPI folder_create_file(folder_i *iface, HSTRING name,
 	result = validate_item_name(name, &length);
 	if (FAILED(result))
 		return result;
+	if (self->read_only) return file_operation_completed(NULL, E_ACCESSDENIED, operation);
 	if ((UINT32)lstrlenW(self->path) + 1 + length + 1 >= MAX_PATH)
 		return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
 	switch (option) {
@@ -1186,7 +1361,7 @@ static HRESULT WINAPI folder_create_file(folder_i *iface, HSTRING name,
 		break;
 	default:
 		/* GenerateUniqueName and OpenIfExists would invent or reopen; neither is the subset's to promise */
-		return E_NOTIMPL;
+		{ trace_not_implemented(__func__); return E_NOTIMPL; }
 	}
 	lstrcpyW(path, self->path);
 	lstrcatW(path, L"\\");
@@ -1198,7 +1373,7 @@ static HRESULT WINAPI folder_create_file(folder_i *iface, HSTRING name,
 		return file_operation_completed(NULL, result, operation);
 	}
 	CloseHandle(handle);
-	result = file_create(path, &file);
+	result = file_create(path, self->read_only, &file);
 	if (FAILED(result))
 		return result;
 	result = file_operation_completed(file, S_OK, operation);
@@ -1220,7 +1395,7 @@ static HRESULT WINAPI folder_create_folder_overload(folder_i *iface, HSTRING nam
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_create_folder(folder_i *iface, HSTRING name,
@@ -1233,7 +1408,7 @@ static HRESULT WINAPI folder_create_folder(folder_i *iface, HSTRING name,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* GetFileAsync: the operation completes with the file when the directory has it, and with
@@ -1262,7 +1437,7 @@ static HRESULT WINAPI folder_get_file_async(folder_i *iface, HSTRING name, file_
 	attributes = GetFileAttributesW(path);
 	if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY))
 		return file_operation_completed(NULL, last_error(), operation);
-	result = file_create(path, &file);
+	result = file_create(path, self->read_only, &file);
 	if (FAILED(result))
 		return result;
 	result = file_operation_completed(file, S_OK, operation);
@@ -1278,7 +1453,7 @@ static HRESULT WINAPI folder_get_folder_async(folder_i *iface, HSTRING name,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_get_item_async(folder_i *iface, HSTRING name,
@@ -1289,7 +1464,7 @@ static HRESULT WINAPI folder_get_item_async(folder_i *iface, HSTRING name,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_get_files_async(folder_i *iface,
@@ -1299,7 +1474,7 @@ static HRESULT WINAPI folder_get_files_async(folder_i *iface,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_get_folders_async(folder_i *iface,
@@ -1309,7 +1484,7 @@ static HRESULT WINAPI folder_get_folders_async(folder_i *iface,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI folder_get_items_async(folder_i *iface,
@@ -1319,7 +1494,7 @@ static HRESULT WINAPI folder_get_items_async(folder_i *iface,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const __x_ABI_CWindows_CStorage_CIStorageFolderVtbl folder_table = {
@@ -1388,12 +1563,43 @@ static ULONG WINAPI folder_release(folder_i *iface)
 	return (ULONG)InterlockedDecrement(&((struct folder_object *)iface)->refs);
 }
 
+/* The package's installed folder shares the folder implementation but is distinct from writable local state. */
+HRESULT raven_storage_installed_folder(const WCHAR *path, folder_i **out)
+{
+	static struct folder_object folder = { .iface = {(void *)&folder_table}, .item = {(void *)&folder_item_table}, .read_only = TRUE };
+	static LONG state;
+	static HRESULT result;
+	if (!path || !out) return E_POINTER;
+	*out = NULL;
+	if (InterlockedCompareExchange(&state, 1, 0) == 0) {
+		const WCHAR *name = path;
+		for (const WCHAR *p = path; *p; ++p) if (*p == L'\\' || *p == L'/') name = p + 1;
+		DWORD attributes = GetFileAttributesW(path);
+		if (attributes == INVALID_FILE_ATTRIBUTES) result = last_error();
+		else if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) result = HRESULT_FROM_WIN32(ERROR_DIRECTORY);
+		else if (lstrlenW(path) >= MAX_PATH || lstrlenW(name) >= FILE_NAME_MAX) result = E_INVALIDARG;
+		else { lstrcpyW(folder.path, path); lstrcpyW(folder.name, name); result = S_OK; }
+		InterlockedExchange(&state, 2);
+	} else while (InterlockedCompareExchange(&state, 2, 2) != 2) Sleep(0);
+	if (FAILED(result)) return result;
+	folder_addref(&folder.iface);
+	*out = &folder.iface;
+	return S_OK;
+}
+
 /* The ApplicationData: one per process, the way Package.Current is. The LocalFolder is part of the singleton and
  * lives as long as the process; its directory is resolved and created the first time a guest asks for it. */
 struct application_data_object {
 	application_data_i iface;
+	__x_ABI_CWindows_CStorage_CIApplicationData2 cache_iface;
 	LONG refs;
 	struct folder_object local_folder;
+	struct folder_object temporary_folder;
+	struct folder_object cache_folder;
+	LONG temporary_state;
+	HRESULT temporary_error;
+	LONG cache_state;
+	HRESULT cache_error;
 	/* the once-per-process resolution: 0 idle, 1 running, 2 settled (the error stays for the later askers) */
 	LONG local_state;
 	HRESULT local_error;
@@ -1408,7 +1614,7 @@ static HRESULT WINAPI application_data_get_version(application_data_i *iface, UI
 	(void)iface;
 	if (!value)
 		return E_POINTER;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI application_data_set_version_async(application_data_i *iface, UINT32 version,
@@ -1420,7 +1626,7 @@ static HRESULT WINAPI application_data_set_version_async(application_data_i *ifa
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI application_data_clear_all_async(application_data_i *iface, async_action_i **operation)
@@ -1429,7 +1635,7 @@ static HRESULT WINAPI application_data_clear_all_async(application_data_i *iface
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI application_data_clear_async(application_data_i *iface,
@@ -1440,7 +1646,7 @@ static HRESULT WINAPI application_data_clear_async(application_data_i *iface,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI application_data_get_local_settings(application_data_i *iface,
@@ -1457,7 +1663,7 @@ static HRESULT WINAPI application_data_get_roaming_settings(application_data_i *
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* The LocalState directory beside the image, created on demand. The folder answers from the singleton, so repeated
@@ -1470,7 +1676,7 @@ static HRESULT WINAPI application_data_get_local_folder(application_data_i *ifac
 	*value = NULL;
 	if (InterlockedCompareExchange(&self->local_state, 1, 0) == 0) {
 		WCHAR path[MAX_PATH];
-		if (ensure_local_state(path)) {
+		if (ensure_application_folder(path, local_state_name)) {
 			lstrcpyW(self->local_folder.name, local_state_name);
 			lstrcpyW(self->local_folder.path, path);
 			self->local_error = S_OK;
@@ -1496,16 +1702,36 @@ static HRESULT WINAPI application_data_get_roaming_folder(application_data_i *if
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
+/* The Temp directory of the storage root, created on demand and answered from the singleton. */
 static HRESULT WINAPI application_data_get_temporary_folder(application_data_i *iface, folder_i **value)
 {
-	(void)iface;
+	struct application_data_object *self = (struct application_data_object *)iface;
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
-	return E_NOTIMPL;
+	if (InterlockedCompareExchange(&self->temporary_state, 1, 0) == 0) {
+		WCHAR path[MAX_PATH];
+		if (ensure_application_folder(path, L"Temp")) {
+			lstrcpyW(self->temporary_folder.name, L"Temp");
+			lstrcpyW(self->temporary_folder.path, path);
+			self->temporary_error = S_OK;
+		} else {
+			/* the failure stays: a directory that cannot be made will not be made by asking again */
+			self->temporary_error = last_error();
+		}
+		InterlockedExchange(&self->temporary_state, 2);
+	} else {
+		while (InterlockedCompareExchange(&self->temporary_state, 2, 2) != 2)
+			Sleep(0);
+	}
+	if (FAILED(self->temporary_error))
+		return self->temporary_error;
+	folder_addref(&self->temporary_folder.iface);
+	*value = &self->temporary_folder.iface;
+	return S_OK;
 }
 
 static HRESULT WINAPI application_data_add_data_changed(application_data_i *iface,
@@ -1515,20 +1741,20 @@ static HRESULT WINAPI application_data_add_data_changed(application_data_i *ifac
 	(void)handler;
 	if (!token)
 		return E_POINTER;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI application_data_remove_data_changed(application_data_i *iface, EventRegistrationToken token)
 {
 	(void)iface;
 	(void)token;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI application_data_signal_data_changed(application_data_i *iface)
 {
 	(void)iface;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI application_data_get_roaming_storage_quota(application_data_i *iface, UINT64 *value)
@@ -1536,7 +1762,7 @@ static HRESULT WINAPI application_data_get_roaming_storage_quota(application_dat
 	(void)iface;
 	if (!value)
 		return E_POINTER;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI application_data_iids(application_data_i *iface, ULONG *count, IID **iids)
@@ -1556,6 +1782,45 @@ static HRESULT WINAPI application_data_trust(application_data_i *iface, TrustLev
 	(void)iface;
 	return inspectable_trust(level);
 }
+
+static struct application_data_object *cache_owner(__x_ABI_CWindows_CStorage_CIApplicationData2 *iface)
+{
+	return CONTAINING_RECORD(iface, struct application_data_object, cache_iface);
+}
+static HRESULT WINAPI cache_query(__x_ABI_CWindows_CStorage_CIApplicationData2 *iface, REFIID iid, void **out)
+{ return application_data_query(&cache_owner(iface)->iface, iid, out); }
+static ULONG WINAPI cache_addref(__x_ABI_CWindows_CStorage_CIApplicationData2 *iface)
+{ return application_data_addref(&cache_owner(iface)->iface); }
+static ULONG WINAPI cache_release(__x_ABI_CWindows_CStorage_CIApplicationData2 *iface)
+{ return application_data_release(&cache_owner(iface)->iface); }
+static HRESULT WINAPI cache_iids(__x_ABI_CWindows_CStorage_CIApplicationData2 *iface, ULONG *count, IID **iids)
+{ return application_data_iids(&cache_owner(iface)->iface, count, iids); }
+static HRESULT WINAPI cache_class(__x_ABI_CWindows_CStorage_CIApplicationData2 *iface, HSTRING *out)
+{ return application_data_class(&cache_owner(iface)->iface, out); }
+static HRESULT WINAPI cache_trust(__x_ABI_CWindows_CStorage_CIApplicationData2 *iface, TrustLevel *level)
+{ return application_data_trust(&cache_owner(iface)->iface, level); }
+static HRESULT WINAPI cache_folder(__x_ABI_CWindows_CStorage_CIApplicationData2 *iface, folder_i **out)
+{
+	struct application_data_object *self = cache_owner(iface);
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (InterlockedCompareExchange(&self->cache_state, 1, 0) == 0) {
+		WCHAR path[MAX_PATH];
+		if (ensure_application_folder(path, L"LocalCache")) {
+			lstrcpyW(self->cache_folder.name, L"LocalCache");
+			lstrcpyW(self->cache_folder.path, path);
+			self->cache_error = S_OK;
+		} else self->cache_error = last_error();
+		InterlockedExchange(&self->cache_state, 2);
+	} else while (InterlockedCompareExchange(&self->cache_state, 2, 2) != 2) Sleep(0);
+	if (FAILED(self->cache_error)) return self->cache_error;
+	folder_addref(&self->cache_folder.iface);
+	*out = &self->cache_folder.iface;
+	return S_OK;
+}
+static const __x_ABI_CWindows_CStorage_CIApplicationData2Vtbl cache_table = {
+	cache_query, cache_addref, cache_release, cache_iids, cache_class, cache_trust, cache_folder
+};
 
 static const __x_ABI_CWindows_CStorage_CIApplicationDataVtbl application_data_table = {
 	.QueryInterface = application_data_query,
@@ -1580,11 +1845,11 @@ static const __x_ABI_CWindows_CStorage_CIApplicationDataVtbl application_data_ta
 };
 
 static struct application_data_object application_data_instance = {
-	{(void *)&application_data_table},
-	0, /* the singleton is never freed; the count follows the references the guests hold */
-	{{(void *)&folder_table}, {(void *)&folder_item_table}, 0, L"", L""},
-	0,
-	S_OK,
+	.iface = {(void *)&application_data_table},
+	.cache_iface = {(void *)&cache_table},
+	.local_folder = {{(void *)&folder_table}, {(void *)&folder_item_table}, 0, L"", L""},
+	.temporary_folder = {{(void *)&folder_table}, {(void *)&folder_item_table}, 0, L"", L""},
+	.cache_folder = {{(void *)&folder_table}, {(void *)&folder_item_table}, 0, L"", L""},
 };
 
 static HRESULT WINAPI application_data_query(application_data_i *iface, REFIID iid, void **out)
@@ -1595,6 +1860,8 @@ static HRESULT WINAPI application_data_query(application_data_i *iface, REFIID i
 	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
 		equal_iid(iid, &IID___x_ABI_CWindows_CStorage_CIApplicationData) || equal_iid(iid, &IID_IAgileObject))
 		*out = iface;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CStorage_CIApplicationData2))
+		*out = &((struct application_data_object *)iface)->cache_iface;
 	else
 		return E_NOINTERFACE;
 	application_data_addref(iface);
@@ -1759,7 +2026,7 @@ static HRESULT WINAPI pathio_write_text_async2(pathio_statics_i *iface, HSTRING 
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_read_text_async2(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1771,7 +2038,7 @@ static HRESULT WINAPI pathio_read_text_async2(pathio_statics_i *iface, HSTRING a
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_append_text_async(pathio_statics_i *iface, HSTRING absolute_path, HSTRING contents,
@@ -1783,7 +2050,7 @@ static HRESULT WINAPI pathio_append_text_async(pathio_statics_i *iface, HSTRING 
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_append_text_async2(pathio_statics_i *iface, HSTRING absolute_path, HSTRING contents,
@@ -1796,7 +2063,7 @@ static HRESULT WINAPI pathio_append_text_async2(pathio_statics_i *iface, HSTRING
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_read_lines_async(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1807,7 +2074,7 @@ static HRESULT WINAPI pathio_read_lines_async(pathio_statics_i *iface, HSTRING a
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_read_lines_async2(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1820,7 +2087,7 @@ static HRESULT WINAPI pathio_read_lines_async2(pathio_statics_i *iface, HSTRING 
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_write_lines_async(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1832,7 +2099,7 @@ static HRESULT WINAPI pathio_write_lines_async(pathio_statics_i *iface, HSTRING 
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_write_lines_async2(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1846,7 +2113,7 @@ static HRESULT WINAPI pathio_write_lines_async2(pathio_statics_i *iface, HSTRING
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_append_lines_async(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1858,7 +2125,7 @@ static HRESULT WINAPI pathio_append_lines_async(pathio_statics_i *iface, HSTRING
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_append_lines_async2(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1872,7 +2139,7 @@ static HRESULT WINAPI pathio_append_lines_async2(pathio_statics_i *iface, HSTRIN
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_read_buffer_async(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1883,7 +2150,7 @@ static HRESULT WINAPI pathio_read_buffer_async(pathio_statics_i *iface, HSTRING 
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_write_buffer_async(pathio_statics_i *iface, HSTRING absolute_path,
@@ -1895,7 +2162,7 @@ static HRESULT WINAPI pathio_write_buffer_async(pathio_statics_i *iface, HSTRING
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI pathio_write_bytes_async(pathio_statics_i *iface, HSTRING absolute_path, UINT32 value_count,
@@ -1908,7 +2175,7 @@ static HRESULT WINAPI pathio_write_bytes_async(pathio_statics_i *iface, HSTRING 
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 
@@ -2146,6 +2413,88 @@ static application_data_statics_i application_statics = {(void *)&application_st
 static IActivationFactory pathio_activation = {(void *)&pathio_factory_table};
 static pathio_statics_i pathio_statics = {(void *)&pathio_statics_table};
 
+/* StorageFile lookup uses the same file object and completed operation as folder lookup. */
+BOOL raven_package_root(WCHAR *path, UINT32 capacity);
+static const IID file_statics_iid = {0x5984c710,0xdaf2,0x43c8,{0x8b,0xb4,0xa4,0xd3,0xea,0xcf,0xd0,0x3f}};
+static IActivationFactory file_activation;
+struct file_statics_vtbl {
+	HRESULT (WINAPI *query)(void *,REFIID,void **);
+	ULONG (WINAPI *addref)(void *), (WINAPI *release)(void *);
+	HRESULT (WINAPI *iids)(void *,ULONG *,IID **), (WINAPI *name)(void *,HSTRING *), (WINAPI *trust)(void *,TrustLevel *);
+	HRESULT (WINAPI *path)(void *,HSTRING,file_operation_i **);
+	HRESULT (WINAPI *uri)(void *,__x_ABI_CWindows_CFoundation_CIUriRuntimeClass *,file_operation_i **);
+	HRESULT (WINAPI *stream1)(void *,void *,void *,void *,file_operation_i **);
+	HRESULT (WINAPI *stream2)(void *,void *,void *,void *,file_operation_i **);
+	HRESULT (WINAPI *stream3)(void *,void *,void *,void *,file_operation_i **);
+	HRESULT (WINAPI *stream4)(void *,void *,void *,void *,file_operation_i **);
+};
+struct file_statics_object { const struct file_statics_vtbl *lpVtbl; };
+static struct file_statics_object file_statics;
+static HRESULT WINAPI file_static_query(void *self,REFIID iid,void **out)
+{
+	(void)self;
+	if (!out) return E_POINTER;
+	*out=NULL;
+	if (equal_iid(iid,&IID_IUnknown) || equal_iid(iid,&IID_IInspectable) || equal_iid(iid,&IID_IActivationFactory) || equal_iid(iid,&IID_IAgileObject)) *out=&file_activation;
+	else if (equal_iid(iid,&file_statics_iid)) *out=&file_statics;
+	else return E_NOINTERFACE;
+	InterlockedIncrement(&factory_refs);
+	return S_OK;
+}
+static ULONG WINAPI file_static_addref(void *self) { (void)self; return InterlockedIncrement(&factory_refs); }
+static ULONG WINAPI file_static_release(void *self) { (void)self; return InterlockedDecrement(&factory_refs); }
+static HRESULT WINAPI file_static_iids(void *self,ULONG *count,IID **out) { (void)self; return inspectable_iids(count,out); }
+static HRESULT WINAPI file_static_name(void *self,HSTRING *out) { (void)self; return create_string(file_class_name,out); }
+static HRESULT WINAPI file_static_trust(void *self,TrustLevel *out) { (void)self; return inspectable_trust(out); }
+static HRESULT WINAPI file_static_activate(IActivationFactory *self,IInspectable **out) { (void)self; if (!out) return E_POINTER; *out=NULL; return E_NOTIMPL; }
+static HRESULT file_from_path(const WCHAR *path, BOOL read_only, file_operation_i **out)
+{
+	file_i *file=NULL; DWORD attrs; HRESULT result;
+	if (!out) return E_POINTER;
+	*out=NULL;
+	if (!path || !*path || lstrlenW(path)>=MAX_PATH) { raven_trace_note("raven-storage: path empty or too long\n"); return E_INVALIDARG; }
+	attrs=GetFileAttributesW(path);
+	if (attrs==INVALID_FILE_ATTRIBUTES) return file_operation_completed(NULL,last_error(),out);
+	if (attrs & FILE_ATTRIBUTE_DIRECTORY) return file_operation_completed(NULL,HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND),out);
+	result=file_create(path,read_only,&file);
+	if (FAILED(result)) return result;
+	result=file_operation_completed(file,S_OK,out);
+	__x_ABI_CWindows_CStorage_CIStorageFile_Release(file);
+	return result;
+}
+static HRESULT WINAPI file_static_path(void *self,HSTRING path,file_operation_i **out)
+{
+	(void)self;
+	return file_from_path(WindowsGetStringRawBuffer(path,NULL),FALSE,out);
+}
+static HRESULT WINAPI file_static_uri(void *self,__x_ABI_CWindows_CFoundation_CIUriRuntimeClass *uri,file_operation_i **out)
+{
+	HSTRING value=NULL; WCHAR path[MAX_PATH]; const WCHAR *text,*rest; HRESULT result;
+	(void)self;
+	if (!uri || !out) return E_POINTER;
+	*out=NULL;
+	result=uri->lpVtbl->get_AbsoluteUri(uri,&value);
+	if (FAILED(result)) return result;
+	text=WindowsGetStringRawBuffer(value,NULL);
+	if (!text || CompareStringOrdinal(text,11,L"ms-appx:///",11,TRUE)!=CSTR_EQUAL) { WindowsDeleteString(value); return E_NOTIMPL; }
+	rest=text+11;
+	/* Keep package resources inside the package; escaped paths need a full URI decoder. */
+	for (const WCHAR *scan=rest; *scan; ++scan)
+		if (*scan==L'%' || *scan==L':' || (*scan==L'.' && scan[1]==L'.')) { WindowsDeleteString(value); raven_trace_note("raven-storage: uri path escapes the package\n"); return E_INVALIDARG; }
+	if (!raven_package_root(path,MAX_PATH)) { WindowsDeleteString(value); raven_trace_note("raven-storage: no package root\n"); return E_INVALIDARG; }
+	if (lstrlenW(path)+1+lstrlenW(rest)>=MAX_PATH) { WindowsDeleteString(value); return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE); }
+	lstrcatW(path,L"\\"); lstrcatW(path,rest);
+	result=file_from_path(path,TRUE,out);
+	WindowsDeleteString(value);
+	return result;
+}
+static HRESULT WINAPI file_static_stream(void *self,void *a,void *b,void *c,file_operation_i **out)
+{ (void)self; (void)a; (void)b; (void)c; if (!out) return E_POINTER; *out=NULL; return E_NOTIMPL; }
+static const struct file_statics_vtbl file_statics_table={file_static_query,file_static_addref,file_static_release,file_static_iids,file_static_name,file_static_trust,file_static_path,file_static_uri,file_static_stream,file_static_stream,file_static_stream,file_static_stream};
+static struct file_statics_object file_statics={&file_statics_table};
+static const IActivationFactoryVtbl file_activation_table={(void *)file_static_query,(void *)file_static_addref,(void *)file_static_release,(void *)file_static_iids,(void *)file_static_name,(void *)file_static_trust,file_static_activate};
+static IActivationFactory file_activation={&file_activation_table};
+
 /* The catalog routes Windows.Storage.ApplicationData and Windows.Storage.PathIO here. */
 HRESULT raven_storage_factory(HSTRING name, IActivationFactory **out)
 {
@@ -2155,6 +2504,9 @@ HRESULT raven_storage_factory(HSTRING name, IActivationFactory **out)
 		return E_POINTER;
 	*out = NULL;
 	text = WindowsGetStringRawBuffer(name, &length);
+	if (length == ARRAYSIZE(file_class_name) - 1 &&
+		CompareStringOrdinal(text, (int)length, file_class_name, -1, FALSE) == CSTR_EQUAL)
+		return file_static_query(&file_activation,&IID_IActivationFactory,(void **)out);
 	if (length == ARRAYSIZE(application_data_class_name) - 1 &&
 		CompareStringOrdinal(text, (int)length, application_data_class_name, -1, FALSE) == CSTR_EQUAL)
 		return application_factory_query(&IID_IActivationFactory, (void **)out);
@@ -2162,4 +2514,21 @@ HRESULT raven_storage_factory(HSTRING name, IActivationFactory **out)
 		CompareStringOrdinal(text, (int)length, pathio_class_name, -1, FALSE) == CSTR_EQUAL)
 		return pathio_factory_query(&IID_IActivationFactory, (void **)out);
 	return CLASS_E_CLASSNOTAVAILABLE;
+}
+
+/* The absolute path behind a storage file this component created. The xml_dom module
+ * uses it to read and write the files a document load or save names; the identity check
+ * is the file object's own vtable, so guests' file implementations answer E_NOINTERFACE. */
+HRESULT raven_storage_file_path(__x_ABI_CWindows_CStorage_CIStorageFile *file, WCHAR *path, UINT32 capacity)
+{
+	struct file_object *self;
+	if (!file || !path)
+		return E_POINTER;
+	if (((file_i *)file)->lpVtbl != &file_table)
+		return E_NOINTERFACE;
+	self = (struct file_object *)file;
+	if ((UINT32)lstrlenW(self->path) + 1 > capacity)
+		return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+	lstrcpyW(path, self->path);
+	return S_OK;
 }

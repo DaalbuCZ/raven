@@ -27,6 +27,8 @@
 typedef __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs activated_handler;
 typedef __x_ABI_CWindows_CFoundation_CIAsyncAction async_action;
 typedef __FIEventHandler_1_IInspectable exiting_handler;
+typedef __x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationView3 view3_i;
+typedef __x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationViewTitleBar titlebar_i;
 
 static const WCHAR application_name[] = L"Windows.ApplicationModel.Core.CoreApplication";
 static const WCHAR view_name[] = L"Windows.ApplicationModel.Core.CoreApplicationView";
@@ -65,6 +67,9 @@ static HRESULT base_trust(TrustLevel *out)
 
 static struct raven_event_list exiting;
 
+struct application_view;
+struct view3_part { const __x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationView3Vtbl *lpVtbl; struct application_view *owner; };
+struct titlebar_part { const __x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationViewTitleBarVtbl *lpVtbl; struct application_view *owner; };
 struct application_view {
 	ICoreApplicationView iface;
 	LONG refs;
@@ -73,7 +78,15 @@ struct application_view {
 	/* .NET Native takes a weak reference on every WinRT object it projects and treats its absence as a hard error; the
 	 * shared helper (xaml_internal.h) embeds the source part here and the view disconnects it on release. */
 	struct raven_weak_source weak;
+	struct raven_weak_source titlebar_weak;
+	struct view3_part third;
+	struct titlebar_part titlebar;
+	struct raven_event_list titlebar_layout, titlebar_visible, hosted_closing;
+	boolean extend_titlebar;
 };
+static const __x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationView3Vtbl view3_table;
+static const __x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationViewTitleBarVtbl titlebar_table;
+static HRESULT WINAPI titlebar_query_owner(struct application_view *self, REFIID iid, void **out);
 static HRESULT WINAPI view_query(ICoreApplicationView *iface, REFIID iid, void **out)
 {
 	if (!out) return E_POINTER;
@@ -85,8 +98,14 @@ static HRESULT WINAPI view_query(ICoreApplicationView *iface, REFIID iid, void *
 		InterlockedIncrement(&((struct application_view *)iface)->refs);
 		return S_OK;
 	}
-	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IInspectable) && !IsEqualIID(iid, &IID_ICoreApplicationView))
+	if (IsEqualIID(iid, &IID___x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationView3)) {
+		*out = &((struct application_view *)iface)->third;
+		InterlockedIncrement(&((struct application_view *)iface)->refs);
+		return S_OK;
+	}
+	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IInspectable) && !IsEqualIID(iid, &IID_ICoreApplicationView)) {
 		return E_NOINTERFACE;
+	}
 	*out = iface;
 	InterlockedIncrement(&((struct application_view *)iface)->refs);
 	return S_OK;
@@ -101,8 +120,15 @@ static ULONG WINAPI view_release(ICoreApplicationView *iface)
 	LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
 		raven_weak_source_disconnect(&self->weak);
+		raven_weak_source_disconnect(&self->titlebar_weak);
 		raven_event_close(&self->activated);
+		raven_event_close(&self->titlebar_layout);
+		raven_event_close(&self->titlebar_visible);
+		raven_event_close(&self->hosted_closing);
 		DeleteCriticalSection(&self->activated.lock);
+		DeleteCriticalSection(&self->titlebar_layout.lock);
+		DeleteCriticalSection(&self->titlebar_visible.lock);
+		DeleteCriticalSection(&self->hosted_closing.lock);
 		ICoreWindow_Release(self->window);
 		FREE(self);
 		InterlockedDecrement(&raven_xaml_objects);
@@ -143,6 +169,67 @@ static const ICoreApplicationViewVtbl view_table = {
 	view_query, view_addref, view_release, view_iids, view_class, view_trust,
 	view_window, view_add_activated, view_remove_activated, view_main, view_hosted
 };
+
+static struct application_view *view3_owner(view3_i *iface) { return ((struct view3_part *)iface)->owner; }
+static HRESULT WINAPI view3_query(view3_i *iface, REFIID iid, void **out) { return view_query(&view3_owner(iface)->iface, iid, out); }
+static ULONG WINAPI view3_addref(view3_i *iface) { return view_addref(&view3_owner(iface)->iface); }
+static ULONG WINAPI view3_release(view3_i *iface) { return view_release(&view3_owner(iface)->iface); }
+static HRESULT WINAPI view3_iids(view3_i *iface, ULONG *count, IID **iids) { (void)iface; return no_iids(count, iids); }
+static HRESULT WINAPI view3_class(view3_i *iface, HSTRING *out) { (void)iface; return class_string(view_name, out); }
+static HRESULT WINAPI view3_trust(view3_i *iface, TrustLevel *out) { (void)iface; return base_trust(out); }
+static HRESULT WINAPI view3_component(view3_i *iface, boolean *out) { (void)iface; if (!out) return E_POINTER; *out=FALSE; return S_OK; }
+static HRESULT WINAPI view3_titlebar(view3_i *iface, titlebar_i **out) { if (!out) return E_POINTER; struct application_view *self=view3_owner(iface); view_addref(&self->iface); *out=(titlebar_i *)&self->titlebar; return S_OK; }
+static HRESULT WINAPI view3_add_closing(view3_i *iface, void *handler, EventRegistrationToken *token) { return raven_event_add(&view3_owner(iface)->hosted_closing, (IUnknown *)handler, token); }
+static HRESULT WINAPI view3_remove_closing(view3_i *iface, EventRegistrationToken token) { return raven_event_remove(&view3_owner(iface)->hosted_closing, token); }
+static const __x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationView3Vtbl view3_table = {
+	view3_query,view3_addref,view3_release,view3_iids,view3_class,view3_trust,view3_component,view3_titlebar,(void *)view3_add_closing,view3_remove_closing
+};
+static struct application_view *titlebar_owner(titlebar_i *iface) { return ((struct titlebar_part *)iface)->owner; }
+static HRESULT WINAPI titlebar_query_owner(struct application_view *self, REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (IsEqualIID(iid,&IID_IUnknown) || IsEqualIID(iid,&IID_IInspectable) || IsEqualIID(iid,&IID___x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationViewTitleBar)) *out=&self->titlebar;
+	else if (IsEqualIID(iid,&IID_IWeakReferenceSource)) *out=&self->titlebar_weak;
+	else return E_NOINTERFACE;
+	view_addref(&self->iface); return S_OK;
+}
+static HRESULT WINAPI titlebar_query(titlebar_i *iface, REFIID iid, void **out) { return titlebar_query_owner(titlebar_owner(iface),iid,out); }
+static ULONG WINAPI titlebar_addref(titlebar_i *iface) { return view_addref(&titlebar_owner(iface)->iface); }
+static ULONG WINAPI titlebar_release(titlebar_i *iface) { return view_release(&titlebar_owner(iface)->iface); }
+static HRESULT WINAPI titlebar_iids(titlebar_i *iface, ULONG *count, IID **iids) { (void)iface; return no_iids(count,iids); }
+static HRESULT WINAPI titlebar_class(titlebar_i *iface, HSTRING *out) { (void)iface; return class_string(L"Windows.ApplicationModel.Core.CoreApplicationViewTitleBar",out); }
+static HRESULT WINAPI titlebar_trust(titlebar_i *iface, TrustLevel *out) { (void)iface; return base_trust(out); }
+/* shortcut: the preference is stored, but drawing into native window decorations and layout-change events need host support. */
+static HRESULT WINAPI titlebar_put_extend(titlebar_i *iface, boolean value) { titlebar_owner(iface)->extend_titlebar = value; return S_OK; }
+static HRESULT WINAPI titlebar_get_extend(titlebar_i *iface, boolean *out) { if (!out) return E_POINTER; *out=titlebar_owner(iface)->extend_titlebar; return S_OK; }
+static HRESULT WINAPI titlebar_inset(titlebar_i *iface, DOUBLE *out) { (void)iface; if (!out) return E_POINTER; *out=0; return S_OK; }
+static HRESULT WINAPI titlebar_height(titlebar_i *iface, DOUBLE *out) { (void)iface; if (!out) return E_POINTER; *out=GetSystemMetrics(SM_CYCAPTION); return S_OK; }
+static HRESULT WINAPI titlebar_is_visible(titlebar_i *iface, boolean *out) { (void)iface; if (!out) return E_POINTER; *out=TRUE; return S_OK; }
+static HRESULT WINAPI titlebar_add_layout(titlebar_i *iface, void *handler, EventRegistrationToken *token) { return raven_event_add(&titlebar_owner(iface)->titlebar_layout,(IUnknown *)handler,token); }
+static HRESULT WINAPI titlebar_remove_layout(titlebar_i *iface, EventRegistrationToken token) { return raven_event_remove(&titlebar_owner(iface)->titlebar_layout,token); }
+static HRESULT WINAPI titlebar_add_visible(titlebar_i *iface, void *handler, EventRegistrationToken *token) { return raven_event_add(&titlebar_owner(iface)->titlebar_visible,(IUnknown *)handler,token); }
+static HRESULT WINAPI titlebar_remove_visible(titlebar_i *iface, EventRegistrationToken token) { return raven_event_remove(&titlebar_owner(iface)->titlebar_visible,token); }
+static const __x_ABI_CWindows_CApplicationModel_CCore_CICoreApplicationViewTitleBarVtbl titlebar_table = {
+	titlebar_query,titlebar_addref,titlebar_release,titlebar_iids,titlebar_class,titlebar_trust,
+	titlebar_put_extend,titlebar_get_extend,titlebar_inset,titlebar_inset,titlebar_height,
+	(void *)titlebar_add_layout,titlebar_remove_layout,titlebar_is_visible,(void *)titlebar_add_visible,titlebar_remove_visible
+};
+
+static void initialize_application_view(struct application_view *view)
+{
+	view->iface.lpVtbl = &view_table;
+	view->third.lpVtbl = &view3_table; view->third.owner = view;
+	view->titlebar.lpVtbl = &titlebar_table; view->titlebar.owner = view;
+	view->refs = 1;
+	InitializeCriticalSection(&view->activated.lock);
+	InitializeCriticalSection(&view->titlebar_layout.lock);
+	InitializeCriticalSection(&view->titlebar_visible.lock);
+	InitializeCriticalSection(&view->hosted_closing.lock);
+	raven_weak_source_init(&view->weak, view, &view->refs, (raven_weak_query_fn)view_query);
+	raven_weak_source_init(&view->titlebar_weak, view, &view->refs, (raven_weak_query_fn)titlebar_query_owner);
+	InterlockedIncrement(&raven_xaml_objects);
+}
 
 /* mingw lacks ILaunchActivatedEventArgs. This ABI declaration follows Microsoft's published generated metadata:
  * https://github.com/microsoft/windows-rs/blob/master/crates/libs/windows/src/Windows/ApplicationModel/Activation/mod.rs
@@ -703,7 +790,7 @@ static HRESULT WINAPI property_view_split(__FIMapView_2_HSTRING_IInspectable *if
 	(void)iface;
 	if (first) *first = NULL;
 	if (second) *second = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const __FIMap_2_HSTRING_IInspectableVtbl property_map_table = {
@@ -829,16 +916,16 @@ static HRESULT WINAPI app_add_suspending(ICoreApplication *iface,
 {
 	if (!token || !handler) return E_POINTER;
 	token->value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
-static HRESULT WINAPI app_remove_suspending(ICoreApplication *iface, EventRegistrationToken token) { return E_NOTIMPL; }
+static HRESULT WINAPI app_remove_suspending(ICoreApplication *iface, EventRegistrationToken token) { { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI app_add_resuming(ICoreApplication *iface, exiting_handler *handler, EventRegistrationToken *token)
 {
 	if (!token || !handler) return E_POINTER;
 	token->value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
-static HRESULT WINAPI app_remove_resuming(ICoreApplication *iface, EventRegistrationToken token) { return E_NOTIMPL; }
+static HRESULT WINAPI app_remove_resuming(ICoreApplication *iface, EventRegistrationToken token) { { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI app_current(ICoreApplication *iface, ICoreApplicationView **out)
 {
 	if (!out) return E_POINTER;
@@ -848,6 +935,40 @@ static HRESULT WINAPI app_current(ICoreApplication *iface, ICoreApplicationView 
 	*out = &session->view->iface;
 	view_addref(*out);
 	return S_OK;
+}
+
+/* Application.Start uses the same per-thread core view as the framework-view startup path. */
+HRESULT raven_application_enter_xaml(void)
+{
+	if (session_tls == TLS_OUT_OF_INDEXES) return E_OUTOFMEMORY;
+	if (InterlockedCompareExchange(&running, 1, 0)) return E_ILLEGAL_METHOD_CALL;
+	struct session *session = ALLOC(sizeof *session);
+	struct application_view *view = ALLOC(sizeof *view);
+	if (!session || !view) { FREE(session); FREE(view); InterlockedExchange(&running, 0); return E_OUTOFMEMORY; }
+	HRESULT result = raven_current_window(&view->window);
+	if (FAILED(result)) { FREE(view); FREE(session); InterlockedExchange(&running, 0); return result; }
+	initialize_application_view(view);
+	session->view = view;
+	if (!TlsSetValue(session_tls, session)) {
+		view_release(&view->iface); FREE(session); InterlockedExchange(&running, 0); return E_OUTOFMEMORY;
+	}
+	EnterCriticalSection(&application_lock);
+	application_thread = GetCurrentThreadId();
+	LeaveCriticalSection(&application_lock);
+	return S_OK;
+}
+
+void raven_application_leave_xaml(void)
+{
+	struct session *session = session_tls == TLS_OUT_OF_INDEXES ? NULL : TlsGetValue(session_tls);
+	if (!session) return;
+	TlsSetValue(session_tls, NULL);
+	view_release(&session->view->iface);
+	FREE(session);
+	EnterCriticalSection(&application_lock);
+	application_thread = 0;
+	LeaveCriticalSection(&application_lock);
+	InterlockedExchange(&running, 0);
 }
 static HRESULT queue_activation(struct session *session)
 {
@@ -900,11 +1021,7 @@ static HRESULT WINAPI app_run(ICoreApplication *iface, IFrameworkViewSource *sou
 		dispose_session(session);
 		return result;
 	}
-	view->iface.lpVtbl = &view_table;
-	view->refs = 1;
-	InitializeCriticalSection(&view->activated.lock);
-	raven_weak_source_init(&view->weak, view, &view->refs, (raven_weak_query_fn)view_query);
-	InterlockedIncrement(&raven_xaml_objects);
+	initialize_application_view(view);
 	session->view = view;
 	if (!TlsSetValue(session_tls, session)) {
 		dispose_session(session);
@@ -970,7 +1087,7 @@ static HRESULT WINAPI app_run_factories(ICoreApplication *iface, __x_ABI_CWindow
 	 * itself waits for a packaged guest and answers E_NOTIMPL without retaining the callback. */
 	if (!factory) return E_POINTER;
 	if (InterlockedCompareExchange(&running, 0, 0)) return E_ILLEGAL_METHOD_CALL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI exit_application(ICoreApplicationExit *iface)
 {

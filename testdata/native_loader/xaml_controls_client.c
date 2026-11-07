@@ -6,6 +6,7 @@
 #include <winstring.h>
 #include <activation.h>
 #include <windows.ui.xaml.interop.h>
+#include <windows.foundation.h>
 #include "windows_ui_xaml_controls.h"
 #include "windows_ui_xaml_elements.h"
 #include "windows_ui_xaml_markup.h"
@@ -576,7 +577,7 @@ static size_t build_dictionary_color_document(unsigned char *doc)
 static size_t build_dictionary_values_document(unsigned char *doc)
 {
 	size_t at = 168;
-	for (size_t index = 0; index < 300; ++index)
+	for (size_t index = 0; index < 400; ++index)
 		doc[index] = 0;
 	doc[0] = 'X'; doc[1] = 'B'; doc[2] = 'F';
 	put32(doc, 4, 144);
@@ -611,6 +612,10 @@ static size_t build_dictionary_values_document(unsigned char *doc)
 	put32(doc, at, 2); at += 4;
 	doc[at++] = 0x02;
 	at = put_string_constant(doc, at, 0x0a, "ThemeKey");
+	doc[at++] = 0x15; at = put_stable(doc, at, 52); /* Double resource from a float constant */
+	doc[at++] = 3; put32(doc, at, 0x447a0000); at += 4; /* 1000.0f */
+	doc[at++] = 0x21;
+	at = put_string_constant(doc, at, 0x0a, "Number");
 	doc[at++] = 0x21; /* close the dictionary scope */
 	put32(doc, 8, (uint32_t)(4 + 8 + (at - 168)));
 	put32(doc, 164, (uint32_t)(at - 168));
@@ -704,8 +709,8 @@ static size_t build_deferred_theme_document(unsigned char *doc)
 	doc[96] = 'L'; doc[98] = 'i'; doc[100] = 'g'; doc[102] = 'h'; doc[104] = 't';
 	put32(doc, 140, 2); /* two substreams: the page stream and the deferred dictionary */
 	put32(doc, 144, 0);
-	put32(doc, 148, 47); /* the page stream ends where the deferred dictionary begins */
-	put32(doc, 152, 47);
+	/* the page stream's end lands where the deferred dictionary begins; both table entries carry it */
+	put32(doc, 152, 0);
 	put32(doc, 156, 0); /* the deferred stream's end, filled in below once its nodes are emitted */
 	doc[at++] = 0x14; at = put_stable(doc, at, 442); /* create Grid */
 	doc[at++] = 0x07; at = put_stable(doc, at, 404); /* SetValue FrameworkElement.Resources */
@@ -718,7 +723,7 @@ static size_t build_deferred_theme_document(unsigned char *doc)
 	doc[at++] = 0x00; /* legacy theme resource count */
 	doc[at++] = 0x0a; /* ResourceDictionary_v3 */
 	doc[at++] = 0x00; /* explicit resources */
-	doc[at++] = 0x00; /* auto-undeferral tokens */
+	doc[at++] = 0x00; /* auto-undeferral strings */
 	doc[at++] = 0x00; /* implicit resources */
 	doc[at++] = 0x00; /* conditional explicit resources */
 	doc[at++] = 0x00; /* conditional implicit resources */
@@ -733,6 +738,8 @@ static size_t build_deferred_theme_document(unsigned char *doc)
 	doc[at++] = 0x05; doc[at++] = 0; doc[at++] = 0; /* key StringReference 0: "Greeting" */
 	doc[at++] = 0x21;
 	doc[at++] = 0x21;
+	put32(doc, 148, (uint32_t)(at - 160)); /* the page stream ends where the deferred dictionary begins */
+	put32(doc, 152, (uint32_t)(at - 160));
 	doc[at++] = 0x14; at = put_stable(doc, at, 371); /* the deferred dictionary */
 	at = put_string_constant(doc, at, 0x04, "Deferred");
 	at = put_string_constant(doc, at, 0x0a, "Greeting");
@@ -804,12 +811,17 @@ static size_t build_mapped_dictionary_document(unsigned char *doc, BOOL explicit
 	doc[at++] = 1; doc[at++] = 0; doc[at++] = 12; /* Light -> brush */
 	doc[at++] = 2; doc[at++] = 0; doc[at++] = 3;  /* Alias -> color */
 	doc[at++] = 0; doc[at++] = 0; doc[at++] = 3;  /* Greeting -> same color */
-	for (unsigned int i = 0; i < 5; ++i) doc[at++] = 0;
+	doc[at++] = 1; doc[at++] = 0; doc[at++] = 0; /* auto-undeferral string reference */
+	for (unsigned int i = 0; i < 3; ++i) doc[at++] = 0;
+	doc[at++] = 1; doc[at++] = 3; doc[at++] = 1; /* token and one predicate */
+	doc[at++] = 0; doc[at++] = 0; doc[at++] = 0; doc[at++] = 0; /* type and arguments */
 	doc[at++] = 0x21;
 	deferred = at - 176;
 	doc[at++] = 0x14; at = put_stable(doc, at, 371);
 	doc[at++] = 0x16; at = put_stable(doc, at, 42); doc[at++] = 8;
-	put32(doc, at, 0xff3c3c3c); at += 4; doc[at++] = 0x02;
+	put32(doc, at, 0xff3c3c3c); at += 4;
+	doc[at++] = 0x0d; doc[at++] = 5; doc[at++] = 0; doc[at++] = 0; /* x:Name matches a mapped key */
+	doc[at++] = 0x02;
 	if (explicit_key) { doc[at++] = 0x0a; doc[at++] = 5; doc[at++] = 0; doc[at++] = 0; }
 	doc[187] = (unsigned char)(at - 176 - deferred);
 	doc[at++] = 0x14; at = put_stable(doc, at, 265);
@@ -818,6 +830,68 @@ static size_t build_mapped_dictionary_document(unsigned char *doc, BOOL explicit
 	put32(doc, 160, 0); put32(doc, 164, (uint32_t)deferred);
 	put32(doc, 168, (uint32_t)deferred); put32(doc, 172, (uint32_t)(at - 176));
 	put32(doc, 8, (uint32_t)(at - 156));
+	return at;
+}
+
+/* Put the dependent brush before the mapped color, requiring lookup during the stream walk. */
+static size_t build_forward_dictionary_document(unsigned char *doc)
+{
+	unsigned char values[64];
+	const size_t length = build_mapped_dictionary_document(doc, FALSE);
+	const size_t stream = 176 + doc[168];
+	const size_t brush = doc[187];
+	const size_t color_size = brush - 3;
+	const size_t brush_size = length - 1 - (stream + brush);
+	memcpy(values, doc + stream + 3, color_size);
+	memmove(doc + stream + 3, doc + stream + brush, brush_size);
+	memcpy(doc + stream + 3 + brush_size, values, color_size);
+	doc[187] = 3;
+	doc[190] = doc[193] = (unsigned char)(3 + brush_size);
+	return length;
+}
+
+/* The Shapr3D shape: an implicit style bases on a later explicit style in the deferred stream. */
+static size_t build_forward_style_document(unsigned char *doc, BOOL cycle, uint16_t target_type)
+{
+	build_mapped_dictionary_document(doc, FALSE);
+	const char *names[] = {"Greeting", target_type == 560 ? "GridViewItem" : target_type == 561 ? "ListViewItem" : "ToggleSwitch", "Alias"};
+	size_t string_at = 72;
+	memset(doc + 68, 0, 88);
+	put32(doc, 68, 3);
+	for (unsigned i = 0; i < 3; ++i) {
+		size_t length = 0;
+		while (names[i][length]) ++length;
+		put32(doc, string_at, (uint32_t)length); string_at += 4;
+		for (size_t j = 0; j < length; ++j) { doc[string_at] = names[i][j]; string_at += 2; }
+	}
+	for (unsigned i = 0; i < 5; ++i) put64(doc, 28 + i * 8, string_at - 12 + i * 4);
+	size_t at = 176, base_token, implicit_token;
+	doc[at++] = 0x14; at = put_stable(doc, at, 371);
+	doc[at++] = 15; doc[at++] = 1; doc[at++] = 0; doc[at++] = 0; doc[at++] = 10;
+	doc[at++] = 2;
+	doc[at++] = 0; doc[at++] = 0; base_token = at++; /* Greeting -> explicit style */
+	doc[at++] = 2; doc[at++] = 0; doc[at++] = 0; /* Alias -> same explicit style */
+	doc[at++] = 0; /* auto-undeferral strings */
+	doc[at++] = 1; /* implicit styles */
+	doc[at++] = 1; doc[at++] = 0; implicit_token = at++;
+	doc[at++] = 0; doc[at++] = 0; doc[at++] = 0; /* conditional maps, predicates */
+	doc[at++] = 0x21;
+	const size_t stream = at;
+	put32(doc, 164, (uint32_t)(stream - 176)); put32(doc, 168, (uint32_t)(stream - 176));
+	doc[at++] = 0x14; at = put_stable(doc, at, 371);
+	doc[implicit_token] = 3;
+	doc[at++] = 0x14; at = put_stable(doc, at, 114);
+	doc[at++] = 0x1e; at = put_stable(doc, at, 244); doc[at++] = 5; doc[at++] = 0; doc[at++] = 0;
+	doc[at++] = 0x1d; at = put_stable(doc, at, 247); at = put_stable(doc, at, target_type);
+	doc[at++] = 0x21;
+	doc[base_token] = doc[base_token + 3] = (unsigned char)(at - stream);
+	doc[at++] = 0x14; at = put_stable(doc, at, 114);
+	doc[at++] = 0x1d; at = put_stable(doc, at, 247); at = put_stable(doc, at, target_type);
+	if (cycle) {
+		doc[at++] = 0x1e; at = put_stable(doc, at, 244); doc[at++] = 5; doc[at++] = 1; doc[at++] = 0;
+	}
+	doc[at++] = 0x21; doc[at++] = 0x21;
+	put32(doc, 172, (uint32_t)(at - 176)); put32(doc, 8, (uint32_t)(at - 156));
 	return at;
 }
 
@@ -1154,11 +1228,14 @@ static size_t build_style_v2_payload_document(unsigned char *doc)
 	doc[at++] = 0x00;
 	doc[at++] = 0x00;
 	doc[at++] = 0x08;
-	doc[at++] = 0x01; /* one setter */
+	doc[at++] = 0x02; /* two setters */
 	doc[at++] = 0x30; /* a literal value on a stable property */
 	at = put_stable(doc, at, 393); /* FrameworkElement.Height */
 	doc[at++] = 0x03; /* the float constant */
 	doc[at++] = 0x00; doc[at++] = 0x00; doc[at++] = 0x80; doc[at++] = 0x41; /* 16.0f */
+	doc[at++] = 0x18; /* object-valued setter with a multibyte deferred offset */
+	at = put_stable(doc, at, 560); /* Control.Template */
+	doc[at++] = 0x80; doc[at++] = 0x01;
 	doc[at++] = 0x21; /* close the style */
 	doc[at++] = 0x09; /* AddToDictionary: the implicit key */
 	at = put_string_constant(doc, at, 0x04, "Hi");
@@ -1296,6 +1373,23 @@ static size_t build_theme_resource_document(unsigned char *doc)
 	doc[208] = 0x21;
 	doc[209] = 0x21;
 	return 210;
+}
+
+static size_t build_theme_lookup_document(unsigned char *doc, BOOL merged, BOOL theme_resource)
+{
+	size_t length = build_theme_resource_document(doc);
+	if (merged) {
+		memmove(doc + 167, doc + 161, length - 161);
+		doc[161] = 0x13; put_stable(doc, 162, 687); /* MergedDictionaries */
+		doc[164] = 0x14; put_stable(doc, 165, 371); /* merged ResourceDictionary */
+		length += 6;
+		memmove(doc + 204, doc + 201, length - 201);
+		doc[201] = 0x21; doc[202] = 8; doc[203] = 0x21; /* close child, append, close merged vector */
+		length += 3;
+		put32(doc, 8, (uint32_t)(length - 140)); put32(doc, 148, (uint32_t)(length - 152));
+	}
+	doc[202 + (merged ? 9 : 0)] = theme_resource ? 0x24 : 0x1e;
+	return length;
 }
 
 /* A Grid whose FrameworkElement.Resources (404) arrives the way a compiled page carries it: a SetValue naming the property
@@ -2115,6 +2209,17 @@ int raven_entry(void)
 	if (RoGetActivationFactory(page_key, &IID_IActivationFactory, (void **)&page_factory) != S_OK || !page_factory) return 3;
 	IInspectable *frame_object = NULL, *page_object = NULL;
 	if (frame_factory->lpVtbl->ActivateInstance(frame_factory, &frame_object) != S_OK || !frame_object) return 4;
+	{
+		__x_ABI_CWindows_CUI_CXaml_CControls_CIFrameFactory *ctor=NULL;
+		IInspectable *inner=NULL, *base=NULL; frame1 *part=NULL; IUnknown *identity=NULL;
+		if (frame_factory->lpVtbl->QueryInterface(frame_factory,&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrameFactory,(void **)&ctor)!=S_OK || !ctor ||
+			ctor->lpVtbl->CreateInstance(ctor,(uint64_t)(uintptr_t)frame_object,0,(uint64_t)(uintptr_t)&base)!=E_POINTER ||
+			ctor->lpVtbl->CreateInstance(ctor,(uint64_t)(uintptr_t)frame_object,(uint64_t)(uintptr_t)&inner,(uint64_t)(uintptr_t)&base)!=S_OK || !inner || !base ||
+			inner->lpVtbl->QueryInterface(inner,&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame,(void **)&part)!=S_OK || !part ||
+			part->lpVtbl->QueryInterface(part,&IID_IUnknown,(void **)&identity)!=S_OK || identity!=(IUnknown *)frame_object) return 22;
+		identity->lpVtbl->Release(identity); part->lpVtbl->Release(part); base->lpVtbl->Release(base);
+		inner->lpVtbl->Release(inner); ctor->lpVtbl->Release(ctor);
+	}
 	if (page_factory->lpVtbl->ActivateInstance(page_factory, &page_object) != S_OK || !page_object) return 5;
 	frame1 *frame = NULL;
 	if (frame_object->lpVtbl->QueryInterface(frame_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame, (void **)&frame) != S_OK ||
@@ -2221,8 +2326,43 @@ int raven_entry(void)
 		target_text = WindowsGetStringRawBuffer(target.Name, &target_length);
 		if (target_length != 6 || CompareStringOrdinal(target_text, 6, L"Button", -1, FALSE) != CSTR_EQUAL) return 711;
 		WindowsDeleteString(target.Name);
+		/* A compiled Style.BasedOn resolves a platform style through a stable property reference. */
+		{
+			unsigned char based_fixture[183];
+			const char *key = "DefaultButtonStyle";
+			IInspectable *base = NULL;
+			load_into_function load_into = (load_into_function)GetProcAddress(component, "raven_xaml_load_into");
+			build_style_document(based_fixture);
+			put64(based_fixture, 20, 56); put64(based_fixture, 28, 100);
+			put32(based_fixture, 68, 1); put32(based_fixture, 72, 18);
+			for (size_t i = 0; i < 18; ++i) { based_fixture[76 + i * 2] = key[i]; based_fixture[77 + i * 2] = 0; }
+			put32(based_fixture, 8, 27); put32(based_fixture, 164, 15);
+			based_fixture[176] = 0x1e; based_fixture[177] = 0xf4; based_fixture[178] = 0x80;
+			based_fixture[179] = 5; based_fixture[180] = 0; based_fixture[181] = 0; based_fixture[182] = 0x21;
+			if (!load_into) return 712;
+			if (load_into(based_fixture, sizeof based_fixture, style_root) != S_OK) return 713;
+			if (loaded_style->lpVtbl->get_BasedOn(loaded_style, (uint64_t)(uintptr_t)&base) != S_OK || !base) return 714;
+			base->lpVtbl->Release(base);
+		}
 		loaded_style->lpVtbl->Release(loaded_style);
 		style_root->lpVtbl->Release(style_root);
+	}
+	/* Type-valued properties describe controls beyond the set of activatable Raven classes. */
+	{
+		const uint16_t types[] = {522, 562, 528};
+		const WCHAR *names[] = {L"MenuFlyoutPresenter", L"RadioButton", L"ProgressBar"};
+		for (unsigned i = 0; i < ARRAYSIZE(types); ++i) {
+			unsigned char fixture[177];
+			IInspectable *root = NULL;
+			style_i *style = NULL;
+			xaml_type_name target = {NULL, TypeKind_Metadata};
+			build_style_document(fixture); put_stable(fixture, 174, types[i]);
+			if (load(fixture, sizeof fixture, &root) != S_OK || !root ||
+				root->lpVtbl->QueryInterface(root, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style) != S_OK ||
+				style->lpVtbl->get_TargetType(style, &target) != S_OK || !target.Name ||
+				!same(target.Name, names[i], (UINT32)lstrlenW(names[i]))) return 865;
+			WindowsDeleteString(target.Name); style->lpVtbl->Release(style); root->lpVtbl->Release(root);
+		}
 	}
 	/* FrameworkElement.Resources: a SetValue naming the property and the dictionary scope that follows it put the compiled
 	 * dictionary on the element, entry and all; clearing the property makes the next read create an empty dictionary. */
@@ -2314,10 +2454,10 @@ int raven_entry(void)
 	/* Deferred content: the theme dictionary's entries come from substream 1 through SetCustomRuntimeData, and the lookup
 	 * still resolves them. A runtime-data form the loader does not decode refuses instead of guessing its length. */
 	{
-		unsigned char deferred_fixture[256];
+		unsigned char deferred_fixture[512];
 		IInspectable *deferred_root = NULL;
 		HSTRING deferred_value = NULL;
-		unsigned char unknown_type[256];
+		unsigned char unknown_type[512];
 		IInspectable *refused_root = NULL;
 		size_t deferred_length = build_deferred_theme_document(deferred_fixture);
 		if (load(deferred_fixture, (uint32_t)deferred_length, &deferred_root) != S_OK || !deferred_root) return 752;
@@ -2332,6 +2472,27 @@ int raven_entry(void)
 		if (load(unknown_type, (uint32_t)deferred_length, &refused_root) != E_NOTIMPL || refused_root) return 755;
 	}
 
+	/* Static and theme references both select theme resources, including those in merged dictionaries. */
+	for (unsigned flags = 0; flags < 4; ++flags) {
+		unsigned char fixture[219];
+		IInspectable *root = NULL;
+		HSTRING text = NULL;
+		if (load(fixture, (uint32_t)build_theme_lookup_document(fixture, flags & 1, flags & 2), &root) != S_OK || !root ||
+			only_child_text(root, &text) != S_OK || !same(text, L"Themed", 6)) return 866;
+		WindowsDeleteString(text); root->lpVtbl->Release(root);
+	}
+	{
+		unsigned char fixture[320];
+		IInspectable *root = NULL;
+		HSTRING text = NULL;
+		size_t length = build_provided_theme_document(fixture);
+		BOOL changed = FALSE;
+		for (size_t i = 152; i + 1 < length; ++i)
+			if (fixture[i] == 0x23 && fixture[i + 1] == 9) { fixture[i] = 0x22; changed = TRUE; break; }
+		if (!changed || load(fixture, (uint32_t)length, &root) != S_OK || !root ||
+			only_child_text(root, &text) != S_OK || !same(text, L"Themed", 6)) return 867;
+		WindowsDeleteString(text); root->lpVtbl->Release(root);
+	}
 	/* Provided resource values: an entry that names another key is stored as a reference and resolved when it is read,
 	 * so an alias declared before its target still resolves (nodes 34/35). */
 	{
@@ -2481,7 +2642,7 @@ int raven_entry(void)
 		typedef HRESULT (*brush_color_function)(IInspectable *, struct fixture_color *);
 		typedef HRESULT (*enum_value_function)(IInspectable *, INT32 *);
 		typedef IInspectable *(*boxed_string_function)(const WCHAR *, UINT32);
-		unsigned char values_fixture[300], brush_fixture[300];
+		unsigned char values_fixture[400], brush_fixture[300];
 		IInspectable *values_root = NULL, *brush_root = NULL, *brush_entry = NULL, *accent_entry = NULL, *theme_entry = NULL;
 		brush_color_function brush_color = NULL, color_value = NULL;
 		enum_value_function enum_value = NULL;
@@ -2549,6 +2710,15 @@ int raven_entry(void)
 			if (enum_value((IInspectable *)values_map, &value) == S_OK) return 797;
 			theme_entry->lpVtbl->Release(theme_entry);
 		}
+		{
+			IInspectable *key = boxed_string(L"Number", 6), *number = NULL;
+			__x_ABI_CWindows_CFoundation_CIPropertyValue *value = NULL;
+			double read_number = 0;
+			if (!key || values_map->lpVtbl->Lookup(values_map, key, &number) != S_OK || !number ||
+				number->lpVtbl->QueryInterface(number, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue, (void **)&value) != S_OK ||
+				value->lpVtbl->GetDouble(value, &read_number) != S_OK || read_number != 1000.0) return 864;
+			value->lpVtbl->Release(value); number->lpVtbl->Release(number); key->lpVtbl->Release(key);
+		}
 		values_map->lpVtbl->Release(values_map);
 		/* A v3 map inserts an earlier color and its alias before a later brush resolves it. */
 		{
@@ -2568,7 +2738,11 @@ int raven_entry(void)
 			mapped_fixture[187] = 0x7f; /* first map token extends beyond the deferred stream */
 			if (mapped_load_into(mapped_fixture, (uint32_t)length, root) != E_INVALIDARG) return 855;
 			mapped_fixture[187] = 4; /* inside the color node's type operand, not at a node boundary */
-			if (mapped_load_into(mapped_fixture, (uint32_t)length, root) != E_INVALIDARG) return 858;
+			if (mapped_load_into(mapped_fixture, (uint32_t)length, root) != S_OK ||
+				root->lpVtbl->QueryInterface(root, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK) return 858;
+			brush_key = boxed_string(L"Light", 5); brush = NULL;
+			if (map->lpVtbl->Lookup(map, brush_key, &brush) != E_INVALIDARG || brush) return 858;
+			brush_key->lpVtbl->Release(brush_key); map->lpVtbl->Release(map);
 			root->lpVtbl->Release(root);
 			root = NULL; alias = NULL; brush = NULL; map = NULL;
 			length = build_mapped_dictionary_document(mapped_fixture, TRUE);
@@ -2579,6 +2753,71 @@ int raven_entry(void)
 				map->lpVtbl->Lookup(map, brush_key, &brush) != S_OK || !brush || brush_color(brush, &read) != S_OK || read.R != 0x3c) return 857;
 			brush->lpVtbl->Release(brush); alias->lpVtbl->Release(alias);
 			alias_key->lpVtbl->Release(alias_key); brush_key->lpVtbl->Release(brush_key);
+			map->lpVtbl->Release(map); root->lpVtbl->Release(root);
+		}
+		/* Forward references load a later mapped value and preserve its alias identity. */
+		{
+			unsigned char fixture[300];
+			__FIMap_2_IInspectable_IInspectable *map = NULL;
+			IInspectable *root = NULL, *color = NULL, *alias = NULL, *brush = NULL;
+			IInspectable *color_key = boxed_string(L"Greeting", 8), *alias_key = boxed_string(L"Alias", 5), *brush_key = boxed_string(L"Light", 5);
+			size_t length = build_forward_dictionary_document(fixture);
+			if (load(fixture, (uint32_t)length, &root) != S_OK || !root ||
+				root->lpVtbl->QueryInterface(root, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK) return 859;
+			if (map->lpVtbl->Lookup(map, color_key, &color) != S_OK || !color ||
+				map->lpVtbl->Lookup(map, alias_key, &alias) != S_OK || alias != color ||
+				map->lpVtbl->Lookup(map, brush_key, &brush) != S_OK || !brush ||
+				brush_color(brush, &read) != S_OK || read.R != 0x3c || read.A != 0xff) return 860;
+			brush->lpVtbl->Release(brush); alias->lpVtbl->Release(alias); color->lpVtbl->Release(color);
+			color_key->lpVtbl->Release(color_key); alias_key->lpVtbl->Release(alias_key); brush_key->lpVtbl->Release(brush_key);
+			map->lpVtbl->Release(map); root->lpVtbl->Release(root);
+		}
+		/* Unused invalid entries stay deferred; HasKey and a surviving view do not require the input buffer. */
+		{
+			unsigned char fixture[300];
+			size_t length = build_mapped_dictionary_document(fixture, FALSE);
+			const size_t brush_at = 176 + fixture[168] + fixture[187];
+			IInspectable *root = NULL, *good = NULL, *bad = NULL;
+			__FIMap_2_IInspectable_IInspectable *map = NULL;
+			__FIMapView_2_IInspectable_IInspectable *view = NULL;
+			IInspectable *good_key = boxed_string(L"Greeting", 8), *bad_key = boxed_string(L"Light", 5);
+			boolean found = FALSE;
+			fixture[brush_at + 7] = 1; /* the unused brush depends on itself */
+			if (load(fixture, (uint32_t)length, &root) != S_OK || !root ||
+				root->lpVtbl->QueryInterface(root, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK ||
+				map->lpVtbl->HasKey(map, bad_key, &found) != S_OK || !found ||
+				map->lpVtbl->Lookup(map, good_key, &good) != S_OK || !good ||
+				color_value(good, &read) != S_OK || read.R != 0x3c ||
+				map->lpVtbl->GetView(map, &view) != S_OK || !view) return 868;
+			memset(fixture, 0, sizeof fixture);
+			good->lpVtbl->Release(good); map->lpVtbl->Release(map); root->lpVtbl->Release(root);
+			if (view->lpVtbl->Lookup(view, bad_key, &bad) != E_INVALIDARG || bad) return 869;
+			view->lpVtbl->Release(view); good_key->lpVtbl->Release(good_key); bad_key->lpVtbl->Release(bad_key);
+		}
+		const uint16_t target_types[] = {560, 561, 489};
+		for (unsigned type_index = 0; type_index < ARRAYSIZE(target_types); ++type_index) {
+			const uint16_t target_type = target_types[type_index];
+			unsigned char fixture[300];
+			__FIMap_2_IInspectable_IInspectable *map = NULL;
+			IInspectable *root = NULL, *base = NULL, *implicit = NULL, *read_base = NULL;
+			__x_ABI_CWindows_CUI_CXaml_CIStyle *style = NULL;
+			IInspectable *base_key = boxed_string(L"Greeting", 8), *implicit_key = boxed_string(target_type == 560 ? L"GridViewItem" : target_type == 561 ? L"ListViewItem" : L"ToggleSwitch", 12);
+			load_into_function load_into = (load_into_function)GetProcAddress(component, "raven_xaml_load_into");
+			size_t length = build_forward_style_document(fixture, FALSE, target_type);
+			if (load(fixture, (uint32_t)length, &root) != S_OK || !root ||
+				root->lpVtbl->QueryInterface(root, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK) return 861;
+			memset(fixture, 0, sizeof fixture); /* deferred values own their metadata after the input buffer goes away */
+			if (map->lpVtbl->Lookup(map, implicit_key, &implicit) != S_OK || !implicit ||
+				implicit->lpVtbl->QueryInterface(implicit, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style) != S_OK ||
+				style->lpVtbl->get_BasedOn(style, (uint64_t)(uintptr_t)&read_base) != S_OK ||
+				map->lpVtbl->Lookup(map, base_key, &base) != S_OK || !base || read_base != base) return 862;
+			read_base->lpVtbl->Release(read_base); style->lpVtbl->Release(style);
+			implicit->lpVtbl->Release(implicit); base->lpVtbl->Release(base);
+			length = build_forward_style_document(fixture, TRUE, target_type);
+			implicit = NULL;
+			if (!load_into || load_into(fixture, (uint32_t)length, root) != S_OK ||
+				map->lpVtbl->Lookup(map, implicit_key, &implicit) != E_INVALIDARG || implicit) return 863;
+			base_key->lpVtbl->Release(base_key); implicit_key->lpVtbl->Release(implicit_key);
 			map->lpVtbl->Release(map); root->lpVtbl->Release(root);
 		}
 		/* The seven accent names resolve to distinct ordered slots of a configured or default palette. */

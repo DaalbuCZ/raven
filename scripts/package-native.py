@@ -53,7 +53,7 @@ def runtime_paths(build):
     files = [native / "raven", native / "raven-bootstrap"]
     names = """comctl32.dll raven-user32.dll raven-shell.dll raven-dwrite.dll raven-d2d1.dll
         raven-uianimation.dll ucrtbase.dll raven-rtl.dll raven-text.dll raven-storage.dll
-        raven-accprop.dll raven-deployment.dll raven-netlist.dll raven-xaml.dll
+        raven-accprop.dll raven-deployment.dll raven-netlist.dll raven-xaml.dll coremessaging.dll d3dcompiler_47.dll
         msi.dll cabinet.dll sxs.dll rpcrt4.dll libxslt.dll msxml3.dll atl100.dll oleaut32.dll
         libpng.dll libjpeg.dll libtiff.dll propsys.dll mlang.dll windowscodecs.dll gdiplus.dll
         urlmon.dll riched20.dll msftedit.dll msvfw32.dll advpack.dll raven-setupapi.dll xmllite.dll winsqlite3.dll raven-web.dll raven-appx.dll
@@ -66,7 +66,14 @@ def runtime_paths(build):
         files += [root / name for name in names if (root / name).exists()]
     files += sorted((native / "roots").glob("*.crt"))
     paths = {path.relative_to(native).as_posix(): path for path in files}
-    font_directory = cache_values(build).get("RAVEN_FONT_DIRECTORY")
+    cache = cache_values(build)
+    for key, names in (("RAVEN_DXVK_PE64_DIR", ("d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll")),
+                       ("RAVEN_VKD3D_PE64_DIR", ("d3d12.dll", "d3d12core.dll"))):
+        if cache.get(key) and not cache[key].endswith("-NOTFOUND"):
+            for name in names:
+                if (Path(cache[key]) / name).is_file():
+                    paths[name] = native / name
+    font_directory = cache.get("RAVEN_FONT_DIRECTORY")
     if font_directory and not font_directory.endswith("-NOTFOUND"):
         fonts = Path(font_directory)
         for face in ("Sans", "Mono", "Serif"):

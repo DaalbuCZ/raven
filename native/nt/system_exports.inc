@@ -669,7 +669,7 @@ static constexpr std::string_view kernel32_exports[]{
 	"NlsCheckPolicy","NlsConvertIntegerToString","NlsEventDataDescCreate","NlsGetCacheUpdateCount","NlsResetProcessLocale","NlsUpdateLocale",
 	"NlsUpdateSystemLocale","NlsWriteEtwEvent","NormalizeString","NotifyMountMgr","NotifyUILanguageChange","NtVdm64CreateProcessInternalW",
 	"OOBEComplete","OfferVirtualMemory","OpenConsoleW","OpenConsoleWStub","OpenDataFile","OpenEventA",
-	"OpenEventW","OpenFile","OpenFileById","OpenFileMappingA","OpenFileMappingW","OpenJobObjectA",
+	"OpenEventW","OpenFile","OpenFileById","OpenFileMappingA","OpenFileMappingFromApp","OpenFileMappingW","OpenJobObjectA",
 	"OpenJobObjectW","OpenMutexA","OpenMutexW","OpenPackageInfoByFullName","OpenPrivateNamespaceA","OpenPrivateNamespaceW",
 	"OpenProcess","OpenProfileUserMapping","OpenSemaphoreA","OpenSemaphoreW","OpenState","OpenStateExplicit",
 	"OpenThread","OpenWaitableTimerA","OpenWaitableTimerW","OutputDebugStringA","OutputDebugStringW","PackageFamilyNameFromFullName",

@@ -348,9 +348,9 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("HeapValidate", 3, [](ApiCall &call) { call.ret(1); });
 	registry.add("HeapCompact", 2, [](ApiCall &call) { call.ret(0x10000); });
 
-	registry.add("CreateFileMappingW", 6, [&](ApiCall &call) {
+	const auto create_file_mapping = [&](ApiCall &call, uint64_t maximum, uint64_t name_pointer) {
 		auto mapping = std::make_shared<SectionObject>();
-		const auto name = call[5] ? call.wide(call[5], 260) : std::u16string();
+		const auto name = name_pointer ? call.wide(name_pointer, 260) : std::u16string();
 		bool existed = false;
 		if (call[0] != UINT64_MAX) {
 			mapping->file = objects.object_as<FileObject>(call[0]);
@@ -360,10 +360,9 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 			}
 			struct stat metadata{};
 			::fstat(mapping->file->descriptor, &metadata);
-			const uint64_t maximum = uint64_t(call.u32(3)) << 32 | call.u32(4);
 			mapping->size = maximum ? maximum : uint64_t(metadata.st_size);
 		} else {
-			mapping->size = uint64_t(call.u32(3)) << 32 | call.u32(4);
+			mapping->size = maximum;
 			if (!mapping->size) {
 				call.fail(87);
 				return;
@@ -401,8 +400,17 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 			objects.set_inherit(made.value, true);
 		call.set_last_error(existed ? 183 : 0);
 		call.ret(made.value);
+	};
+	registry.add("CreateFileMappingW", 6, [create_file_mapping](ApiCall &call) {
+		create_file_mapping(call, uint64_t(call.u32(3)) << 32 | call.u32(4), call[5]);
 	});
-	registry.add("OpenFileMappingW", 3, [&](ApiCall &call) {
+	// The 64-bit size occupies two argument words on x86, but a single register on x64.
+	registry.add("CreateFileMappingFromApp", 6, [create_file_mapping](ApiCall &call) {
+		const bool x86 = call.pointer_width() == 4;
+		const uint64_t size = x86 ? uint64_t(call.u32(3)) | uint64_t(call.u32(4)) << 32 : call[3];
+		create_file_mapping(call, size, call[x86 ? 5 : 4]);
+	});
+	auto open_file_mapping = [&](ApiCall &call) {
 		if (!call[2]) {
 			call.fail(87);
 			return;
@@ -429,7 +437,9 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 		// An opened section carries the rights the caller asked for.
 		objects.set_access(made.value, call.u32(0) & ~0xf0000000U ? (call.u32(0) & ~0xf0000000U) : 0xf001f);
 		call.ret(made.value);
-	});
+	};
+	registry.add("OpenFileMappingW", 3, open_file_mapping);
+	registry.add("OpenFileMappingFromApp", 3, open_file_mapping);
 	// atlthunk: a thunk is a few instructions in executable memory that call a window procedure with the window handle replaced by a
 	// value of the program's (the object behind the window). Thunks come from pages kept for them; a freed one is used again.
 	struct ThunkPool {
@@ -697,6 +707,14 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 		}
 		const auto map = registry.find("MapViewOfFile");
 		ApiCall inner(call.process, call.environment, {call[0], call[1], call[2], call[3], call[4]});
+		map->second(inner);
+		call.ret(inner.result);
+	});
+	registry.add("MapViewOfFileFromApp", 5, [&registry](ApiCall &call) {
+		const bool x86 = call.pointer_width() == 4;
+		const uint64_t offset = x86 ? uint64_t(call.u32(2)) | uint64_t(call.u32(3)) << 32 : call[2];
+		const auto map = registry.find("MapViewOfFile");
+		ApiCall inner(call.process, call.environment, {call[0], call[1], offset >> 32, uint32_t(offset), call[x86 ? 4 : 3]});
 		map->second(inner);
 		call.ret(inner.result);
 	});

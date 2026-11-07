@@ -1883,6 +1883,106 @@ the same day — see the two entries below. Evidence:
   node — and the probe harness (a guest client loading a real XBF beside the package, writing
   `RavenXamlLastFailure` to a file) is the tool the stage's next increment starts from.
 
+- Stage-7 re-probe (2026-11-03): a copied Shapr3D prefix and an Application-target App.xbf probe exposed a missing
+  stable property mapping: index 244 is `Style.BasedOn`. The platform-style implementation already existed, but the
+  loader could not dispatch that property. The mapping and a targeted x64/x86 fixture now cover the lookup and assignment.
+  `Style_v2` payloads now consume object and other deferred values as variable-length stream offsets, matching the WinUI
+  serializer; the reader does not yet apply those setter values. Dictionary auto-undeferral entries are shared strings,
+  and conditional-object maps contain a token before each predicate vector; fixtures cover both. A named, mapped resource
+  that is not a FrameworkElement can use its matching map key as its name. Both native controls tests pass. A traced
+  Shapr3D launch now reaches `GridViewItemStyle.xbf` at `0x1190`: an implicit style bases on `GridViewItemStyle`, whose
+  mapped explicit style occurs later in the deferred stream at `0x11a2`. Resource resolution needs to materialize that
+  forward-referenced entry before assigning BasedOn. The app has not reached a usable window.
+
+- Deferred forward-resource lookup (2026-11-03): active v3 dictionary maps now let resource resolution load a requested
+  entry at its stream offset. The nested walk shares the dictionary and map, records the consumed range so the outer walk
+  reuses the same object, and guards cycles and excessive reference depth. The map also reads the implicit-style table:
+  Shapr3D's implicit GridViewItem style has no trailing AddToDictionary node, so its runtime-data token must insert it on
+  scope close. Synthetic regressions cover forward brush/color dependencies, shared-token aliases, implicit styles whose
+  BasedOn is a later explicit style, object identity after the normal walk reaches that style, and a cyclic reference.
+  Stable type names 560/561/489 (`GridViewItem`/`ListViewItem`/`ToggleSwitch`) allow Style.TargetType to store those names; these entries do
+  not implement the controls. Loader failures now print the offset and HRESULT with `RAVEN_TRACE_DEBUG=1`, including
+  validation failures after the stream walk. All launches use `/tmp/raven-shapr-probe/prefix`, leaving the original package
+  prefix unchanged. Style_v2 setter values remain unapplied.
+- Compact binary PRI items (2026-11-03): after the GridView dictionary loaded, the runtime rejected
+  `/Files/Themes/ListViewItemStyle.xbf` before the loader ran. Its candidate points into the data section's 16-bit
+  offset/length table, which is also valid for binary data; `pri_lookup_blob` had only accepted the wide table. It now
+  reads either table as bounded byte ranges, matching `scripts/pri-extract.py`. The existing ambient-Source XBF fixture
+  uses compact storage while the other XBFs retain wide storage, so the LoadComponent tests cover both. The 16 focused
+  application/controls/MRT/resource/LoadComponent tests pass across x64/x86. The traced launch with this fix reaches
+  ListViewItemStyle.xbf at 0x124e (Style.TargetType ListViewItem). With both item-style names and ToggleSwitch mapped,
+  the rebuilt 16-test set passes again and Shapr3D gets beyond both dictionary Source loads and the ToggleSwitch style.
+  The new wall is App.xbf 0xdb9: PushScopeCreateTypeWithConstant Double (stable 52) with a kind-3 float, 1000.0.
+  The loader boxes Color and ElementTheme constants but has no Double boxing fallback, so it answers
+  CLASS_E_CLASSNOTAVAILABLE (0x80040111). `property_value.c` already has the Double boxing implementation behind
+  PropertyValue.CreateDouble; reuse it rather than invent another box. Evidence:
+  `/tmp/raven-shapr-probe/launch-forward-complete.log`. Shapr3D still has no usable window.
+
+- Double resources and framework URI regression (2026-11-03): the loader now boxes stable type 52 with a float
+  constant through PropertyValue's existing Double box. A dictionary regression reads 1000.0 through IPropertyValue;
+  the 18 focused x64/x86 tests pass. The launch gets past App.xbf 0xdb9 and then fails at 0xde3, the SolidColorBrush
+  whose Color names ListViewItemBackground. This exposed a correction to the earlier framework-merge claim:
+  `framework_themes` is a fixed-width WCHAR array, and `ARRAYSIZE(framework_themes[file]) - 1` passed embedded nulls
+  to URI creation. The dependency PRI registered, but the actual theme documents did not merge. The builder now uses
+  the filename's string length and restores the tolerant-load flag on early exits. The LoadComponent fixture now has
+  an authored synthetic dependency with both framework theme paths and checks that two populated Source dictionaries
+  merge. The rebuilt 18-test set passes. The real framework load then failed at 0x50834 (GradientBrush.GradientStops):
+  unknown PushScopeGetValue properties still refused tolerant loads, and skipping them without pushing a collection
+  scope unbalanced the document. Unsupported collection scopes now remain balanced and discard only their own values;
+  strict application loads still refuse unsupported members. The synthetic framework theme includes that nested gradient
+  shape followed by a known entry, so the regression checks the surviving dictionary contents. The 18 tests pass again.
+  A traced launch now walks framework entries as far as MenuFlyoutSubItemRevealBorderBrushDisabled before the 20-second
+  limit, with no XBF failure. An isolated Xvfb :97 launch with a larger startup allowance is being observed next.
+  Logs: `/tmp/raven-shapr-probe/launch-double.log`, `launch-framework-uri.log`, `launch-framework-scope-trace.log`.
+
+- Resource loading cost and type-name decoding (2026-11-03): with actual framework loads enabled, an isolated X11 run
+  spent the entire 90-second startup allowance in dictionary key comparisons without creating a window. String keys now
+  cache an FNV-1a hash used only as a comparison prefilter; equal hashes still use the original content comparison, and
+  non-string keys retain IUnknown identity semantics. A regression uses the colliding keys `costarring` and `liquid`.
+  All 26 XAML/style/resource/MRT/property-value/settings tests pass. The real launch then reaches concrete failures in
+  the framework's implicit styles (theme document 0x692b8: MenuFlyoutPresenter; generic document 0x1a3ea: RadioButton).
+  Type-valued properties had incorrectly reused the small instantiable-class table. A generated short-name table now
+  derives from the repo's existing stable XBF index JSON, independently of activation support. Index zero and out-of-range
+  indices remain unavailable; named application types still read the document's own metadata. The first run after this
+  fix passed the RadioButton/MenuFlyoutPresenter failures and finished in 16.09 seconds, then exposed a retired stable
+  name at theme offset 0x69b4a: ProgressBar_Deleted0 (528). Older compiled files legitimately use that index, so type-name
+  decoding restores the original name by removing the metadata's retirement suffix. TargetType regressions cover all
+  three observed controls. The expanded 26-test set passes after restoring those legacy names. Logs: `launch-framework-x11.log` (timeout),
+  `launch-framework-hash.log` (the next failures), under `/tmp/raven-shapr-probe/`.
+
+- Merged theme lookup (2026-11-03): both real framework documents now load without XBF failures, but App.xbf 0xde3
+  still refuses its Color assignment. The resource lookup had two independent gaps: theme selection was only applied
+  to the current dictionary, not its merged dictionaries, and StaticResource skipped theme dictionaries entirely.
+  The dictionary's own entries and selected theme now precede recursive newest-first merged lookup. Both markup forms
+  use the same initial theme selection, consistent with Microsoft's ThemeResource documentation:
+  https://learn.microsoft.com/en-us/windows/apps/develop/platform/xaml/themeresource-markup-extension . Synthetic
+  regressions cover own/merged theme dictionaries, static/theme reads, and a static alias inside a theme dictionary;
+  all 26 tests pass. The real launch still reports App.xbf 0xde3 after 16.97 seconds, so lookup success versus value-type
+  mismatch is being traced explicitly. Logs: `/tmp/raven-shapr-probe/launch-legacy-types.log`, `launch-merged-theme.log`.
+
+- Persistent dictionary deferral (2026-11-03): the next real-app diagnostic showed that ListViewItemBackground resolves
+  to a Microsoft.UI.Xaml.Media.SolidColorBrush, while App.xbf 0xde3 assigns it to another brush's Color. Do not silently
+  coerce that object into a Color. The more basic issue was eager materialization: Windows retains compiled deferred
+  entries until lookup, while Raven still constructed the entire stream and failed on an unused definition. See the
+  deferred-resource behavior in Microsoft's ResourceDictionary implementation:
+  https://github.com/microsoft/microsoft-ui-xaml/blob/main/dxaml/xcp/components/resources/ResourceDictionary.cpp .
+  V3 dictionaries now retain a shared copy of their compiled document and per-key callbacks. Map and view lookups realize
+  values on demand; HasKey and Size do not. Replacing/removing/clearing a key releases its deferred context, and Source
+  adoption transfers entries without capturing the discarded dictionary object. Compiler-marked auto-undeferral keys
+  are still created during load. Deferred loads retain strict validation, alias identity and cycle guards. The initial
+  XBF load walks only the primary stream; named substreams are reached through their owning runtime-data nodes.
+  Added regressions destroy the input buffer before lookup, retain a view after the root/map are released, keep an unused
+  cyclic entry beside a valid value, and check that malformed/cyclic definitions fail when requested. All six focused
+  controls/dictionary/LoadComponent tests pass on both widths. The effective-theme pointer now restores its prior value
+  after each nested load so releasing a deferred document cannot leave a dangling theme slice. The final expanded suite
+  passes all 26 x64/x86 tests (18.85 seconds). A real isolated X11 launch passes XBF resource loading and reaches
+  ApplicationData.LocalSettings (`appstate.numberOfAppStarts`), then fails on a new activation request:
+  `Windows.System.UserProfile.GlobalizationPreferences` is absent from Raven's WinRT catalog, returning 0x80040154.
+  The untraced launch exits after 5.89 seconds, with no usable window. Evidence:
+  `/tmp/raven-shapr-probe/launch-lazy-final.log`, `launch-lazy-final.time`, and `launch-lazy-final-trace.log`
+  (the missing-class trace is around line 531186). This is the next startup blocker. Style_v2 setter values are still
+  not applied. Work paused at the user's request to wrap up; changes remain uncommitted, and the isolated Xvfb is stopped.
+
 ## Performance rules
 
 - One GPU compositor; XAML visuals and the 3D viewport composite on the GPU.
@@ -2054,3 +2154,549 @@ remain passing after the trial implementation was removed.
    that exist (`IActivatedEventArgs`, `ILaunchActivatedEventArgs`) are
    implemented; `IBackgroundActivatedEventArgs` was refused — no
    background activation is delivered.
+
+- Globalization preferences (2026-11-04): registered `Windows.System.UserProfile.GlobalizationPreferences` and served its
+  `IGlobalizationPreferencesStatics.Languages` using the existing ResourceContext UI-language view. Other preferences
+  return `E_NOTIMPL`. The x64 and x86 resource fixtures exercise activation, list size, access and bounds. An isolated
+  Shapr3D launch passes that activation and requests `Windows.Globalization.ApplicationLanguages`. That class now exposes
+  its default language list and primary override. The latter persists in a per-application settings file and affects subsequent
+  language views; the view currently contains only one language, and validation checks tag shape rather than the full BCP-47
+  registry. Manifest language enumeration remains
+  unimplemented. Both resource fixtures pass with read, write, invalid-tag and list checks. The isolated app launch now reaches
+  the app-owned `Shapr.SPLib.MTLanguageIDMapping`, declared in its package manifest with server `Shapr.Native.dll`
+  (`/tmp/raven-shapr-probe/launch-override.log`).
+
+- Package WinRT activation and graphics (2026-11-04): on a registry miss, Raven now reads the current package's
+  in-process activatable-class declarations, validates the relative server path, and loads the declared DLL. The x64 and
+  x86 package fixtures cover activation, an unrelated extension category and path traversal. Framework-package declarations
+  and namespace-prefixed manifest elements are not yet handled. Shapr3D now resolves its class to `Shapr.Native.dll`.
+  Configured 64-bit DXVK and vkd3d-proton DLLs are copied beside the runtime and included in release inputs; a clean guest
+  can find them without app-local copies or `RAVEN_D3D_DIRECTORY`. D3D12 device creation, clears, a drawn triangle and
+  compute pass on both GPU and software Vulkan; device creation also passes through the new runtime DLL lookup on each.
+  Shapr3D still exits while loading its native library: the trace reports missing `CoreMessaging.dll` and missing exports
+  from kernel32, ICU and ucrtbase (`/tmp/raven-shapr-probe/launch-package-dxvk.log`). No Shapr3D window has been verified.
+
+- Native-library imports (2026-11-04): added the CoreMessaging forwarder to the XAML dispatcher controller; dedicated
+  queues without explicit COM apartment setup work, while current-thread and explicit-apartment modes return `E_NOTIMPL`.
+  The forwarder carries relocations, tested with its preferred base occupied. Corrected version API-set routing and added
+  `OpenFileMappingFromApp`. The UCRT now supplies the imported next-toward, remainder, error-function, string conversion,
+  reverse and invalid-parameter handler entry points. The 64-bit UCRT fixture checks numerical results and thread-local
+  handler isolation; a 32-bit guest also checked the math and conversions. Both dispatcher fixtures and the dependency test
+  pass. The initial isolated trace (`/tmp/raven-shapr-probe/launch-erf.log`) then exposed missing ICU exports.
+
+- Further Shapr3D startup (2026-11-04): ICU plural rules and list formatting now support English (US); unsupported
+  locales return an error. Application data exposes a distinct LocalCacheFolder. `LoadPackagedLibrary` resolves libraries
+  in the current package, but does not yet handle a full package dependency graph. Thread UI language is maintained per
+  thread. Package and PackageId have distinct COM identities, and Package.InstalledLocation returns a read-only folder
+  rooted at the manifest directory. Package and storage fixtures pass on x64 and x86, including installed-folder write
+  denial. The latest isolated launch (`/tmp/raven-shapr-probe/launch-installed-location.log`) loads the native library
+  and graphics DLLs. A launch with an older runtime reported `Windows.Data.Xml.Dom.XmlDocument` as unregistered;
+  rebuilding the runtime and using the existing XML DOM component passes that point. Both XML DOM fixtures pass.
+  A Shapr3D window and its use of DirectX 12 have not yet been verified.
+
+- Guest heap comparison (2026-11-04): the configured RTL still faults in `RtlpRemoveFreeBlock` during thread
+  teardown (`/tmp/raven-shapr-probe/launch-xml-current.log`). An isolated runtime built with
+  `scripts/provision-rtl.py` passes the heap and heap-capacity fixtures and gets past that point; Shapr3D then
+  reports the unregistered `Windows.System.Profile.SystemManufacturers.SystemSupportInfo` class
+  (`/tmp/raven-shapr-probe/launch-own-rtl-trace.log`). This comparison does not establish that changing the
+  configured RTL is safe for other applications, and the experiment did not change the configured component.
+
+- Shapr3D continuation (2026-11-04): `SystemSupportInfo.LocalDeviceInfo` now answers from the guest system-information
+  registry and hostname. Missing hardware information is empty; the other SystemSupportInfo statics remain unimplemented.
+  LocalSettings can persist null values, including replacement and deletion. Thread-pool timers now schedule callbacks;
+  cancellation of already submitted callbacks is not modeled. ApplicationView supports the current-view and default-launch
+  statics, a window title, preferred minimum size, and a title-bar object. Title-bar colors are retained but not rendered
+  by native decorations; fullscreen, some resizing and alternate launch modes remain incomplete. The x64/x86 system-support,
+  local-settings and application-view fixtures pass, as does the x64 timer-queue fixture.
+
+  With the isolated in-tree RTL build (`/tmp/raven-shapr-probe/runtime-own/raven` and
+  `/tmp/raven-shapr-probe/own-rtl/raven-rtl.dll`), Shapr3D reaches application view setup and gets past its launch-mode
+  request. The latest launch (`/tmp/raven-shapr-probe/launch-view-statics3b.log`) exits with `0x8000000e`
+  (`E_ILLEGAL_METHOD_CALL`); identify the originating WinRT call next, for example by tracing
+  `RoOriginateLanguageException` with `RAVEN_TRACE_STACK=1`. Another launch returned `0x800401f8`
+  (`CO_E_DLLNOTFOUND`), so the class-loading race or missing library also needs investigation. The trace separately
+  reports missing `Windows.Storage.Streams.DataWriter` and `Windows.Services.Store.StoreContext`; the app continued past
+  those errors, but their functionality is not established. The normal configured RTL still has the earlier heap teardown
+  crash. Neither a usable Shapr3D window nor its DirectX 12 renderer has been verified.
+
+- The XML DOM (2026-11-04): `Windows.Data.Xml.Dom` is served in full for the surfaces a document consumer
+  reaches — `xml_dom.c` in the XAML component carries a UTF-16 XML parser (declaration, comments, CDATA,
+  processing instructions, DOCTYPE skipping with its close consumed, entity references, whitespace handling
+  with a leading byte-order mark stripped), the node tree with the `IXmlNode`/`IXmlNodeSelector`/
+  `IXmlNodeSerializer` triple every node serves, the kind-specific interfaces, `IXmlDocument`,
+  `IXmlDocumentIO` (`LoadXml`, `LoadXmlWithSettings`, `SaveToFileAsync` writing UTF-8), `XmlNodeList`,
+  `XmlNamedNodeMap` (its vtable declared locally because MinGW's drops the namespace form's arguments),
+  `XmlDomImplementation`, `XmlLoadSettings` with the documented defaults, the statics' file loads, and the
+  factory answering `IActivationFactory`, `IXmlDocumentStatics` and `IXmlLoadSettings` — a .NET Native
+  program takes the statics interface from `RoGetActivationFactory` the way it takes the factory, and the
+  same shape serves `IXmlLoadSettings` from its factory. The activation factories return object pointers
+  whose first word is the vtable (an early build returned the vtable itself and the guest executed it as
+  code). The XPath of the selector covers child and attribute steps, wildcards, `//` and the `[n]`/`[last()]`
+  predicates; namespace URIs are not tracked. `raven_storage_file_path` (storage.c) and `raven_package_root`
+  (package.c) support the file-backed loads. The `native_xml_dom_x64`/`_x32` fixtures parse a manifest-shaped
+  document and walk the surfaces above. Parser fixes the fixtures demanded: child elements enter `p_element`
+  past their `<` (only the root's caller skipped it before), and four growth sites used `HeapReAlloc` on a
+  null block, which refuses, so first allocations failed (`realloc` semantics do not carry to `HeapReAlloc`).
+- Activation-route repair (2026-11-04): a Shapr3D launch needs `RAVEN_PREFIX` pointing at the isolated
+  prefix — without it the runtime's default prefix lacks the package's libraries (`missing PE module:
+  sharedlibrary.dll`). The package directory carried a copy of `raven-xaml.dll` from the morning's build,
+  which shadowed the runtime's fresh one for every launch (the loader prefers the program's folder); the
+  copy is refreshed alongside the component now. The shipped `raven-shell.dll` was rebuilt from source with
+  `scripts/provision-controls.py` — the checked-in binary predated the package-manifest activation, whose
+  code an earlier `git checkout` of `winrt.c` had reverted (the package-server fallback is restored in the
+  source and the rebuilt binaries).
+- The startup surface behind the DOM (2026-11-04): the traced launch after the DOM work exposed the classes
+  the runtime and the app ask for next, served in this round: `Windows.Storage.ApplicationData`'s
+  `TemporaryFolder` (the `Temp` directory of the storage root, the LocalState pattern), `Windows.Foundation.
+  Metadata.ApiInformation` (`metadata.c` — a type is present when the activation catalog carries it, members
+  answer as their type, `UniversalApiContract` up to the mounted metadata's major), the .NET-Native-
+  synthesized attribute family `Windows.Foundation.Metadata.ApiI` (a bare attribute object; the real
+  `ApiInformation` factory is asked first, the family's prefix match would otherwise take the name), and
+  `Application.UnhandledException` (the event-list pattern Suspending and Resuming use). Every `E_NOTIMPL`
+  return across the XAML and storage components now names its function in the trace. The 38 focused
+  x64/x86 tests pass; the pre-existing `native_xaml_application_x32` failure is unchanged and reproduces
+  with the component's XML work removed.
+- Stage-7 wall (2026-11-04, evening): the traced launch with all of the above activates `XmlDocument`
+  (factory and statics), loads the app's Apple-PLIST documents, reads and writes
+  `ApplicationData.LocalSettings` containers (the `.rvs` persistence files land in
+  `LocalSettings\containers`), and reaches the .NET Native runtime's own fail-fast `0xC0000602` on a
+  worker thread (94) in teardown — `ResolveDelayLoadedAPI` from `mrt100_app.dll` followed by
+  `RaiseFailFastException` at `+454fe`. The failing late delay-load's descriptor is not decoded yet; that
+  is the next increment's starting point. No Shapr3D window has been verified.
+
+- Fiber-local callbacks at thread exit (2026-11-04, late): the fail-fast under the last bullet is the .NET
+  runtime's thread teardown — the failing worker thread ran `RoInitialize(MTA)`, `RoUninitialize`, its FLS
+  teardown, and then resolved `RaiseFailFastException` through its delay-import directory (decoding
+  `mrt100_app.dll`'s `.didat`: `api-ms-win-core-errorhandling-l1-1-3!RaiseFailFastException`,
+  `api-ms-win-core-memory-l1-1-3!SetProcessValidCallTargets`, `mrt100.dll!GetManagedRuntimeService`) and
+  called it deliberately. The missing prerequisite is FLS callback delivery: Raven's `FlsAlloc` stored the
+  guest's callbacks but nothing ever invoked them, and `mrt100_app` keeps its per-thread runtime state in
+  FLS (its `FlsSetValue` of slot 1 during thread init). `fls.h` now carries the slots (the same object the
+  `Fls*` handlers use, hung off `KernelContext`), and the thread-exit notifier runs each used slot's
+  callback with the thread's value for it before the `DLL_THREAD_DETACH` notifications, the way
+  `LdrShutdownThread` orders them; a callback's stop propagates like a TLS callback's. With delivery, the
+  fail-fast is gone and the same teardown runs five FLS callbacks and 52 module detach notifications.
+- The next wall (2026-11-04, late): the detach walk crashes in `raven-rtl.dll`'s `RtlpRemoveFreeBlock` — a
+  free-list entry reading `0xa00000410` — inside `vcruntime140.dll`'s `DLL_THREAD_DETACH`, deterministically,
+  after the FLS callbacks and the other 51 detaches ran. Without the FLS delivery the same launch returns
+  to the `0xC0000602` fail-fast (gated by `RAVEN_SKIP_FLS_DETACH=1` for the comparison), so the delivery is
+  correct and the crash is the next increment: a heap free-list corruption during the CRT teardown of a
+  worker thread, with the other worker threads still allocating beside it. No Shapr3D window has been
+  verified.
+
+- The heap teardown crash was the stale RTL, not a corruption (2026-11-05): the `RtlpRemoveFreeBlock`
+  fault decoded cleanly from the exception registers (the dump printer at `seh.cpp` emits the CONTEXT in
+  layout order; `rcx + r11*8 + 0x418` with `r11 = Size-1 = 0xffffffff` because the free block's Size read
+  zero — the ReactOS heap's `FreeHints[Size-1]` hint lookup out of bounds). The crash ran in the
+  pre-replacement ReactOS build of `raven-rtl.dll` that `components/rtl` and `build/native` still carried
+  from October 27; commit `7606d2f` had already replaced the heap with Raven's own, and the probe runtime
+  picked the new build at 08:13. `components/rtl/raven-rtl.dll` is now provisioned from the in-tree source
+  (`scripts/provision-rtl.py`) and copied into `build/native`, so the configured component matches the
+  replacement the commit made; the heap and heap-capacity fixtures pass. The old "the experiment did not
+  change the configured component" caveat is now resolved by that deployment, with the focused fixtures as
+  its evidence rather than a broader proof.
+
+- AutomationProperties (2026-11-05): the next wall after the RTL was `Windows.UI.Xaml.Automation.
+  AutomationProperties` unregistered — the XAML framework's automation path activates its statics during
+  startup, and the managed `Class not registered` went unhandled to a fail-fast. The class is now served
+  (`automation_properties.c`, catalog entry in registry.cpp): the factory answers `IActivationFactory`
+  and the nine `IAutomationPropertiesStatics` interfaces the winmd declares (generated into
+  `windows_ui_xaml_automation_properties.h` by `scripts/generate-xaml-header.py` from the pinned
+  Windows.UI.Xaml.winmd). Get/Set of the attached properties is real over an attached-property store
+  keyed by the element pointer (the same keying the peers use, entries for the process lifetime): string
+  properties answer their value or NULL, value properties answer the stored number or the documented
+  unset default (IsDataValidForForm TRUE), Set of a null string clears, and GetName serves only the
+  attached value — the peer's own precedence chain stays where it was. The DependencyProperty getters
+  and the collection-valued members (ControlledPeers, Annotations, DescribedBy, FlowsTo, FlowsFrom) are
+  not answered yet; the asking callers name themselves through `raven_trace_not_implemented`. An
+  `automation` fixture for the statics is still to be written.
+
+- The null-QueryInterface wall and agility (2026-11-05): with the class registered, the launch moved to a
+  managed NullReferenceException right after the Frame activation — a null dereference inside the
+  framework's `QueryInterface(obj, IID_IUnknown, out)` helper, raised as a real `c0000005` the runtime
+  catches and re-raises (`RAVEN_TRACE_EXCEPTIONS` shows it; a diagnostic in the exception reporter prints
+  the requested IID when `rcx` is null). The frame's QI was instrumented to name every interface it
+  refuses, which exposed the .NET interop's agility negotiation: the framework asks a fresh XAML object
+  for `IAgileObject` (94ea2b94-…), `INoMarshal` (ecc8691b-…) and `IMarshal`, and the refused
+  `IAgileObject` sent the RCW down the marshaler path that ends in the null. The frame now answers
+  `IAgileObject` — the objects run apartment-free in the engine's single process, so the marker is true —
+  and the NRE is gone. Other objects (the ApplicationView pair reported `IJupiterObject` earlier) have
+  not been through the same negotiation yet.
+
+- Trace plumbing repaired (2026-11-05): `raven_trace_not_implemented` gated itself on the guest's
+  `RAVEN_TRACE_DEBUG`, which the guest environment never carries (the trace shows the lookup failing with
+  error 203), so every E_NOTIMPL note had been silent. The helpers now print through `OutputDebugStringA`
+  ungated and the host plays the debugger under the host-side variable, the way the ApplicationView QI
+  notes always worked. `raven-shell`'s `RoGetActivationFactory` traces each activation's class, requested
+  IID and outcome (`winrt: activation …`, printed under `RAVEN_TRACE_DWRITE`); those traces are what
+  identified both walls above.
+
+- An instrumentation mistake, found and repaired (2026-11-05): a mechanical pass wrapping `return
+  E_INVALIDARG;` with trace notes rewrote whole lines, deleting the conditions of seven checks in the
+  storage component (the language-override validator among them, which made every `en-US` override write
+  fail with E_INVALIDARG and briefly pointed the diagnosis at a rejection that did not exist). The
+  conditions are restored with the notes kept behind them; the lesson recorded is that per-line
+  instrumentation must only touch lines that are exactly the return.
+
+- The current wall (2026-11-05): with the frame agile and AutomationProperties served, the launch reaches
+  the app's own C++/WinRT layer, which throws `hresult_invalid_argument` ("Value does not fall within the
+  expected range") during the early XAML style/dictionary setup — the throw site is inside
+  `shapr.native.dll` (frames through `vcruntime140_app`'s C++ exception machinery, ~14 ms into the run),
+  and per-site E_INVALIDARG notes across every raven component (storage, elements, loader, dictionary,
+  styles, controls, composition, resources, pointer, dispatcher, xml_dom) never fire, so the failing call
+  is inside the app's code or a surface outside those checks. The next increment needs deeper
+  app-side instrumentation (RAVEN_STEP on the interop call before the throw, or decoding the C++
+  exception's hresult source at `shapr.native.dll+b6b00`). No Shapr3D window has been verified.
+
+- Inside the app's own settings handling (2026-11-05, later): Raven's step machinery (`RAVEN_STEP=API:
+  occurrence:count`) walked the instructions from the last host call before the `hresult_invalid_argument`
+  and pinned the failing round to the settings key `com.shapr3d.shapr.userDefaults.remoteConfiguration.
+  expirationTimes`: the app's userDefaults wrapper reads that value through the container (the decode
+  returns the JSON string), queries `IReference` on the boxed value, releases both — and then throws
+  `hresult_invalid_argument` ("Value does not fall within the expected range") from inside
+  `shapr.native.dll`. The persisted `.rvs` record for the key was decoded offline and is correct (type 12
+  string, 8012 bytes, the 4006-character JSON balanced and complete), the E_INVALIDARG notes across every
+  raven component never fire, and the originate carries no error info — the throw is the app's own code,
+  most plausibly its parse or validation of the value (or a nested call into a class that is not
+  registered — the trace separately shows the app handling "Class not registered" on the same thread
+  before the fail-fast). No raven-side surface for this failure is identified yet; the next lever is
+  watching what the app does with the decoded string (its JSON parse loop) or serving the classes its
+  remote-configuration path activates. The trace runs: /tmp/raven-shapr-probe/step-invalidarg{2,3,4}.log,
+  launch-nre{12..19}.log.
+
+- DataWriter (2026-11-05, evening): the remote-configuration handler's HTTP setup activates
+  `Windows.Storage.Streams.DataWriter` — the only class miss in the app's active path — and the class is
+  now served (`data_writer.c`, catalog entry): the factory answers `IActivationFactory` and
+  `IDataWriterFactory` (CreateDataWriter over an IOutputStream), the writer's Write* methods really
+  append honoring ByteOrder (big-endian values byte-reversed) and UnicodeEncoding (UTF-8 with surrogate
+  pairs, UTF-16LE/BE), MeasureString answers the encoded size, DetachBuffer hands the accumulated bytes
+  out as an IBuffer with IBufferByteAccess and empties the writer, StoreAsync and FlushAsync complete at
+  once (a given stream is written through IOutputStream::WriteAsync; without one the memory store is its
+  own store), and the buffer's Length/Capacity/put_Length are real. The interface declarations are
+  MinGW's windows.storage.streams.h — whose slot orders and identifiers match the pinned winmd, though
+  its StoreAsync/FlushAsync/DetachStream signatures spell older types, so the three slots forward through
+  wrappers that carry the real ABI. The class is not the cause of the remaining wall: with it served the
+  handler still throws `hresult_invalid_argument` before any DataWriter call, on a settings round where
+  a 48-character string value is set into a child container whose previous record (the 98-character
+  JSON) decodes cleanly.
+
+- The writer's first growth hit the null-HeapReAlloc refusal again (2026-11-05): `writer_grow` called
+  `HeapReAlloc` on a null block and the program's C++/WinRT layer surfaced the E_OUTOFMEMORY as
+  std::bad_alloc (the app fail-fasts on it). Windows' HeapReAlloc refuses a null block the way the XML
+  DOM's four growth sites already learned; the writer allocates for its first growth. A refusal diagnostic
+  (size, pending, extra) stays behind the failure path.
+
+- The launcher traces (launch-dw1/2/3, step-dw1/2) show the app's sequence around the remaining wall:
+  the app's `Shapr.CommonApp.MTRemoteConfigurationHandler` (its own class, served from Shapr.Native.dll
+  through the package-manifest route) reads the container, sets a 48-character string value (the round's
+  PropertyValue CreateString precedes the child-container open), the previous record's JSON decodes, and
+  the wrapper throws — with no error info on the originate, an explicit throw in the app's code. The
+  48-character value is not printable ASCII; identifying it (and what the wrapper validates) needs the
+  app's own symbols or a working-Windows comparison of that settings round.
+
+- The DataWriter wall moved (2026-11-06): with DataWriter served and its access bug fixed, the
+  `hresult_invalid_argument` round is gone and the launch fails differently — the .NET framework's own
+  dead-reference marker (`0xBAADF00D`, stored by SharedLibrary at an object's +0x10 slot) is later
+  dereferenced as a pointer (`c0000005 reading ffffffffbaadf01d` from the interop at
+  `sharedlibrary.dll+82844e` under the app's startup continuation frames `shapr3d.dll+686b0/68928`), and
+  the runtime fail-fasts with `E_FAIL`. A dead RCW means a backing object's lifetime ended early — an
+  unbalanced Release on some cached raven object (the Application/Window/Frame family the startup
+  continuations hold) is the likely shape; identifying which object needs the RCW's identity at the
+  marker write (the store site is SharedLibrary's `mov qword [rdi+0x10], 0xBAADF00D`, reachable by
+  stepping from the last WinRT call before the fail-fast).
+
+- DataWriter (2026-11-05/06): the class the remote-configuration HTTP path activates is served
+  (`data_writer.c`, catalog entry, `native_data_writer_x64/_x32` fixtures). The factory answers
+  `IActivationFactory` and `IDataWriterFactory`; the writer's Write* methods append honoring ByteOrder
+  (big-endian byte-reversed) and UnicodeEncoding (UTF-8 with surrogate pairs, UTF-16LE/BE),
+  MeasureString answers the encoded size, DetachBuffer hands the bytes out as an IBuffer with
+  IBufferByteAccess and empties the writer, StoreAsync/FlushAsync complete at once (a stream is written
+  through IOutputStream::WriteAsync; the memory store is its own store). The declarations are MinGW's
+  windows.storage.streams.h — slot orders match the pinned winmd, and the three slots MinGW spells with
+  older types (StoreAsync, FlushAsync, DetachStream) forward through wrappers carrying the real ABI.
+
+- Two component bugs the fixture demanded (2026-11-06): `buffer_access_data` cast the IBufferByteAccess
+  part pointer to the owner without the offsetof adjustment, so Buffer() answered the bytes at
+  capacity/length instead of the payload (the fixture read `0x700000007` — the two length dwords — where
+  the heap pointer should have been); and the writer's first growth used HeapReAlloc on a null block,
+  the Windows refusal the XML DOM growth sites already learned, which the app surfaced as std::bad_alloc.
+  A component can arm a hardware write watch through a temporary host hook (`OutputDebugStringA` with a
+  "raven-watch <hex>" line) — the watch did not fire in this mode and the struct-byte dump identified the
+  accessor bug instead.
+
+- The baadf00d wall decoded as a double teardown, not a dead RCW (2026-11-06): the faulting code is
+  SharedLibrary's wrapper destructor (`+8283e0`) — it walks a node list at object+0x10 releasing each
+  node, then marks the list head dead with `movq $0xbaadf00d,0x10(%rdi)`; the fault is a SECOND pass
+  dereferencing the marker. Both passes entered through the same `mrt100+44590 → sharedlibrary+828c56 →
+  Release(+828350)` chain, so the wrapper's refcount reached zero twice — an over-release. Catching the
+  first teardown needed the step machinery anchored on the frame's CreateInstance note
+  (`RAVEN_STEP='OutputDebugStringA:N:count'`, the notes being the only per-run-stable landmarks).
+
+- The over-release was the frame's agility answer (2026-11-06): `frame_query_any` served IID_IAgileObject
+  with `&self->first` — a delegating part whose Release lands on the outer when the frame is aggregated —
+  while AddRef'ing the frame itself. Every agility negotiation consumed one outer reference the outer
+  never gained, and the wrapper machinery tore its wrapper down twice. The fix answers with the
+  non-delegating inner part when an outer is present, so the handed pointer releases against whatever was
+  AddRef'd. With the fix the double teardown is gone and the launch's exit moved from E_FAIL (5) to a
+  managed null reference (E_POINTER, 3).
+
+- IReferenceTracker (2026-11-06): the .NET runtime's lifetime-coordination face most XAML framework
+  objects carry ("implemented by most XAML framework objects" per the SDK docs; IID 11D3B13A-180E) — the
+  traced run asks it of the Frame exactly once, and it was the only QI refusal in the whole run. Served
+  now (`reference_tracker.c`, a shared part any owner can embed following the weak-source shape, with
+  real per-owner counters for the connect/disconnect/peg notifications), plus the one process-wide
+  IReferenceTrackerManager the runtime drives its collection rounds against. FindTrackerTargets reports
+  no targets: the components hold only strong native references, so reporting none can only delay a
+  collection, never collect a live object. Fixture `native_reference_tracker_x64/_x32`.
+
+- IDependencyObject (2026-11-06): the base XAML property face (IID 5C526665-F60E) the interop asks for
+  right after activating the Frame; its refusal made the app die on a null reference right after naming
+  the frame RootFrame. The frame answers it (`frame_dependency_part`), with the dependency-value methods
+  traced E_NOTIMPL and get_Dispatcher the view's own. The interface is hand-declared in xaml_controls.c
+  (the IControlTemplate precedent) because the component's hand headers predate it — the elements will
+  share the declaration when the trace brings them here.
+
+- The null-HeapReAlloc bug class, third occurrence (2026-11-06): the app sets
+  `AutomationProperties.SetAutomationId(RootFrame, "RootFrame")` and the setter returned E_POINTER —
+  the AutomationProperties attached-store's first growth called HeapReAlloc on the NULL vector, the
+  Windows refusal the XML DOM growth sites and the DataWriter learned before. `attached_find` now
+  HeapAllocs its first allocation; SetAutomationId succeeds and the launch moved again.
+
+- The unset-attached-getter default (2026-11-06): reading an unset attached property answers its
+  documented default (Level 0, IsPeripheral false, LabeledBy null), not E_POINTER — `number_get` writes
+  the 0 default for an absent slot. Fixture `native_automation_properties_x64/_x32` covers the defaults,
+  twenty sets through the store's growth, and a second element's isolation. AutomationProperties'
+  factory also answers IID_IActivationFactory now (the app had only asked for the statics directly, so
+  the gap was invisible to the launch).
+
+- Inside the marshalling wall (2026-11-06, later): the 80131500 "EETypeRva:0x0001B1C0 is missing interop
+  type marshalling data" failure is the .NET interop's marshalling-data lookup for the app's own type,
+  during the setup of the call that follows SetAutomationId — no raven API is on the failing path. The
+  register-aware step machinery (RAVEN_STEP_REGS printing the register state, @ with the absolute rip,
+  and RAVEN_STEP_DUMP=module+offset dumping the descriptor at Rcx) decoded the failing lookup: the
+  call-site descriptor carries module = Shapr3D.dll (0x180010000 in the traced run), its interop-data
+  table slot is NULL, and the fallback reads the baked RVA 0x1B1C0 and throws. Per the public CoreRT
+  sources, that data lives in per-module blobs registered through RhpRegisterModule and found by hashing
+  type handles across every loaded module's blob (RhFindBlob); the null slot says the app module's
+  registered interop block is missing or its blob never resolved. All three .NET Native modules carry an
+  empty PE CLR-header directory (their normal shape — the module header is a plain structure passed to
+  RhpRegisterModule), so the anomaly is not there. Next: decode the module header RhpRegisterModule
+  receives (trap the export or dump its argument), or compare a working-Windows run of the same lookup.
+  Further decode: the descriptor's pointer fields carry no strings (it is a signature descriptor — a
+  SharedLibrary code pointer, an app data pointer and a 0x3a7e hash), the failing call is set up entirely
+  inside SharedLibrary's argument-marshalling driver (no app stub on the failing path), and the context's
+  table slot is a stack-local the machinery never filled — so the real failure is the fallback blob lookup
+  itself. The run's early 80040154 throws are C++/WinRT class-not-registered raises during
+  PropertyValue-related initialization (background threads, caught, the run continues past them); whether
+  they leave the runtime's module bookkeeping damaged is one candidate the next increment should test
+  before decoding the module header. The module bases are stable across runs (Shapr3D.dll 0x180010000,
+  SharedLibrary.dll 0x182df0000), so the failing context is app-owned (its call-site pointer sits in the
+  app's text) while offset 0x1B1C0 reads as a plausible EEType only in SharedLibrary — the missing
+  marshalling data is likely for a framework type, consulted through the app call site's context. The
+  failing helper is AOT-compiled managed code (the null "table" is a managed array — length at +8, data
+  at +0x10 — never built), whose fallback scans every loaded module's marshalling blob; those blobs are
+  found by mrt100_app!RhFindBlob (+0x46b60), which walks the runtime's registered modules and reads each
+  module's section directory at [module+0x60]. The registration chain is decoded: the app calls
+  RhpRegisterModule(header) once (its IAT entry is a by-name import at slot 0x1370948, called from
+  RVA 0x181d82f) with the header at **RVA 0x1000** (.rdata's first bytes: dwords 3, 0xc, 0x1ac8c,
+  0x0117f2dc, ... — a table of small RVAs/counts, not CoreRT's 'RTR' ReadyToRun header; this is .NET
+  Native 2.x's own layout). mrt100_app's chain: RhpRegisterModule (+0x45450) → ModuleManager::RegisterModule
+  (+0x4db94, a linked-list insert) → Module::Create (+0x50214, a 0xb8-byte object storing the header at
+  +0x18; the constructor reads header fields at +0x2c (a dword RVA) and +0xc0 (the module base pointer)).
+  The next increment decodes which header field becomes the Module's [0x60] section directory (the
+  +0x28 sub-object constructors at +0x55e6c are string-table readers so far) and statically verifies the
+  app's header carries the blob section the interop lookup needs — separating "the header lacks it" from
+  "raven's loader breaks the walk". Then a reframe: the failing helper's fallback throws WITHOUT calling
+  RhFindBlob — it reads the type's RVA straight from a baked descriptor in the app's own .rdata (the
+  descriptor's first pointer, app+0x9b7ff8) — so this call site was COMPILED as a direct throw stub: the
+  .NET Native toolchain knew at build time that this signature's marshalling data is absent and emitted a
+  throw. Both module headers (app and SharedLibrary, both at RVA 0x1000, same layout: version dword 3,
+  section sizes at +0x90 matching each module's sections, and RVA|0x80000000 section descriptors at
+  +0xb0..) are structurally identical, so nothing is wrong with the app's header. On Windows this call
+  site is dead code — the app's managed logic never reaches it — which moves the hunt EARLIER: some
+  raven-served result before OnLaunched's frame setup diverges from Windows and steers the app's branch
+  onto the path with the throw stub. Identifying the divergence means diffing the app's decision points
+  (the settings rounds, the early 80040154 class-not-registered throws, Window.Current and license state)
+  against what Windows would answer. Then two corrections from a register-aware rerun: the accumulated
+  settings state is NOT the divergence (a fresh-state launch fails identically, the state restored
+  after), and the failing round DOES call RhFindBlob — early in its setup (mrt100_app+46b60 with the app
+  module and blob type 1), its result feeding a ~4000-step SharedLibrary processing chain before the
+  throw — so the blob lookup's outcome and that chain remain undecoded. The failing call's signature
+  descriptor carries a hash (0x3a7e): if the earlier divergence changed WHICH type the app passes to the
+  interop (a different event handler or struct than Windows' path uses), the signature itself differs and
+  its marshalling data is genuinely absent — making the divergence hunt, not blob mechanics, the right
+  front. Two decisive steps followed. First, a static scan of the app image for a delegate- or
+  struct-marshalling entry keyed by the failing type's EEType pointer finds NONE — the data is genuinely
+  absent from the binary, so the same call would fail on Windows if reached. Second, an env-gated
+  diagnostic (RAVEN_TOLERATE_FAILFAST: RaiseFailFastException returns instead of ending the process) shows
+  the program SURVIVES the wall — it runs past OnLaunched's abort and settles into the dispatcher loop
+  (PeekMessageW/MsgWaitForMultipleObjectsEx from the dispatcher) for the rest of the 120-second run, but
+  no window is created because OnLaunched was aborted before the view setup. The way to a real fix is
+  naming the failing type: the app embeds two NativeFormat metadata blobs (signature 0xDEADDFFD at file
+  offsets 0xa38344 and 0xc1fb61), and a parser for that format (CoreRT's generated reader documents it)
+  resolving EETypeRva 0x1b1c0 to a type name would say what the app was subscribing or calling when the
+  divergence steered it onto the uncompiled path. The apartments are ruled out (the app's own code calls
+  RoInitialize(1) — MTA — on the main thread, the same code Windows runs); the activation landscape is
+  clean (no failed factory asks, no unimplemented-surface notes in the final run). The tolerated run also
+  shows the window pipeline starts EARLY: raven creates its CoreWindow host (CreateWindowExW
+  "Raven.Xaml.CoreWindow" in the first dozens of APIs), the app resolves the EGL entry points
+  (EGL_CreateContext/CreateWindowSurface/SwapBuffers through libegl.dll) and activates
+  Windows.UI.Core.CoreWindow — all before the marshalling wall — and the rendering would come after the
+  view setup the aborted OnLaunched skipped. The blob type passed to RhFindBlob in the failing round is 1
+  = the TypeMap (reflection), not the delegate/struct stub maps (16/17), so the delegate lookup rides the
+  per-module thunks instead; scans of all three modules for a marshalling entry keyed by the failing
+  type's EEType (pointer- and RVA-keyed) find nothing in any of them. Neither is the failing RVA a plain
+  module-relative EEType: the cells at offset 0x1b1c0 in both the app (a .text pointer, zeroed flags) and
+  SharedLibrary (pairs of values with a 0x180 stride) are not EETypes, and TypeManager-relative candidates
+  (the header's +0x2c field plus its self-pointer) land on unrelated data — so the message's RVA uses a
+  base this increment has not identified, and naming the type needs the NativeFormat metadata decode (the
+  two 0xDEADDFFD blobs) or a working-Windows comparison of the same startup. Further narrowing: the
+  frame's interface ledger shows the app never asked the frame for IFrame2 (the interface carrying
+  add_NavigationFailed), so the failing call is NOT the frame event subscription; the round also consults
+  RhFindBlob with blob type 1 = the TypeMap (the reflection type map) rather than the delegate/struct stub
+  maps, and it processes a managed object in the runtime's 0x200000000 arena — the marshal driver's
+  working set — which cannot be named from outside. The app's whole native stack comes up before the wall
+  (window host, libegl/libGLESv2 initialized, CoreWindow activated); the remaining identification routes
+  are a full NativeFormat metadata + type-manager decode or a working-Windows capture of the same startup
+  to diff the branch. The two 0xDEADDFFD blobs proved to be metadata islands rather than a directly
+  parseable NativeFormat stream (the second carries the app's real assembly/type strings —
+  "$Shapr3D.McgInterop", the CommunityToolkit and Sentry references), the lone BSJB hit in the image is a
+  false positive inside code, and the host window is never SHOWN (no ShowWindow call in the tolerated
+  run): the show rides the view pipeline that the aborted OnLaunched gates. The practical state is
+  therefore: with RAVEN_TOLERATE_FAILFAST the process is alive indefinitely with its full native stack up
+  (window host created, EGL/GLES initialized, CoreWindow activated, dispatcher pumping), and the single
+  remaining blocker is the one interop marshalling round whose compiled data does not exist in any module.
+  The failing type is now mechanically identified: a scan for EEType-shaped cells finds the app's 8409
+  EETypes in .rdata, and the message's EETypeRva is relative to the module header (RVA 0x1000) — the
+  failing EEType sits at RVA 0x1c1c0 with flags 0x410c0000 = a type created DYNAMICALLY at runtime
+  (IsDynamicTypeFlag) with a dispatch map and GC pointers. A runtime-created generic instantiation has no
+  compiled marshalling data by construction; the runtime should specialize it from the generic
+  definition's data and that lookup failed too. The UniversalApiContract answer (lowered 25 → 15, the
+  mounted 26100 metadata's real version) did not change the wall, the newly served IReferenceTracker is
+  exonerated (refusing the ask leaves the wall identical; the tracker branch is restored), and the
+  Application event subscriptions (Suspending/Resuming/UnhandledException) all REACH raven before the
+  wall — so the delegate stubs for those exist and the failing round is later in OnLaunched, plausibly
+  the Navigate(System.Type) round whose type-name marshalling rides the very TypeMap the failing round
+  consults. The divergence that makes the app reach this round on raven and not on Windows remains the
+  unknown; naming the dynamic type's generic definition (the metadata decode) or a working-Windows
+  capture are the two remaining identification routes. The round's managed call chain is now captured
+  (RAVEN_DUMP_FAILFAST_STACK dumps the fail-fast thread's stack page by page, its values resolved to
+  modules offline): OnLaunched's managed code (frames shapr3d+0x1a33c2f/0x2b1f8e1/0x2b20f6a) enters a
+  LAZY-INITIALIZED cached-WinRT-object getter (shapr3d+0x2b20fe0: a state flag at [ctx], a cached value
+  at [ctx+0x30], the slow path building the object through interop wrappers shapr3d+0x182b1f7d0 and
+  0x182b1f8f0), and the failing marshalling round happens inside that lazy init. SharedLibrary's
+  marshaller matcher (sl+0x82d6e0) walks a STATIC compiled list (its getter sl+0x82d870) of registered
+  interface marshallers, matching by signature — the runtime-created interface is not in the list, the
+  app's blob cannot hold it (created at runtime), and the MissingInteropData throw follows. On Windows
+  the same getter would fail identically IF reached — so the divergence is that raven's run reaches this
+  getter's slow path (its cached object was initialized earlier on Windows, or an earlier branch
+  differs). Also learned: the app's state written during the tolerated 120-second runs (telemetry.db,
+  containers) poisons the NEXT startup — shapr.native's background init then fail-fasts early with
+  E_INVALIDARG ("Value does not fall within the expected range") — so every tolerated run must be
+  followed by a state reset (LocalState/LocalSettings moved aside and restored).
+  The blob machinery decoded further: mrt100_app's module objects are tables of function pointers whose
+  [+0x60] is the shared blob-finder (mrt100_app+0x50e20, returning [module+0x68]), and the blob region
+  comes from the module header itself — offset header[0x44] (0x8306c8), size header[0x48] (0x94ec13),
+  anchored at the header's self-pointer header[0xc0] — verified present in the app image. The region
+  holds PACKED data (zero absolute pointers), so blob entries encode RVAs/offsets, not relocated
+  pointers. Candidate packed pairs matching the failing type's RVA were found ({0x1b1c0, 0x5d0b0} and
+  {0x1b1c0, 0x241230}), but the 2.x blob-id semantics are unverified (the ReflectionMapBlob enum fetched
+  from current dotnet/runtime may not match the 2.x module format), so whether the TypeMap entry exists
+  is UNCERTAIN. The relocation-delta hypothesis is DEAD: Shapr3D.exe (the 24KB .NET Native launcher) has
+  no relocation table and always occupies 0x180000000, so Shapr3D.dll's relocation delta exists on
+  Windows too (the experiment to bind the exe elsewhere failed — "PE image has no relocation table for
+  the requested base" — and was reverted). The managed exception object's dump (added to
+  RoOriginateLanguageException's handler) shows a small SharedLibrary MethodTable (sl+0x55fbe8 = the
+  MissingInteropDataException class) with no captured stack trace.
+  The 2.x blob-id table is now DECODED: the module's blob region (header[0x44]/[0x48]) is a sequence of
+  tagged blobs {uint32 reserved; uint32 id; uint32 size; data}, walked by RhFindBlob's found-path
+  (comparing entry+4 to the requested id, advancing by size+12). The app's region holds 27 blobs whose
+  ids match the modern ReflectionMapBlob names: 1=TypeMap (107292 bytes), 2=ArrayMap, 9=FieldAccessMap,
+  7=VirtualInvokeMap, 6=InvokeMap, 21/22=TypeTemplate/GenericMethodsTemplate, 13=EmbeddedMetadata (the
+  0xDEADDFFD blob, 3455251 bytes), 26=StackTraceEmbeddedMetadata, 8=CommonFixupsTable, and newer ids
+  30-36 — but **no 16=StructMarshallingStubMap and no 17=DelegateMarshallingStubMap**. The failing type
+  has no entry in the TypeMap (its head is an ascending 16-bit bucket-offset table; no encoding of
+  EETypeRva 0x1b1c0 appears), and the marshalling stub maps the runtime's fallback needs for a
+  runtime-created type are absent from the app entirely — the compiled call sites carry their stubs
+  directly (the MCG pattern), so the blob maps were never generated. A runtime-created generic
+  instantiation therefore has no marshalling data anywhere, and the MissingInteropData throw is
+  deterministic IF the round is reached. The complete story: OnLaunched's RootFrame lazy getter makes an
+  interop call with a runtime-created interface instantiation; the fallback lookup fails exactly as it
+  would on Windows; the divergence is that raven's run REACHES this call — the upstream branch in
+  OnLaunched's managed decisions remains the one unknown, and identifying it needs a working-Windows
+  capture of the same startup (no binary-only route remains).
+  A correction to the failing type's kind: the modern nativeaot flag decode of 0x410c0000 reads
+  ElementTypeMask (0x7C000000, shift 26) = **ValueType** (0x10), with HasPointersFlag, HasDispatchMap and
+  IsDynamicTypeFlag set — the failing type is a RUNTIME-CREATED GENERIC STRUCT with GC pointers (the
+  KeyValuePair/Linq-Grouping shape), not an interface. That matches the missing blob exactly: the app has
+  no StructMarshallingStubMap (16), so a dynamically created struct instantiation has no marshalling data
+  anywhere, and the MCG-compiled call sites carry their struct stubs directly — the fallback lookup fails
+  deterministically. A runtime-created generic struct at startup points at reflection-driven generic code
+  in the getter's path (Dictionary/Linq enumeration shapes — KeyValuePair, Grouping`2 — whose type
+  arguments depend on earlier app state), which is where the Windows-vs-raven branch divergence lives.
+  The failing round is now pinned to an exact position in the non-tolerated launch: the app's style and
+  dictionary setup runs (ContentPresenter/Setter/DependencyProperty/PropertyMetadata activations), the
+  attached-property registration DependencyProperty.Register("KeepFocusOnNavigate", …) REACHES raven and
+  succeeds (the name created at raven-xaml+3c56e, no xaml_styles.c:688 note — that note only appears in
+  the tolerated run where the zeroed marshalling product corrupts a later Register), the AutomationProperties
+  statics activate (IID b618fd7b-32d0-4970-9c42-7c039ac7be78), AutomationProperties.SetAutomationId(frame,
+  "RootFrame") SUCCEEDS (the raven-autoprops note answers 0), and the VERY NEXT managed interop call — with
+  no raven-visible API between — needs the marshalling for the runtime-created generic struct
+  (EETypeRva 0x1b1c0) and throws. The subagent's RAVEN_TOLERATE_MISSING_INTEROP diagnostic (patching the
+  shared marshalling-failure helper sl+0x8621c0 and the factory sl+0x847fd0 to return null) moves execution
+  past the round but the zeroed struct corrupts the next consumer (a Register with a null-Name TypeName →
+  xaml_styles.c:688 E_INVALIDARG → InvalidCastException 80131534), so it is diagnostic only, not a fix.
+  Also noted: the launch requires RAVEN_PREFIX=<repo>/components/shapr3d/prefix (without it the default
+  prefix lacks SharedLibrary.dll and the process dies at load).
+  No Shapr3D window has been verified.
+- Interop-wall anatomy and the stand-in-marshalling experiment (2026-11-06): three decisive
+  decodings, then an env-gated diagnostic that moves the wall but cannot carry OnLaunched to
+  completion. First, hypothesis A is answered: SharedLibrary.dll's blob region (header+0x44/0x48,
+  the same 2.x layout) holds the SAME 27 tagged blob ids as the app — 1,2,9,7,6,23,21,22,14,15,10,5,
+  19,18,8,26,27,13,24,25,30,32,34,35,31,33,36 — and NO 16=StructMarshallingStubMap and NO
+  17=DelegateMarshallingStubMap. The framework module carries no marshalling stub maps either, so
+  searching "the other module" was never a route: MCG-compiled marshalling is inline in code in both
+  modules, and the runtime fallback for the failing type has nothing to find anywhere. Second, a
+  launch-note correction: the launch requires RAVEN_PREFIX=<repo>/components/shapr3d/prefix (the doc's
+  earlier command lines ran with it exported); without it raven resolves the prefix to
+  ~/.local/share/raven/default, whose system32 has no SharedLibrary.dll, and the process dies at load
+  with "missing PE module: sharedlibrary.dll" — an apparent regression that is only a missing
+  environment variable. Third, the failing round is now decoded operationally end to end with two new
+  raven diagnostics (both temporary, both env-gated): RAVEN_DUMP_CELLS=<api>/
+  RAVEN_DUMP_CELLS_LIST="module:off,..." dumps resolved .NET Native indirect cells at a chosen API
+  (the cells carry only fixup indices in the file and name their targets only at runtime), and it
+  shows the app's interop cells resolve into SharedLibrary helpers — the failing frame shapr3d+0x2b1f8e1
+  (the last call of wrapper 0x182b1f7d0) goes through cell shapr3d+0x136a568 to sl+0x8980a0, a
+  SharedLibrary static-singleton getter (RhpCheckCctor2/RhpNewFast/flags 0x2000400 at +0x30), while the
+  wrapper itself is the ExecutionContext/SynchronizationContext save-run-restore pattern around
+  sl+0x7d7e30 (thread-static CurrentThread) — the MCG shape for marshalled calls with context capture.
+  Single-stepping (RAVEN_STEP='CoGetApartmentType:788:N' — the round calls CoGetApartmentType as its
+  last raven-visible act) shows the round: apartment query, a consult of shapr.native.dll, then the
+  SharedLibrary interface-marshaller searches (the sl+0x864012 loop over the static list, entry matcher
+  sl+0x82d8d0, equivalence test RhTypeCast_AreTypesEquivalent via cell sl:55c160), interop calls into
+  raven's frame surfaces (IDependencyObject/IFrame5/IReferenceTracker queries all served, CoreDispatcher
+  and Windows.Foundation.Metadata.Api* attribute objects among them), and finally the shared
+  marshalling-failure helper sl+0x8621c0 building the "EETypeRva:0x0001B1C0 is missing interop type
+  marshalling data" exception (message formatted at sl+0x8480b0/0x848190, thrown by the caller) —
+  RoOriginateLanguageException(80131500) then RaiseFailFastException from sl+0x7e38de. The helper
+  sl+0x8621c0 has 11 call sites across SharedLibrary, all marshalling failures, and a second factory
+  sl+0x847fd0 builds the same exception for the compiled marshallers; both are only reached on failure.
+  The diagnostic (RAVEN_TOLERATE_MISSING_INTEROP, in native/nt/providers.cpp at API dispatch, clearly
+  marked temporary) patches both to "xor eax,eax; ret" in guest memory (protect_image RWX, write,
+  restore RX, with expected-byte checks). With it the 80131500 wall is GONE: the app's OnLaunched round
+  runs past the marshalling failure and reaches materially further — in the traced run it got to
+  materializing the string literal "KeepFocusOnNavigate" and into raven's DependencyProperty.Register
+  handler, which refused E_INVALIDARG at xaml_styles.c:688 (a TypeName argument with a null Name), and
+  the app then fail-fasted with 80131534 (InvalidCastException). That is the honest mechanism of the
+  stand-in: the failed marshalling had a STRUCT VALUE as its product, and returning null leaves the
+  struct zeroed — the next call receives a corrupted argument (TypeName{Name:null}) — so the window
+  pipeline (ShowWindow/Navigate/present) still never starts and OnLaunched still aborts, just one wall
+  later and with a different exception. No raven-served surface was found returning wrong data that
+  steers the app onto the failing path (the frame queries, IFrame5, dispatcher and metadata-attribute
+  rounds in the round all return success before the failure); the divergence — why raven's run reaches
+  this marshalling round at all, plausibly the DependencyProperty.Register("KeepFocusOnNavigate",…)
+  path whose PropertyMetadata/struct argument needed the runtime-created generic instantiation —
+  remains unidentified, and with a working-Windows capture still the only remaining identification
+  route. The fixture set passes (16/16); the app state directories were moved to /tmp/shapr_state_backup
+  before the experiments and the runs' rewritten LocalState/LocalSettings were deleted after each run;
+  no Shapr3D window has been verified.

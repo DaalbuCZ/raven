@@ -27,6 +27,32 @@ static void CALLBACK changed(void *parameter, BOOLEAN fired)
  * keeps running until it is deleted and not after, a far timer brought forward runs, a timer runs for a thread that only polls, and
  * deleting a queue sets the event it names. */
 static volatile LONG pool_runs;
+static volatile LONG pool_timer_runs, pool_timer_bad;
+static HANDLE pool_timer_event;
+
+static void CALLBACK pool_timer(PTP_CALLBACK_INSTANCE instance, void *parameter, PTP_TIMER timer)
+{
+	if (!instance || parameter != pool_timer_event || !timer) InterlockedIncrement(&pool_timer_bad);
+	if (InterlockedIncrement(&pool_timer_runs) >= 2) SetEvent(pool_timer_event);
+}
+
+static int pool_timer_test(void)
+{
+	pool_timer_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+	PTP_TIMER timer = CreateThreadpoolTimer(pool_timer, pool_timer_event, NULL);
+	if (!pool_timer_event || !timer || IsThreadpoolTimerSet(timer)) return 30;
+	LARGE_INTEGER due; due.QuadPart = -100000;
+	SetThreadpoolTimer(timer, (FILETIME *)&due, 10, 0);
+	if (!IsThreadpoolTimerSet(timer) || WaitForSingleObject(pool_timer_event, 5000) != WAIT_OBJECT_0) return 31;
+	SetThreadpoolTimer(timer, NULL, 0, 0);
+	WaitForThreadpoolTimerCallbacks(timer, TRUE);
+	LONG stopped = pool_timer_runs;
+	Sleep(50);
+	if (pool_timer_bad || pool_timer_runs != stopped || IsThreadpoolTimerSet(timer)) return 32;
+	CloseThreadpoolTimer(timer);
+	CloseHandle(pool_timer_event);
+	return 0;
+}
 
 static void CALLBACK pool_work(PTP_CALLBACK_INSTANCE instance, void *parameter, PTP_WORK work)
 {
@@ -89,5 +115,6 @@ int raven_entry(void)
 	if (changed_count != 2) return 15;
 	HANDLE deleted = CreateEventW(NULL, TRUE, FALSE, NULL);
 	if (!DeleteTimerQueueEx(queue, deleted) || WaitForSingleObject(deleted, 5000) != WAIT_OBJECT_0) return 12;
-	return private_pool();
+	int result = private_pool();
+	return result ? result : pool_timer_test();
 }

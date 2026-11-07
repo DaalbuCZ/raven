@@ -15,8 +15,7 @@
  * and hands out immutable IDependencyProperty objects (the real single-member interface plus the engine-internal
  * raven_dependency_property_interop metadata readers), and ISetter.put_Property takes one — the DP's registered name
  * becomes the stored (property-name string, value IInspectable) pair, so a DP setter applies through the same pair store
- * the name-string setters use. RegisterAttached, GetMetadata and the attached-property stage stay unimplemented and
- * answer E_NOTIMPL at their exact signatures; the class is statics-only and its factory's ActivateInstance faults. The
+ * the name-string setters use. RegisterAttached records the same metadata; GetMetadata and attached-value storage remain unimplemented; the class is statics-only and its factory's ActivateInstance faults. The
  * Value property is real: put_Value takes the value as an IInspectable and get_Value hands it back, so a Setter created
  * through the factory already round-trips its value.
  *
@@ -115,9 +114,9 @@ static void store_name(HSTRING *slot, const WCHAR *text, UINT32 length)
 }
 
 #define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) \
-	{ (void)This; if (a1) *(void **)(uintptr_t)a1 = NULL; return E_NOTIMPL; }
+	{ (void)This; if (a1) *(void **)(uintptr_t)a1 = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB1_SET(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) \
-	{ (void)This; (void)a1; return E_NOTIMPL; }
+	{ (void)This; (void)a1; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 /* The DependencyProperty.
  *
@@ -137,8 +136,7 @@ static void store_name(HSTRING *slot, const WCHAR *text, UINT32 length)
  * same (name, value) pair store the name-string setters use.
  *
  * What still does not: GetMetadata answers E_NOTIMPL at its exact signature — per-object metadata means an IPropertyMetadata
- * the engine has no property system to attach to; RegisterAttached answers E_NOTIMPL — there is no attached-property store
- * to register into; a DP's owner is recorded but NOT checked at application (the name drives the setter, TargetType
+ * the engine has no property system to attach to; attached values still have no DependencyObject storage; a DP's owner is recorded but NOT checked at application (the name drives the setter, TargetType
  * checking stays unimplemented), so a Button-owned DP set on a text block applies to the name the same way. */
 
 static const WCHAR dependency_property_class[] = L"Windows.UI.Xaml.DependencyProperty";
@@ -257,7 +255,7 @@ static HRESULT WINAPI dp_get_metadata(__x_ABI_CWindows_CUI_CXaml_CIDependencyPro
 	(void)type;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyVtbl dp_property_table = {
@@ -581,18 +579,18 @@ static HRESULT metadata_create(IInspectable *default_value,
 	/* The composable base form needs COM aggregation the component does not implement; refusing it is honest, while
 	 * ignoring the argument would silently drop the caller's base object. */
 	if (base_interface)
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	if (default_factory) {
 		if (default_factory->lpVtbl->QueryInterface(default_factory,
 			&IID___x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback, (void **)&factory) != S_OK || !factory)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:586\n"); return E_INVALIDARG; }
 	}
 	if (changed_callback) {
 		if (changed_callback->lpVtbl->QueryInterface(changed_callback,
 			&IID___x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback, (void **)&changed) != S_OK || !changed) {
 			if (factory)
 				factory->lpVtbl->Release(factory);
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:593\n"); return E_INVALIDARG; }
 		}
 	}
 	self = ALLOC(sizeof *self);
@@ -687,7 +685,7 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 	/* The duplicate contract needs an owner: a registration without the owner name or the property name cannot be told
 	 * apart from another, so it is not accepted. */
 	if (!name_text || !name_length || !type_text || !type_length || !owner_text || !owner_length)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:688\n"); return E_INVALIDARG; }
 	for (UINT32 index = 0; index < dp_registry_count; ++index) {
 		struct dp_object *registered = dp_registry[index];
 		UINT32 length = 0;
@@ -698,7 +696,7 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 		text = WindowsGetStringRawBuffer(registered->owner_name, &length);
 		if (length == owner_length &&
 			CompareStringOrdinal(text, (int)length, owner_text, (int)owner_length, FALSE) == CSTR_EQUAL)
-			return E_INVALIDARG; /* the real (owner, name) duplicate contract */
+			OutputDebugStringA("raven-xaml: duplicate style entry\n"); return E_INVALIDARG; /* the real (owner, name) duplicate contract */
 	}
 	/* The default value comes from the metadata's real DefaultValue, or — for the engine's own factory-backed
 	 * PropertyMetadata — from its create-default-value callback (see metadata_registration_default); metadata that does
@@ -707,7 +705,7 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 	if (metadata) {
 		if (metadata->lpVtbl->QueryInterface(metadata, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata,
 			(void **)&metadata) != S_OK)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:708\n"); return E_INVALIDARG; }
 		HRESULT result = metadata_registration_default(metadata, &default_value);
 		metadata->lpVtbl->Release(metadata);
 		if (FAILED(result)) {
@@ -738,6 +736,8 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 		dp_registry_capacity = capacity;
 	}
 	dp_registry[dp_registry_count++] = self;
+	/* Registrations remain discoverable after a caller releases its property. */
+	dp_addref_any(self);
 	*out = (__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *)self;
 	return S_OK;
 }
@@ -847,7 +847,7 @@ static HRESULT WINAPI dp_activation_activate(IActivationFactory *iface, IInspect
 	(void)iface;
 	if (out)
 		*out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const IActivationFactoryVtbl dp_activation_table = {
@@ -879,21 +879,14 @@ static HRESULT WINAPI dp_statics_register(__x_ABI_CWindows_CUI_CXaml_CIDependenc
 	return dp_register(name, property_type, owner_type, metadata, out);
 }
 
-/* RegisterAttached: there is no attached-property store to register into — the engine reads no attached value anywhere —
- * so the slot answers the documented failure at its exact signature instead of handing out a property nothing can store. */
+/* shortcut: attached properties can be registered with their metadata, but DependencyObject attached-value storage is not yet served. */
 static HRESULT WINAPI dp_statics_register_attached(__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics *This,
 	HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName property_type,
 	__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName owner_type, __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *metadata,
 	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty **out)
 {
 	(void)This;
-	(void)name;
-	(void)property_type;
-	(void)owner_type;
-	(void)metadata;
-	if (out)
-		*out = NULL;
-	return E_NOTIMPL;
+	return dp_register(name, property_type, owner_type, metadata, out);
 }
 
 static const __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStaticsVtbl dp_statics_table = {
@@ -997,7 +990,7 @@ static HRESULT WINAPI metadata_activation_activate(IActivationFactory *This, IIn
 	(void)This;
 	if (out)
 		*out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const IActivationFactoryVtbl metadata_activation_table = {
@@ -1068,7 +1061,7 @@ static HRESULT WINAPI metadata_statics_factory(__x_ABI_CWindows_CUI_CXaml_CIProp
 		return E_POINTER;
 	*result = NULL;
 	if (!create_default_value_callback)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1064\n"); return E_INVALIDARG; }
 	return metadata_create(NULL, create_default_value_callback, NULL, NULL, NULL, result);
 }
 
@@ -1082,7 +1075,7 @@ static HRESULT WINAPI metadata_statics_factory_callback(__x_ABI_CWindows_CUI_CXa
 		return E_POINTER;
 	*result = NULL;
 	if (!create_default_value_callback)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1078\n"); return E_INVALIDARG; }
 	return metadata_create(NULL, create_default_value_callback, property_changed_callback, NULL, NULL, result);
 }
 
@@ -1250,9 +1243,9 @@ static HRESULT WINAPI setter_put_property(__x_ABI_CWindows_CUI_CXaml_CISetter *T
 	IInspectable *candidate = (IInspectable *)(uintptr_t)value;
 	struct dp_object *dp = candidate ? dp_of(candidate) : NULL;
 	if (self->sealed)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1246\n"); return E_INVALIDARG; }
 	if (candidate && !dp)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1248\n"); return E_INVALIDARG; }
 	if (dp) {
 		UINT32 length = 0;
 		const WCHAR *name = WindowsGetStringRawBuffer(dp->name, &length);
@@ -1287,7 +1280,7 @@ static HRESULT WINAPI setter_put_value(__x_ABI_CWindows_CUI_CXaml_CISetter *ifac
 	struct setter_object *self = (struct setter_object *)iface;
 	IInspectable *object = (IInspectable *)(uintptr_t)value;
 	if (self->sealed)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1283\n"); return E_INVALIDARG; }
 	if (object)
 		object->lpVtbl->AddRef(object);
 	if (self->value)
@@ -1524,7 +1517,7 @@ static HRESULT WINAPI vector_append(setter_vector1 *iface, __x_ABI_CWindows_CUI_
 	if (!value)
 		return E_POINTER;
 	if (self->sealed)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1520\n"); return E_INVALIDARG; }
 	if (self->count == self->capacity) {
 		const UINT32 capacity = self->capacity ? self->capacity * 2 : 4;
 		struct setter_object **items = ALLOC((size_t)capacity * sizeof *items);
@@ -1548,7 +1541,7 @@ static HRESULT WINAPI vector_clear(setter_vector1 *iface)
 {
 	struct setters_vector *self = (struct setters_vector *)iface;
 	if (self->sealed)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1544\n"); return E_INVALIDARG; }
 	for (UINT32 index = 0; index < self->count; ++index)
 		if (self->items[index])
 			setter_release_any(self->items[index]);
@@ -1558,23 +1551,23 @@ static HRESULT WINAPI vector_clear(setter_vector1 *iface)
 
 STUB1(setter_vector1, vector_get_view)
 static HRESULT WINAPI vector_set_at(setter_vector1 *iface, UINT32 index, __x_ABI_CWindows_CUI_CXaml_CISetterBase *value)
-{ (void)iface; (void)index; (void)value; return E_NOTIMPL; }
+{ (void)iface; (void)index; (void)value; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI vector_insert_at(setter_vector1 *iface, UINT32 index, __x_ABI_CWindows_CUI_CXaml_CISetterBase *value)
-{ (void)iface; (void)index; (void)value; return E_NOTIMPL; }
+{ (void)iface; (void)index; (void)value; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI vector_remove_at(setter_vector1 *iface, UINT32 index)
-{ (void)iface; (void)index; return E_NOTIMPL; }
+{ (void)iface; (void)index; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI vector_remove_at_end(setter_vector1 *iface)
-{ (void)iface; return E_NOTIMPL; }
+{ (void)iface; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI vector_get_many(setter_vector1 *iface, UINT32 start_index, UINT32 items_size,
 	__x_ABI_CWindows_CUI_CXaml_CISetterBase **items, UINT32 *value)
 {
 	(void)iface; (void)start_index; (void)items_size; (void)items;
 	if (value)
 		*value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI vector_replace_all(setter_vector1 *iface, UINT32 count, __x_ABI_CWindows_CUI_CXaml_CISetterBase **items)
-{ (void)iface; (void)count; (void)items; return E_NOTIMPL; }
+{ (void)iface; (void)count; (void)items; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 static const setter_vector1_vtbl vector_table = {
 	.QueryInterface = vector_query,
@@ -1744,7 +1737,7 @@ static HRESULT WINAPI style_put_target_type(__x_ABI_CWindows_CUI_CXaml_CIStyle *
 	UINT32 length = 0;
 	const WCHAR *text = NULL;
 	if (self->sealed)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1740\n"); return E_INVALIDARG; }
 	/* The name is stored when the struct carries one; a nameless struct resets the TargetType, so an empty TypeName
 	 * hands back from get_TargetType. */
 	if (value.Name)
@@ -1798,7 +1791,7 @@ static HRESULT WINAPI style_put_based_on(__x_ABI_CWindows_CUI_CXaml_CIStyle *ifa
 	struct style_object *self = (struct style_object *)iface;
 	IInspectable *based_on = (IInspectable *)(uintptr_t)value;
 	if (self->sealed)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1794\n"); return E_INVALIDARG; }
 	if (based_on)
 		based_on->lpVtbl->AddRef(based_on);
 	if (self->based_on)
@@ -1947,7 +1940,7 @@ static HRESULT WINAPI factory_create(__x_ABI_CWindows_CUI_CXaml_CIStyleFactory *
 	if (!out)
 		return E_POINTER;
 	if (base_interface)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1943\n"); return E_INVALIDARG; }
 	return factory_activate(NULL, (IInspectable **)(uintptr_t)out);
 }
 
@@ -2152,7 +2145,7 @@ __declspec(dllexport) HRESULT raven_style_add_setter(IInspectable *style, const 
 	if (!self)
 		return S_FALSE;
 	if (!property || !length)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:2148\n"); return E_INVALIDARG; }
 	setter = create_setter(property, length, value);
 	if (!setter)
 		return E_OUTOFMEMORY;
@@ -2828,7 +2821,7 @@ HRESULT raven_acrylic_brush_set_float(IInspectable *brush, const WCHAR *name, UI
 	if (acrylic_property(name, length, L"TintOpacity")) slot = &self->tint_opacity;
 	else if (acrylic_property(name, length, L"TintLuminosityOpacity")) slot = &self->luminosity_opacity;
 	else return S_FALSE;
-	if (!(value >= 0.0f && value <= 1.0f)) return E_INVALIDARG;
+	if (!(value >= 0.0f && value <= 1.0f)) { OutputDebugStringA("raven-xaml: opacity out of range\n"); return E_INVALIDARG; }
 	*slot = value;
 	return S_OK;
 }

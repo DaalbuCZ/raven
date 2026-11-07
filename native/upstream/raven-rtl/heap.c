@@ -241,18 +241,38 @@ static void trim_chunk(heap *owner, segment *item, chunk *block, SIZE_T units)
 	bin_insert(owner, rest);
 }
 
+/* A free chunk a program's overflow damaged can sit in a bin: its links may point anywhere. The entry is
+ * unlinked and the search goes on, the way the bins survive a neighbour's damaged header. */
+static BOOLEAN bin_entry_valid(heap *owner, chunk *block)
+{
+	return !((uintptr_t)block % UNIT) && block->state == state_free && segment_of(owner, block);
+}
+
+static void bin_drop(heap *owner, unsigned bin, free_links *links)
+{
+	links->previous->next = links->next;
+	links->next->previous = links->previous;
+	if (owner->bins[bin].next == &owner->bins[bin])
+		owner->bin_bits[bin / 64] &= ~(1ull << (bin % 64));
+}
+
 static chunk *take_from_bins(heap *owner, SIZE_T units)
 {
 	unsigned bin = bin_of(units);
 	/* The bin a size falls in can also hold smaller chunks once sizes stop being exact: only the first few are looked at, then larger bins. */
 	if (bin >= EXACT_BINS) {
 		unsigned looked = 0;
-		for (free_links *links = owner->bins[bin].next; links != &owner->bins[bin] && looked < 16; links = links->next, looked++) {
+		for (free_links *links = owner->bins[bin].next; links != &owner->bins[bin] && looked < 16;) {
+			free_links *next = links->next;
 			chunk *block = (chunk *)links - 1;
-			if (block->units >= units) {
+			if (!bin_entry_valid(owner, block))
+				bin_drop(owner, bin, links);
+			else if (block->units >= units) {
 				bin_remove(owner, block);
 				return block;
 			}
+			links = next;
+			looked++;
 		}
 		bin++;
 	}
@@ -264,6 +284,11 @@ static chunk *take_from_bins(heap *owner, SIZE_T units)
 			continue;
 		unsigned found = word * 64 + (unsigned)__builtin_ctzll(bits);
 		chunk *block = (chunk *)owner->bins[found].next - 1;
+		if (!bin_entry_valid(owner, block)) {
+			bin_drop(owner, found, owner->bins[found].next);
+			word--;
+			continue;
+		}
 		bin_remove(owner, block);
 		return block;
 	}
@@ -326,6 +351,8 @@ static void *allocate_small(heap *owner, SIZE_T size)
 				return NULL;
 		}
 	}
+	if ((uintptr_t)block % UNIT || block->state != state_busy || !segment_of(owner, block))
+		return NULL;
 	trim_chunk(owner, item, block, units);
 	block->slack = (ULONG)(block->units * UNIT - sizeof(chunk) - size);
 	return block + 1;

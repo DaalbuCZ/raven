@@ -630,9 +630,12 @@ CRT void _exit(int status) { ExitProcess((UINT)status); }
 CRT void exit(int status) { _cexit(); ExitProcess((UINT)status); }
 CRT void abort(void) { ExitProcess(3); }
 CRT void __cdecl _assert(const char *expression, const char *file, unsigned line) { ExitProcess(3); }
+typedef void (__cdecl *invalid_parameter_handler)(const wchar_t *, const wchar_t *, const wchar_t *, unsigned, uintptr_t);
+static invalid_parameter_handler current_invalid_parameter_handler;
 typedef struct {
 	int error;
 	unsigned long dos_error;
+	invalid_parameter_handler invalid_handler;
 } ErrorState;
 
 DWORD _tls_index;
@@ -655,8 +658,14 @@ static ErrorState *thread_errors(void)
 
 CRT int *_errno(void) { return &thread_errors()->error; }
 CRT unsigned long *__doserrno(void) { return &thread_errors()->dos_error; }
-CRT void _invalid_parameter_noinfo(void) {}
-CRT void _invalid_parameter_noinfo_noreturn(void) { ExitProcess(3); }
+CRT void _invalid_parameter_noinfo(void)
+{
+	invalid_parameter_handler handler = thread_errors()->invalid_handler;
+	if (!handler) handler = current_invalid_parameter_handler;
+	/* shortcut: with no handler, Raven retains its existing no-op; add the Windows fail-fast default when callers are ready. */
+	if (handler) handler(NULL, NULL, NULL, 0, 0);
+}
+CRT void _invalid_parameter_noinfo_noreturn(void) { _invalid_parameter_noinfo(); ExitProcess(3); }
 
 /* ---- streams ---- */
 /* The record is the size of msvcrt's FILE on x64 (48 bytes), so the table of standard streams is also the array that msvcrt

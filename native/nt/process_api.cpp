@@ -387,6 +387,15 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("OutputDebugStringA", 1, [](ApiCall &call) {
 		if (debugger && call[0])
 			std::fprintf(stderr, "debug: %s", call.narrow(call[0]).c_str());
+		// A component can arm a hardware watch on an address with a "raven-watch <hex>" line; the next write names its writer.
+		if (call[0]) {
+			const auto text = call.narrow(call[0]);
+			if (text.rfind("raven-watch ", 0) == 0) {
+				const uint64_t address = std::strtoull(text.c_str() + 12, nullptr, 16);
+				if (address)
+					call.process.watch_write(address);
+			}
+		}
 	});
 	registry.add("OutputDebugStringW", 1, [](ApiCall &call) {
 		if (debugger && call[0])

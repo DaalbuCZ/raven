@@ -10,7 +10,9 @@
 #include <winstring.h>
 #include <roapi.h>
 #include <activation.h>
+#include <weakreference.h>
 #include <windows.foundation.h>
+#include <windows.system.userprofile.h>
 #include "windows_ui_xaml_application.h"
 #include "windows_ui_xaml_dictionary.h"
 #include "windows_ui_xaml_elements.h"
@@ -326,6 +328,81 @@ int raven_entry(void)
 		return 1;
 	if (initialize(1) != S_OK)
 		return 2;
+	{
+		HSTRING name = NULL;
+		raven_resource_dictionary_factory *ctor = NULL;
+		resource_i *base = NULL;
+		IInspectable *inner = NULL, *checked = NULL;
+		struct fixture_key *outer = make_key(L"outer");
+		if (!outer || WindowsCreateString(dictionary_name, ARRAYSIZE(dictionary_name)-1, &name) != S_OK ||
+			get_factory(name, &IID_raven_resource_dictionary_factory, (void **)&ctor) != S_OK || !ctor) return 249;
+		WindowsDeleteString(name);
+		if (ctor->lpVtbl->CreateInstance(ctor, NULL, &inner, &base) != S_OK || !base || inner ||
+			base->lpVtbl->QueryInterface(base, &IID_IWeakReferenceSource, (void **)&checked) != S_OK || !checked) return 250;
+		IInspectable_Release(checked); checked=NULL;
+		base->lpVtbl->Release(base); base=NULL;
+		if (ctor->lpVtbl->CreateInstance(ctor, (IInspectable *)outer, NULL, &base) != E_POINTER ||
+			ctor->lpVtbl->CreateInstance(ctor, (IInspectable *)outer, &inner, &base) != S_OK || !base || !inner ||
+			!same_unknown(base, outer) || inner->lpVtbl->QueryInterface(inner, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&checked) != S_OK || !checked ||
+			!same_unknown(checked, outer)) return 251;
+		IInspectable_Release(checked);
+		base->lpVtbl->Release(base);
+		inner->lpVtbl->Release(inner);
+		if (outer->refs != 1) return 252;
+		fixture_key_release(outer);
+		ctor->lpVtbl->Release(ctor);
+	}
+	{
+		HSTRING name = NULL, language = NULL;
+		__x_ABI_CWindows_CSystem_CUserProfile_CIGlobalizationPreferencesStatics *prefs = NULL;
+		__FIVectorView_1_HSTRING *languages = NULL;
+		UINT32 count = 0;
+		static const WCHAR class_name[] = L"Windows.System.UserProfile.GlobalizationPreferences";
+		if (WindowsCreateString(class_name, ARRAYSIZE(class_name) - 1, &name) != S_OK ||
+			get_factory(name, &IID___x_ABI_CWindows_CSystem_CUserProfile_CIGlobalizationPreferencesStatics, (void **)&prefs) != S_OK ||
+			prefs->lpVtbl->get_Languages(prefs, &languages) != S_OK || !languages ||
+			languages->lpVtbl->get_Size(languages, &count) != S_OK || count != 1 ||
+			languages->lpVtbl->GetAt(languages, 0, &language) != S_OK || !WindowsGetStringLen(language) ||
+			languages->lpVtbl->GetAt(languages, 1, &language) != (HRESULT)0x8000000bU)
+			return 245;
+		WindowsDeleteString(language);
+		languages->lpVtbl->Release(languages);
+		prefs->lpVtbl->Release(prefs);
+		WindowsDeleteString(name);
+	}
+	{
+		HSTRING name = NULL, language = NULL, override = NULL, chosen = NULL, invalid = NULL;
+		__x_ABI_CWindows_CGlobalization_CIApplicationLanguagesStatics *app = NULL;
+		__FIVectorView_1_HSTRING *languages = NULL;
+		UINT32 count = 0;
+		static const WCHAR class_name[] = L"Windows.Globalization.ApplicationLanguages";
+		if (WindowsCreateString(class_name, ARRAYSIZE(class_name) - 1, &name) != S_OK ||
+			get_factory(name, &IID___x_ABI_CWindows_CGlobalization_CIApplicationLanguagesStatics, (void **)&app) != S_OK ||
+			app->lpVtbl->put_PrimaryLanguageOverride(app, NULL) != S_OK ||
+			app->lpVtbl->get_PrimaryLanguageOverride(app, &override) != S_OK || WindowsGetStringLen(override) ||
+			app->lpVtbl->get_Languages(app, &languages) != S_OK || !languages ||
+			languages->lpVtbl->get_Size(languages, &count) != S_OK || count != 1 ||
+			languages->lpVtbl->GetAt(languages, 0, &language) != S_OK || !WindowsGetStringLen(language))
+			return 246;
+		WindowsDeleteString(language);
+		languages->lpVtbl->Release(languages);
+		if (WindowsCreateString(L"fr-FR", 5, &chosen) != S_OK || WindowsCreateString(L"en-US,fr-FR", 11, &invalid) != S_OK ||
+			app->lpVtbl->put_PrimaryLanguageOverride(app, chosen) != S_OK ||
+			app->lpVtbl->put_PrimaryLanguageOverride(app, invalid) != E_INVALIDARG ||
+			app->lpVtbl->get_PrimaryLanguageOverride(app, &language) != S_OK || !same_text(language, L"fr-FR")) return 247;
+		WindowsDeleteString(language);
+		language = NULL;
+		if (app->lpVtbl->get_Languages(app, &languages) != S_OK ||
+			languages->lpVtbl->GetAt(languages, 0, &language) != S_OK || !same_text(language, L"fr-FR") ||
+			app->lpVtbl->put_PrimaryLanguageOverride(app, NULL) != S_OK) return 248;
+		WindowsDeleteString(language);
+		WindowsDeleteString(chosen);
+		WindowsDeleteString(invalid);
+		WindowsDeleteString(override);
+		languages->lpVtbl->Release(languages);
+		app->lpVtbl->Release(app);
+		WindowsDeleteString(name);
+	}
 	/* the class activates by name and answers both of its interfaces */
 	if (activate(dictionary_name, &dictionary) != S_OK || !dictionary)
 		return 3;
@@ -775,6 +852,24 @@ int raven_entry(void)
 		fixture_key_release(absent);
 		fixture_key_release(greeting);
 		fixture_key_release(farewell);
+	}
+	/* These unequal string keys collide under the dictionary's hash and must retain separate values. */
+	{
+		IInspectable *dictionary = NULL, *found = NULL;
+		map_i *map = NULL;
+		struct fixture_key *one = make_key(L"costarring"), *other = make_key(L"liquid");
+		struct fixture_value *first = make_value(1), *second = make_value(2);
+		boolean replaced = FALSE;
+		if (!one || !other || !first || !second || activate(dictionary_name, &dictionary) != S_OK ||
+			dictionary->lpVtbl->QueryInterface(dictionary, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK ||
+			map->lpVtbl->Insert(map, (IInspectable *)one, (IInspectable *)first, &replaced) != S_OK || replaced ||
+			map->lpVtbl->Insert(map, (IInspectable *)other, (IInspectable *)second, &replaced) != S_OK || replaced ||
+			map->lpVtbl->Lookup(map, (IInspectable *)one, &found) != S_OK || found != (IInspectable *)first) return 66;
+		found->lpVtbl->Release(found); found = NULL;
+		if (map->lpVtbl->Lookup(map, (IInspectable *)other, &found) != S_OK || found != (IInspectable *)second) return 67;
+		found->lpVtbl->Release(found); map->lpVtbl->Release(map); dictionary->lpVtbl->Release(dictionary);
+		first->lpVtbl->Release((IInspectable *)first); second->lpVtbl->Release((IInspectable *)second);
+		fixture_key_release(one); fixture_key_release(other);
 	}
 	return 0;
 }

@@ -344,7 +344,7 @@ static HRESULT WINAPI properties_usage(IPointerPointProperties *iface, UINT32 pa
 {
 	if (!out) return E_POINTER;
 	*out = 0;
-	return E_INVALIDARG;
+	{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:347\n"); return E_INVALIDARG; }
 }
 static struct pointer_device *device_owner(IPointerDevice *iface)
 {
@@ -388,7 +388,7 @@ static HRESULT WINAPI device_integrated(IPointerDevice *iface, boolean *out)
 	/* Raw input does not say whether a digitizer is built into a display; only the sources that
 	 * answer (user32's pointer table, the mouse) set integrated_known, the rest stay a documented
 	 * failure rather than a guess. */
-	if (!device_owner(iface)->integrated_known) return E_NOTIMPL;
+	if (!device_owner(iface)->integrated_known) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	*out = device_owner(iface)->integrated;
 	return S_OK;
 }
@@ -397,7 +397,7 @@ static HRESULT WINAPI device_contacts(IPointerDevice *iface, UINT32 *out)
 	if (!out) return E_POINTER;
 	/* MaxContacts needs the host's active-contact count; a mouse reports one contact, touch and pen
 	 * only when the host table provided it. */
-	if (!device_owner(iface)->contacts_known) return E_NOTIMPL;
+	if (!device_owner(iface)->contacts_known) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	*out = device_owner(iface)->contacts;
 	return S_OK;
 }
@@ -405,7 +405,7 @@ static HRESULT WINAPI device_physical_rect(IPointerDevice *iface, Rect *out)
 {
 	if (!out) return E_POINTER;
 	struct pointer_device *self = device_owner(iface);
-	if (self->rect == device_rect_none) return E_NOTIMPL;
+	if (self->rect == device_rect_none) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	if (self->rect == device_rect_fixed) {
 		*out = self->physical;
 		return S_OK;
@@ -435,7 +435,7 @@ static HRESULT WINAPI device_usages(IPointerDevice *iface, __FIVectorView_1_Poin
 	*out = NULL;
 	/* No source in the emulated desktop exposes a HID report descriptor: the mouse is a Win32 cursor
 	 * device, not a HID collection, so there is no usage list to answer honestly. */
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static const IPointerDeviceVtbl device_table = {
 	device_query, device_addref, device_release, device_iids, device_class, device_trust,
@@ -1152,10 +1152,10 @@ static HRESULT WINAPI statics_GetPointerDevice(IPointerDeviceStatics *iface, UIN
 					return S_OK;
 				}
 			}
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:1155\n"); return E_INVALIDARG; }
 		}
 	}
-	return E_INVALIDARG;
+	{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:1158\n"); return E_INVALIDARG; }
 }
 struct device_view {
 	__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice view;
@@ -1343,7 +1343,7 @@ static HRESULT WINAPI device_activation_activate(IActivationFactory *iface, IIns
 	(void)iface;
 	if (out)
 		*out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI device_activation_trust(IActivationFactory *iface, TrustLevel *out)
 {

@@ -113,6 +113,47 @@ uint64_t NativeModuleAPI::procedure(uint64_t handle, uint64_t name)
 
 bool NativeModuleAPI::dispatch(std::string_view name)
 {
+	if (name == "LoadPackagedLibrary") {
+		if (!load) return false;
+		const auto arguments = process.api_arguments(2);
+		if (!arguments[0] || arguments[1]) {
+			environment.set_last_error(87);
+			process.return_api(0);
+			return true;
+		}
+		if (package_root.empty()) {
+			environment.set_last_error(15700); // APPMODEL_ERROR_NO_PACKAGE
+			process.return_api(0);
+			return true;
+		}
+		const auto decoded = guest_name(arguments[0], true);
+		if (!decoded || decoded->empty() || decoded->find_first_of("/:*?\"<>|") != std::string::npos) {
+			environment.set_last_error(87);
+			process.return_api(0);
+			return true;
+		}
+		std::string relative = *decoded;
+		for (size_t at = 0; at <= relative.size();) {
+			const auto end = std::min(relative.find('\\', at), relative.size());
+			const auto part = std::string_view(relative).substr(at, end - at);
+			if (part.empty() || part == "." || part == ".." || part.back() == ' ' ||
+				(end < relative.size() && part.back() == '.')) {
+				environment.set_last_error(87);
+				process.return_api(0);
+				return true;
+			}
+			at = end + 1;
+		}
+		const auto last = relative.find_last_of('\\');
+		if (relative.find('.', last == std::string::npos ? 0 : last + 1) == std::string::npos) relative += ".dll";
+		// shortcut: the current package root is searched; add dependency packages with a real package graph.
+		const auto previous_flags = flags;
+		flags = 0;
+		const auto loaded = load(package_root + "\\" + relative);
+		flags = previous_flags;
+		process.return_api(loaded);
+		return true;
+	}
 	if (name == "LoadLibraryA" || name == "LoadLibraryW" || name == "LoadLibraryExA" || name == "LoadLibraryExW") {
 		if (!load)
 			return false;

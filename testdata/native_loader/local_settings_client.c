@@ -374,6 +374,7 @@ int raven_entry(void)
 	static const WCHAR value_name[] = L"Windows.Foundation.PropertyValue";
 	static const WCHAR int_name[] = L"fixture-integer";
 	static const WCHAR text_name[] = L"fixture-text";
+	static const WCHAR null_name[] = L"fixture-null";
 	static const WCHAR text_value[] = L"hello";
 	const WCHAR *mode = GetCommandLineW();
 	for (const WCHAR *at = mode; *at; ++at)
@@ -381,7 +382,7 @@ int raven_entry(void)
 	HMODULE runtime = LoadLibraryW(L"combase.dll");
 	initialize_function initialize = runtime ? (initialize_function)GetProcAddress(runtime, "RoInitialize") : NULL;
 	factory_function factory = runtime ? (factory_function)GetProcAddress(runtime, "RoGetActivationFactory") : NULL;
-	HSTRING app_key = NULL, value_key = NULL, int_key = NULL, text_key = NULL, text = NULL;
+	HSTRING app_key = NULL, value_key = NULL, int_key = NULL, text_key = NULL, null_key = NULL, text = NULL;
 	appdata_statics *statics = NULL;
 	appdata *current = NULL;
 	container *settings = NULL;
@@ -394,7 +395,8 @@ int raven_entry(void)
 	if (WindowsCreateString(appdata_name, ARRAYSIZE(appdata_name) - 1, &app_key) != S_OK ||
 		WindowsCreateString(value_name, ARRAYSIZE(value_name) - 1, &value_key) != S_OK ||
 		WindowsCreateString(int_name, ARRAYSIZE(int_name) - 1, &int_key) != S_OK ||
-		WindowsCreateString(text_name, ARRAYSIZE(text_name) - 1, &text_key) != S_OK) return 3;
+		WindowsCreateString(text_name, ARRAYSIZE(text_name) - 1, &text_key) != S_OK ||
+		WindowsCreateString(null_name, ARRAYSIZE(null_name) - 1, &null_key) != S_OK) return 3;
 	if (factory(app_key, &IID___x_ABI_CWindows_CStorage_CIApplicationDataStatics, (void **)&statics) != S_OK || !statics ||
 		statics->lpVtbl->get_Current(statics, &current) != S_OK || !current ||
 		current->lpVtbl->get_LocalSettings(current, &settings) != S_OK || !settings ||
@@ -452,6 +454,7 @@ int raven_entry(void)
 		if (handler.calls != 2 || handler.errors || observable->lpVtbl->remove_MapChanged(observable, token) != S_OK || handler.refs != 1)
 			return 19;
 		observable->lpVtbl->Release(observable);
+		if (map->lpVtbl->Insert(map, null_key, NULL, &replaced) != S_OK || replaced) return 25;
 	} else if (!lstrcmpW(mode, L"bad")) {
 		IInspectable *item = NULL;
 		boolean found = TRUE;
@@ -477,6 +480,12 @@ int raven_entry(void)
 		UINT32 size = 99;
 		if (map->lpVtbl->get_Size(map, &size) != S_OK || size || map->lpVtbl->Clear(map) != S_OK) return 24;
 	} else if (!lstrcmpW(mode, L"read")) {
+		IInspectable *null_value = (void *)1;
+		boolean found = FALSE;
+		if (map->lpVtbl->HasKey(map, null_key, &found) != S_OK || !found ||
+			map->lpVtbl->Lookup(map, null_key, &null_value) != S_OK || null_value ||
+			map->lpVtbl->Insert(map, null_key, NULL, &replaced) != S_OK || !replaced ||
+			map->lpVtbl->Remove(map, null_key) != S_OK) return 26;
 		if (!check_int(map, int_key, -12345) || !check_string(map, text_key)) return 10;
 		if (map->lpVtbl->Remove(map, int_key) != S_OK) return 11;
 	} else if (!lstrcmpW(mode, L"verify")) {
@@ -493,6 +502,6 @@ int raven_entry(void)
 	settings->lpVtbl->Release(settings);
 	current->lpVtbl->Release(current);
 	statics->lpVtbl->Release(statics);
-	WindowsDeleteString(app_key); WindowsDeleteString(value_key); WindowsDeleteString(int_key); WindowsDeleteString(text_key);
+	WindowsDeleteString(app_key); WindowsDeleteString(value_key); WindowsDeleteString(int_key); WindowsDeleteString(text_key); WindowsDeleteString(null_key);
 	return 0;
 }

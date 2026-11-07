@@ -162,6 +162,15 @@ public:
 	std::vector<std::shared_ptr<GuestThread>> running;
 };
 
+class PoolTimerObject : public KernelObject {
+public:
+	uint64_t handle = 0, callback = 0, parameter = 0;
+	uint32_t period = 0;
+	bool active = false;
+	std::chrono::steady_clock::time_point deadline;
+	std::vector<std::shared_ptr<GuestThread>> running;
+};
+
 // A private pool only bounds its threads; work items run on guest threads whichever pool they name.
 class PoolObject : public KernelObject {
 public:
@@ -1379,6 +1388,73 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	});
 
 
+	// Pool timers use the scheduler pump, like timer-queue callbacks.
+	auto pool_timers = std::make_shared<std::vector<std::shared_ptr<PoolTimerObject>>>();
+	threads.add_pump([pool_timers, &threads, &context] {
+		const auto now = std::chrono::steady_clock::now();
+		for (const auto &timer : *pool_timers) {
+			std::erase_if(timer->running, [](const auto &thread) { return thread->state == GuestThread::State::done; });
+			if (!timer->active || now < timer->deadline) continue;
+			const auto instance = context.allocator.allocate(64);
+			const auto thread = threads.create(timer->callback, timer->parameter, 1024 * 1024, false);
+			thread->arguments = {instance, timer->parameter, timer->handle};
+			timer->running.push_back(thread);
+			if (!timer->period) timer->active = false;
+			else timer->deadline = now + std::chrono::milliseconds(timer->period);
+		}
+	});
+	threads.add_external([pool_timers] {
+		return std::any_of(pool_timers->begin(), pool_timers->end(), [](const auto &timer) { return timer->active; });
+	});
+	registry.add("CreateThreadpoolTimer", 3, [&objects, pool_timers](ApiCall &call) {
+		if (!call[0]) { call.fail(87, 0); return; }
+		auto timer = std::make_shared<PoolTimerObject>();
+		timer->callback = call[0]; timer->parameter = call[1];
+		const auto made = objects.add_object(timer);
+		if (made.status) { call.fail(8, 0); return; }
+		timer->handle = made.value;
+		pool_timers->push_back(timer);
+		if (call[2])
+			if (const auto group = objects.object_as<CleanupGroupObject>(call.load_pointer(call[2] + 2 * call.pointer_width())))
+				group->members.push_back(made.value);
+		call.ret(made.value);
+	});
+	const auto set_pool_timer = [&objects](ApiCall &call) {
+		const auto timer = objects.object_as<PoolTimerObject>(call[0]);
+		if (!timer) return;
+		if (!call[1]) { timer->active = false; return; }
+		const auto due = call.load<int64_t>(call[1]);
+		auto when = std::chrono::steady_clock::now();
+		if (due < 0) when += std::chrono::microseconds(-(due / 10));
+		else {
+			using namespace std::chrono;
+			const auto now_1601 = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count() + 11644473600000000LL;
+			const auto ahead = due / 10 - now_1601;
+			if (ahead > 0) when += microseconds(ahead);
+		}
+		timer->deadline = when; timer->period = call.u32(2); timer->active = true;
+	};
+	registry.add("SetThreadpoolTimer", 4, set_pool_timer);
+	registry.add("IsThreadpoolTimerSet", 1, [&objects](ApiCall &call) {
+		const auto timer = objects.object_as<PoolTimerObject>(call[0]);
+		call.ret(timer && timer->active);
+	});
+	// shortcut: submitted callbacks start immediately, so pending-callback cancellation is not yet modeled.
+	registry.add("WaitForThreadpoolTimerCallbacks", 2, [&objects, &threads](ApiCall &call) {
+		const auto timer = objects.object_as<PoolTimerObject>(call[0]);
+		if (!timer) return;
+		threads.block([timer] { return std::all_of(timer->running.begin(), timer->running.end(), [](const auto &thread) {
+			return thread->state == GuestThread::State::done;
+		}); }, std::nullopt);
+	});
+	registry.add("CloseThreadpoolTimer", 1, [&objects, pool_timers](ApiCall &call) {
+		if (const auto timer = objects.object_as<PoolTimerObject>(call[0])) {
+			timer->active = false;
+			std::erase(*pool_timers, timer);
+			objects.close(call[0]);
+		}
+	});
+
 	// Thread pool work items run on short-lived guest threads; waiting on them joins those threads.
 	registry.add("CreateThreadpoolWork", 3, [&objects](ApiCall &call) {
 		auto work = std::make_shared<WorkObject>();
@@ -1439,16 +1515,24 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(made.value);
 	});
 	// The members' callbacks finish first (pending ones run too, since submitted work starts at once), then their handles close.
-	registry.add("CloseThreadpoolCleanupGroupMembers", 3, [&objects, &threads](ApiCall &call) {
+	registry.add("CloseThreadpoolCleanupGroupMembers", 3, [&objects, &threads, pool_timers](ApiCall &call) {
 		const auto group = objects.object_as<CleanupGroupObject>(call[0]);
 		if (!group)
 			return;
 		std::vector<std::shared_ptr<WorkObject>> works;
+		std::vector<std::shared_ptr<PoolTimerObject>> timers;
 		for (const auto member : group->members)
 			if (const auto work = objects.object_as<WorkObject>(member))
 				works.push_back(work);
-		threads.block([works] {
-			return std::all_of(works.begin(), works.end(), [](const auto &work) {
+			else if (const auto timer = objects.object_as<PoolTimerObject>(member)) {
+				timer->active = false;
+				std::erase(*pool_timers, timer);
+				timers.push_back(timer);
+			}
+		threads.block([works, timers] {
+			return std::all_of(timers.begin(), timers.end(), [](const auto &timer) {
+				return std::all_of(timer->running.begin(), timer->running.end(), [](const auto &thread) { return thread->state == GuestThread::State::done; });
+			}) && std::all_of(works.begin(), works.end(), [](const auto &work) {
 				return std::all_of(work->running.begin(), work->running.end(), [](const auto &thread) { return thread->state == GuestThread::State::done; });
 			});
 		}, std::nullopt);

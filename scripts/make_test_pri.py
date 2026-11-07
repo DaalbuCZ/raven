@@ -18,6 +18,11 @@ import argparse
 import struct
 from pathlib import Path
 
+
+class CompactBinary(bytes):
+    """Binary fixture data stored through the PRI's 16-bit offset/length table."""
+
+
 MAGIC = b"mrm_pri2"
 SECTION_HEADER = 32
 SECTION_FOOTER = 8
@@ -175,10 +180,10 @@ def resource_map(resources, schema_index, decision_index, data_index):
     for index in range(count):
         body += struct.pack("<HH", index, index)  # decision, first candidate
     values = list(resources.values())
-    strings = [value for value in values if isinstance(value, str)]
+    strings = [value for value in values if isinstance(value, (str, CompactBinary))]
     string_index = blob_index = 0
     for value in values:
-        if isinstance(value, str):
+        if isinstance(value, (str, CompactBinary)):
             item = string_index
             string_index += 1
         else:
@@ -191,15 +196,15 @@ def resource_map(resources, schema_index, decision_index, data_index):
 def data_items(resources):
     """The data item section: a string table of (offset, length) pairs — both
     counting bytes, the way the Shapr3D package's index stores them — then the
-    string data. No blob storage; the strings are nul-terminated with the
-    terminator outside the counted length."""
+    data. The compact table holds text and small binary items; the wide table
+    holds other binary items. Terminators are outside the counted length."""
     values = list(resources.values())
-    strings = [value for value in values if isinstance(value, str)]
-    blobs = [value for value in values if isinstance(value, bytes)]
+    strings = [value for value in values if isinstance(value, (str, CompactBinary))]
+    blobs = [value for value in values if isinstance(value, bytes) and not isinstance(value, CompactBinary)]
     payload = b""
     string_table = b""
     for value in strings:
-        encoded = value.encode("utf-16le")
+        encoded = value.encode("utf-16le") if isinstance(value, str) else value
         string_table += struct.pack("<HH", len(payload), len(encoded))
         payload += encoded + b"\0\0"
     blob_table = b""
@@ -238,6 +243,18 @@ def ambient_application_xbf():
              + b"\x14\x73\x81\x1b\xb0\x82\x05" + struct.pack("<H", 1) + b"\x21\x08"
              + b"\x02\x21\x02")
     return compiled_document(["ParentColor", "ms-appx:///Fixture/AmbientSource.xaml"], nodes)
+
+
+def framework_theme_xbf():
+    # A collection of unimplemented gradient stops must not unbalance the dictionary's scopes in a tolerant load.
+    nodes = (b"\x14\x73\x81"              # ResourceDictionary
+             b"\x14\x4e\x81"              # LinearGradientBrush (334)
+             b"\x13\x9e\x81"              # GradientStops (414)
+             b"\x14\x40\x80\x21\x08"    # GradientStop, close, AddToCollection
+             b"\x02\x21"                  # close collection, close brush
+             + dictionary_key(0)
+             + push_string(1) + dictionary_key(2) + b"\x21")
+    return compiled_document(["IgnoredGradient", "Theme loaded", "FrameworkTheme"], nodes)
 
 
 def ambient_source_xbf():
@@ -378,6 +395,7 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--extended", action="store_true", help="use extended ASCII-name schema")
     parser.add_argument("--with-xbf", action="store_true", help="add a compiled TextBlock resource")
+    parser.add_argument("--with-framework", action="store_true", help="add a synthetic WinUI dependency and manifest beside the output")
     args = parser.parse_args()
     resources = dict(RESOURCES)
     if args.with_xbf:
@@ -387,7 +405,7 @@ def main():
         resources["Files/Fixture/Invalid.xbf"] = bytes(malformed)
         resources["Files/Fixture/Dictionaries.xbf"] = application_dictionary_xbf()
         resources["Files/Fixture/AmbientApplication.xbf"] = ambient_application_xbf()
-        resources["Files/Fixture/AmbientSource.xbf"] = ambient_source_xbf()
+        resources["Files/Fixture/AmbientSource.xbf"] = CompactBinary(ambient_source_xbf())
         resources["Files/Fixture/MissingType.xbf"] = application_dictionary_xbf(unknown_child=True)
         resources["Files/Fixture/Source.xbf"] = resource_dictionary_xbf(
             [("Greeting", "Hello from Source"), ("Farewell", "Goodbye")])
@@ -395,6 +413,19 @@ def main():
         # a dictionary whose Source names itself: the setter's recursion bound must refuse it instead of looping
         resources["Files/Fixture/Loop.xbf"] = resource_dictionary_xbf(
             [("Greeting", "Hello")], source="ms-appx:///Fixture/Loop.xaml")
+    if args.with_framework:
+        dependency = args.out.parent / "deps" / "Microsoft.UI.Xaml.2.8"
+        dependency.mkdir(parents=True, exist_ok=True)
+        framework = {
+            "Files/Microsoft.UI.Xaml/Themes/21h1_themeresources.xbf": framework_theme_xbf(),
+            "Files/Microsoft.UI.Xaml/Themes/21h1_generic.xbf": resource_dictionary_xbf([("FrameworkGeneric", "Generic loaded")]),
+        }
+        (dependency / "resources.pri").write_bytes(build(framework, args.extended))
+        (args.out.parent / "AppxManifest.xml").write_text(
+            '<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">'
+            '<Identity Name="Raven.FrameworkFixture" Publisher="CN=Raven" Version="1.0.0.0"/>'
+            '<Dependencies><PackageDependency Name="Microsoft.UI.Xaml.2.8" Publisher="CN=Raven" MinVersion="1.0.0.0"/>'
+            '</Dependencies></Package>')
     args.out.write_bytes(build(resources, args.extended))
     print(f"{args.out}: {len(resources)} resources")
 

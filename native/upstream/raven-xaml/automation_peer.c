@@ -168,20 +168,20 @@ static const IInspectableVtbl peer_inspectable_table = {
 static HRESULT WINAPI peer_stub0(peer_automation1 *This)
 {
 	(void)This;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI peer_stub1(peer_automation1 *This, uint64_t a1)
 {
 	(void)This;
 	if (a1)
 		*(void **)(uintptr_t)a1 = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI peer_stub1_in(peer_automation1 *This, uint64_t a1)
 {
 	(void)This;
 	(void)a1;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 /* The two-argument slots carry an out pointer in the second word (GetPeerFromPoint); no pattern
  * provider other than the Invoke one below is implemented, so the slot answers E_NOTIMPL the way an
@@ -192,7 +192,7 @@ static HRESULT WINAPI peer_stub2(peer_automation1 *This, uint64_t a1, uint64_t a
 	(void)a1;
 	if (a2)
 		*(void **)(uintptr_t)a2 = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI peer_stub3(peer_automation1 *This, uint64_t a1, uint64_t a2, uint64_t a3)
 {
@@ -200,7 +200,7 @@ static HRESULT WINAPI peer_stub3(peer_automation1 *This, uint64_t a1, uint64_t a
 	(void)a1;
 	(void)a2;
 	(void)a3;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* The element is a content element and a control element: the engine's elements are the controls of
@@ -225,7 +225,7 @@ static HRESULT WINAPI peer_get_pattern(peer_automation1 *This, uint64_t pattern,
 		return E_POINTER;
 	*(void **)(uintptr_t)out = NULL;
 	if ((UINT32)(uintptr_t)pattern != PATTERN_INVOKE || !self->button)
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	*(void **)(uintptr_t)out = &self->invoke;
 	peer_addref(self);
 	return S_OK;
@@ -809,7 +809,7 @@ static HRESULT WINAPI factory_create_instance_with_owner(peer_composable1 *This,
 {
 	(void)This;
 	if (outer)
-		return E_NOTIMPL;
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	if (inner)
 		*(void **)(uintptr_t)inner = NULL;
 	return peer_for_element((ui_element *)(uintptr_t)element, (void **)(uintptr_t)result);

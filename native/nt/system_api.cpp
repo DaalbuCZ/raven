@@ -1801,11 +1801,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 
 	// TLS and FLS indexes are process-wide; values belong to the thread that asks, by its id: a new thread may get the thread block of one
 	// that ended, and must not find that thread's values.
-	struct Slots {
-		std::vector<bool> used;
-		std::vector<uint64_t> callbacks;
-		std::map<uint64_t, std::vector<uint64_t>> values;
-	};
+	using Slots = GuestFls; // the same state the thread exit reads for the callback delivery
 	const auto make_slots = [](size_t count) {
 		auto slots = std::make_shared<Slots>();
 		slots->used.assign(count, false);
@@ -1813,6 +1809,7 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		return slots;
 	};
 	const auto tls = make_slots(1088), fls = make_slots(4080);
+	context.fls = fls;
 	// TLS slot 0 is taken before the program runs, as the system libraries of a Windows process take it: programs (older Rust runtimes
 	// among them) take an index of 0 for "not allocated" and stop when TlsAlloc gives it.
 	tls->used[0] = true;

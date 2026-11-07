@@ -82,9 +82,9 @@ static int equal_iid(REFIID left, const IID *right)
 
 /* Stubs for the slots the graphics stage does not implement. */
 #define OUT_STUB(prefix, name) static HRESULT WINAPI name(prefix *This, void **value) \
-	{ (void)This; if (value) *value = NULL; return E_NOTIMPL; }
+	{ (void)This; if (value) *value = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define IN_STUB(prefix, name, type) static HRESULT WINAPI name(prefix *This, type value) \
-	{ (void)This; (void)value; return E_NOTIMPL; }
+	{ (void)This; (void)value; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 struct composition_brush;
 struct composition_visual;
@@ -318,7 +318,7 @@ static HRESULT WINAPI compositor_get_dispatcher(composition_object1 *This, __x_A
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_get_properties(composition_object1 *This,
@@ -327,7 +327,7 @@ static HRESULT WINAPI compositor_get_properties(composition_object1 *This,
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_start_animation(composition_object1 *This, HSTRING name,
@@ -336,14 +336,14 @@ static HRESULT WINAPI compositor_start_animation(composition_object1 *This, HSTR
 	(void)This;
 	(void)name;
 	(void)animation;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_stop_animation(composition_object1 *This, HSTRING name)
 {
 	(void)This;
 	(void)name;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_color_key_animation(compositor1 *This,
@@ -352,7 +352,7 @@ static HRESULT WINAPI compositor_create_color_key_animation(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_cubic_bezier(compositor1 *This, vector2 first, vector2 second,
@@ -363,7 +363,7 @@ static HRESULT WINAPI compositor_create_cubic_bezier(compositor1 *This, vector2 
 	(void)second;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_effect_factory(compositor1 *This,
@@ -374,7 +374,7 @@ static HRESULT WINAPI compositor_create_effect_factory(compositor1 *This,
 	(void)effect;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_effect_factory_with_properties(compositor1 *This,
@@ -386,7 +386,7 @@ static HRESULT WINAPI compositor_create_effect_factory_with_properties(composito
 	(void)animatable;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_expression_animation(compositor1 *This,
@@ -395,7 +395,7 @@ static HRESULT WINAPI compositor_create_expression_animation(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_expression_with_expression(compositor1 *This, HSTRING expression,
@@ -405,7 +405,7 @@ static HRESULT WINAPI compositor_create_expression_with_expression(compositor1 *
 	(void)expression;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_inset_clip(compositor1 *This, __x_ABI_CWindows_CUI_CComposition_CIInsetClip **result)
@@ -413,7 +413,7 @@ static HRESULT WINAPI compositor_create_inset_clip(compositor1 *This, __x_ABI_CW
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_inset_with_insets(compositor1 *This, float left, float top, float right,
@@ -426,7 +426,7 @@ static HRESULT WINAPI compositor_create_inset_with_insets(compositor1 *This, flo
 	(void)bottom;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_linear_easing(compositor1 *This,
@@ -435,7 +435,7 @@ static HRESULT WINAPI compositor_create_linear_easing(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_property_set(compositor1 *This,
@@ -444,7 +444,7 @@ static HRESULT WINAPI compositor_create_property_set(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_quaternion_animation(compositor1 *This,
@@ -453,7 +453,7 @@ static HRESULT WINAPI compositor_create_quaternion_animation(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_scalar_animation(compositor1 *This,
@@ -462,7 +462,7 @@ static HRESULT WINAPI compositor_create_scalar_animation(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_scoped_batch(compositor1 *This,
@@ -473,7 +473,7 @@ static HRESULT WINAPI compositor_create_scoped_batch(compositor1 *This,
 	(void)type;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* E_NOTIMPL: the GDI/wl_shm compositor has no GPU-surface import. The desktop
@@ -484,7 +484,7 @@ static HRESULT WINAPI compositor_create_surface_brush(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_surface_brush_with_surface(compositor1 *This,
@@ -495,7 +495,7 @@ static HRESULT WINAPI compositor_create_surface_brush_with_surface(compositor1 *
 	(void)surface;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_vector2_animation(compositor1 *This,
@@ -504,7 +504,7 @@ static HRESULT WINAPI compositor_create_vector2_animation(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_vector3_animation(compositor1 *This,
@@ -513,7 +513,7 @@ static HRESULT WINAPI compositor_create_vector3_animation(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_vector4_animation(compositor1 *This,
@@ -522,7 +522,7 @@ static HRESULT WINAPI compositor_create_vector4_animation(compositor1 *This,
 	(void)This;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_get_commit_batch(compositor1 *This,
@@ -533,7 +533,7 @@ static HRESULT WINAPI compositor_get_commit_batch(compositor1 *This,
 	(void)type;
 	if (result)
 		*result = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI compositor_create_color_brush(compositor1 *This, colorbrush1 **result);
@@ -764,7 +764,7 @@ static HRESULT WINAPI brush_object_get_dispatcher(composition_object1 *This, __x
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI brush_object_get_properties(composition_object1 *This,
@@ -773,7 +773,7 @@ static HRESULT WINAPI brush_object_get_properties(composition_object1 *This,
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI brush_object_start_animation(composition_object1 *This, HSTRING name,
@@ -782,14 +782,14 @@ static HRESULT WINAPI brush_object_start_animation(composition_object1 *This, HS
 	(void)This;
 	(void)name;
 	(void)animation;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI brush_object_stop_animation(composition_object1 *This, HSTRING name)
 {
 	(void)This;
 	(void)name;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const colorbrush1Vtbl brush_first_table = {
@@ -965,7 +965,7 @@ static HRESULT WINAPI visual_object_get_dispatcher(composition_object1 *This, __
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI visual_object_get_properties(composition_object1 *This,
@@ -974,7 +974,7 @@ static HRESULT WINAPI visual_object_get_properties(composition_object1 *This,
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI visual_object_start_animation(composition_object1 *This, HSTRING name,
@@ -983,14 +983,14 @@ static HRESULT WINAPI visual_object_start_animation(composition_object1 *This, H
 	(void)This;
 	(void)name;
 	(void)animation;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI visual_object_stop_animation(composition_object1 *This, HSTRING name)
 {
 	(void)This;
 	(void)name;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI visual_get_anchor(visual1 *This, vector2 *value)
@@ -1000,7 +1000,7 @@ static HRESULT WINAPI visual_get_anchor(visual1 *This, vector2 *value)
 		value->X = 0;
 		value->Y = 0;
 	}
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 IN_STUB(visual1, visual_put_anchor, vector2)
@@ -1011,7 +1011,7 @@ static HRESULT WINAPI visual_get_backface(visual1 *This,
 	(void)This;
 	if (value)
 		*value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 IN_STUB(visual1, visual_put_border, __x_ABI_CWindows_CUI_CComposition_CCompositionBorderMode)
 static HRESULT WINAPI visual_get_border(visual1 *This, __x_ABI_CWindows_CUI_CComposition_CCompositionBorderMode *value)
@@ -1019,7 +1019,7 @@ static HRESULT WINAPI visual_get_border(visual1 *This, __x_ABI_CWindows_CUI_CCom
 	(void)This;
 	if (value)
 		*value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 IN_STUB(visual1, visual_put_center, vector3)
 static HRESULT WINAPI visual_get_center(visual1 *This, vector3 *value)
@@ -1030,14 +1030,14 @@ static HRESULT WINAPI visual_get_center(visual1 *This, vector3 *value)
 		value->Y = 0;
 		value->Z = 0;
 	}
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI visual_get_clip(visual1 *This, __x_ABI_CWindows_CUI_CComposition_CICompositionClip **value)
 {
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 IN_STUB(visual1, visual_put_clip, __x_ABI_CWindows_CUI_CComposition_CICompositionClip *)
 IN_STUB(visual1, visual_put_composite, __x_ABI_CWindows_CUI_CComposition_CCompositionCompositeMode)
@@ -1046,7 +1046,7 @@ static HRESULT WINAPI visual_get_composite(visual1 *This, __x_ABI_CWindows_CUI_C
 	(void)This;
 	if (value)
 		*value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI visual_get_visible(visual1 *This, boolean *value)
@@ -1107,7 +1107,7 @@ static HRESULT WINAPI visual_get_orientation(visual1 *This, __x_ABI_CWindows_CFo
 		value->Z = 0;
 		value->W = 0;
 	}
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI visual_get_parent(visual1 *This, container1 **value)
@@ -1129,7 +1129,7 @@ static HRESULT WINAPI visual_get_rotation(visual1 *This, float *value)
 	(void)This;
 	if (value)
 		*value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 IN_STUB(visual1, visual_put_rotation_degrees, float)
 static HRESULT WINAPI visual_get_rotation_degrees(visual1 *This, float *value)
@@ -1137,7 +1137,7 @@ static HRESULT WINAPI visual_get_rotation_degrees(visual1 *This, float *value)
 	(void)This;
 	if (value)
 		*value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 IN_STUB(visual1, visual_put_rotation_axis, vector3)
 static HRESULT WINAPI visual_get_rotation_axis(visual1 *This, vector3 *value)
@@ -1148,7 +1148,7 @@ static HRESULT WINAPI visual_get_rotation_axis(visual1 *This, vector3 *value)
 		value->Y = 0;
 		value->Z = 0;
 	}
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 IN_STUB(visual1, visual_put_scale, vector3)
 static HRESULT WINAPI visual_get_scale(visual1 *This, vector3 *value)
@@ -1159,7 +1159,7 @@ static HRESULT WINAPI visual_get_scale(visual1 *This, vector3 *value)
 		value->Y = 1;
 		value->Z = 1;
 	}
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI visual_get_size(visual1 *This, vector2 *value)
@@ -1184,7 +1184,7 @@ static HRESULT WINAPI visual_get_transform(visual1 *This, __x_ABI_CWindows_CFoun
 	(void)This;
 	if (value)
 		ZeroMemory(value, sizeof *value);
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 #define VISUAL_TABLE(prefix, class_name_slot) \
@@ -1433,7 +1433,7 @@ static HRESULT WINAPI children_remove(struct children_vector *This, visual1 *chi
 			return S_OK;
 		}
 	}
-	return E_INVALIDARG;
+	{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:1436\n"); return E_INVALIDARG; }
 }
 
 static HRESULT WINAPI children_remove_all(struct children_vector *This)
@@ -1702,7 +1702,7 @@ static HRESULT WINAPI target_object_get_dispatcher(composition_object1 *This, __
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI target_object_get_properties(composition_object1 *This,
@@ -1711,7 +1711,7 @@ static HRESULT WINAPI target_object_get_properties(composition_object1 *This,
 	(void)This;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI target_object_start_animation(composition_object1 *This, HSTRING name,
@@ -1720,14 +1720,14 @@ static HRESULT WINAPI target_object_start_animation(composition_object1 *This, H
 	(void)This;
 	(void)name;
 	(void)animation;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI target_object_stop_animation(composition_object1 *This, HSTRING name)
 {
 	(void)This;
 	(void)name;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const target1Vtbl target_first_table = {
@@ -2271,7 +2271,7 @@ static HRESULT WINAPI compositor_create_target_for_current_view(compositor1 *Thi
 	if (FAILED(window_status))
 		return window_status;
 	if (!window)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2274\n"); return E_INVALIDARG; }
 	struct composition_target *target = composition_alloc(sizeof *target);
 	if (!target) {
 		window->lpVtbl->Release(window);
@@ -2434,7 +2434,7 @@ HRESULT raven_composition_sprite_text(visual1 *visual, const WCHAR *text, UINT32
 	COLORREF color, BYTE alpha)
 {
 	if (!visual)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2437\n"); return E_INVALIDARG; }
 	/* The reference may arrive through any part of the sprite object; the IVisual query answers with the part the
 	 * visual state hangs off, the way put_Root resolves its root. */
 	visual1 *part = NULL;
@@ -2444,7 +2444,7 @@ HRESULT raven_composition_sprite_text(visual1 *visual, const WCHAR *text, UINT32
 	struct composition_visual *self = visual_of_part(part, offsetof(struct composition_visual, first));
 	part->lpVtbl->Release(part);
 	if (self->kind != composition_sprite)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2447\n"); return E_INVALIDARG; }
 	struct composition_sprite *sprite = (struct composition_sprite *)
 		((char *)self - offsetof(struct composition_sprite, base));
 	WCHAR *copy = NULL;

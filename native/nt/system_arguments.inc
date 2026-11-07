@@ -643,7 +643,7 @@ static constexpr std::pair<std::string_view, uint8_t> kernel32_words[]{
 	{"NeedCurrentDirectoryForExePathA",1},{"NeedCurrentDirectoryForExePathW",1},{"NlsCheckPolicy",2},{"NlsConvertIntegerToString",5},{"NlsEventDataDescCreate",4},{"NlsGetCacheUpdateCount",0},
 	{"NlsUpdateLocale",2},{"NlsUpdateSystemLocale",2},{"NlsWriteEtwEvent",5},{"NormalizeString",5},{"NotifyMountMgr",3},{"NotifyUILanguageChange",5},
 	{"NtVdm64CreateProcessInternalW",12},{"OOBEComplete",1},{"OfferVirtualMemory",3},{"OpenConsoleW",4},{"OpenConsoleWStub",4},{"OpenEventA",3},
-	{"OpenEventW",3},{"OpenFile",3},{"OpenFileById",6},{"OpenFileMappingA",3},{"OpenFileMappingW",3},{"OpenJobObjectA",3},
+	{"OpenEventW",3},{"OpenFile",3},{"OpenFileById",6},{"OpenFileMappingA",3},{"OpenFileMappingFromApp",3},{"OpenFileMappingW",3},{"OpenJobObjectA",3},
 	{"OpenJobObjectW",3},{"OpenMutexA",3},{"OpenMutexW",3},{"OpenPackageInfoByFullName",3},{"OpenPrivateNamespaceA",2},{"OpenPrivateNamespaceW",2},
 	{"OpenProcess",3},{"OpenProfileUserMapping",0},{"OpenSemaphoreA",3},{"OpenSemaphoreW",3},{"OpenState",0},{"OpenStateExplicit",2},
 	{"OpenThread",3},{"OpenWaitableTimerA",3},{"OpenWaitableTimerW",3},{"OutputDebugStringA",1},{"OutputDebugStringW",1},{"PackageFamilyNameFromFullName",3},

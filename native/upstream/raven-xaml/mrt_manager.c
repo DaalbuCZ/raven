@@ -782,15 +782,23 @@ static HRESULT pri_lookup_blob(const WCHAR *name, UINT32 name_length, const BYTE
 		if (CompareStringOrdinal(name, (int)name_length, path, (int)path_length, TRUE) != CSTR_EQUAL) continue;
 		if (!candidate_range(i, &first, &count) || !count) return E_BOUNDS;
 		const BYTE *candidate = active_pri->candidates + first * 8;
-		if (candidate[0] != 1) return E_NOTIMPL;
+		if (candidate[0] != 1) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 		UINT32 item = read_u16(candidate, 4), section = read_u16(candidate, 6), index;
 		for (index = 0; index < active_pri->data_count; ++index)
 			if (active_pri->data_section_index[index] == section) break;
 		if (index == active_pri->data_count) return E_BOUNDS;
 		struct pri_data_section *items = &active_pri->data[index];
-		if (item < items->string_count || item - items->string_count >= items->blob_count) return E_INVALIDARG;
-		item -= items->string_count;
-		UINT32 offset = read_u32(items->blob_table, item * 8), bytes = read_u32(items->blob_table, item * 8 + 4);
+		UINT32 offset, bytes;
+		/* Both item tables store byte ranges; small binary resources can use the compact table too. */
+		if (item < items->string_count) {
+			offset = read_u16(items->table, item * 4);
+			bytes = read_u16(items->table, item * 4 + 2);
+		} else {
+			item -= items->string_count;
+			if (item >= items->blob_count) return E_INVALIDARG;
+			offset = read_u32(items->blob_table, item * 8);
+			bytes = read_u32(items->blob_table, item * 8 + 4);
+		}
 		if (offset > items->data_bytes || bytes > items->data_bytes - offset) return E_INVALIDARG;
 		*data = items->data + offset; *length = bytes;
 		return S_OK;
@@ -1186,7 +1194,7 @@ static HRESULT WINAPI candidate_value_as_file_async(candidate_i *iface, uint64_t
 	if (!out)
 		return E_POINTER;
 	*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI candidate_qualifier_value(candidate_i *iface, uint64_t name, uint64_t out)
@@ -1205,7 +1213,7 @@ static HRESULT WINAPI candidate2_get_value_as_stream_async(candidate2_i *iface, 
 	if (!out)
 		return E_POINTER;
 	*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI candidate3_get_kind(candidate3_i *iface, uint64_t out)
@@ -1507,7 +1515,7 @@ static HRESULT WINAPI named_uri(named_i *iface, uint64_t out)
 	if (!out)
 		return E_POINTER;
 	*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI named_candidates(named_i *iface, uint64_t out)
@@ -1666,7 +1674,7 @@ static HRESULT WINAPI map_uri(map_i *iface, uint64_t out)
 	if (!out)
 		return E_POINTER;
 	*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* The requested name resolves against the map's prefix: the full path is prefix + "/" + name, matched against the
@@ -1916,7 +1924,7 @@ static HRESULT WINAPI manager_all_maps(manager_i *iface, uint64_t out)
 	if (!out)
 		return E_POINTER;
 	*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* The default context is the ResourceContext class this component implements: its view-independent context carries the
@@ -1952,14 +1960,14 @@ static HRESULT WINAPI manager_load_pri_files(manager_i *iface, uint64_t files)
 {
 	(void)iface;
 	(void)files;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI manager_unload_pri_files(manager_i *iface, uint64_t files)
 {
 	(void)iface;
 	(void)files;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI manager2_all_named(manager2_i *iface, uint64_t a1, uint64_t a2, uint64_t a3)
@@ -1970,7 +1978,7 @@ static HRESULT WINAPI manager2_all_named(manager2_i *iface, uint64_t a1, uint64_
 	if (!a3)
 		return E_POINTER;
 	*(void **)(uintptr_t)a3 = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI manager2_all_subtrees(manager2_i *iface, uint64_t a1, uint64_t a2, uint64_t a3)
@@ -1981,7 +1989,7 @@ static HRESULT WINAPI manager2_all_subtrees(manager2_i *iface, uint64_t a1, uint
 	if (!a3)
 		return E_POINTER;
 	*(void **)(uintptr_t)a3 = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 /* The class factory and its statics */

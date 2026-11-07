@@ -443,6 +443,41 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		} catch (const ApiFault &) {
 			std::fprintf(stderr, "raven:   fail fast record unreadable\n");
 		}
+		// Diagnosis aid: tolerate the fail fast and let the caller run on, to see the next divergence the
+		// program meets past a wall the real runtime would have died on. Windows never returns from this
+		// call, so the tolerated state is undefined and only as honest as what it prints.
+		if (std::getenv("RAVEN_TOLERATE_FAILFAST")) {
+			call.ret(0);
+			return;
+		}
+		// Diagnosis aid: the calling thread's stack, its pointer-like values resolved to modules — the
+		// managed call chain that led here, which names the failing interop round's callers.
+		if (std::getenv("RAVEN_DUMP_FAILFAST_STACK")) {
+			try {
+				const auto registers = call.process.context().registers;
+				std::fprintf(stderr, "raven: fail-fast stack scan (rsp %llx):", static_cast<unsigned long long>(registers.rsp));
+				// The stack read stops at the first unmapped page: a walk page by page instead of one big read.
+				for (uint64_t page = registers.rsp & ~0xfffULL; page < (registers.rsp & ~0xfffULL) + 0x4000; page += 0x1000) {
+					std::vector<uint8_t> bytes;
+					try {
+						bytes = call.process.read_memory(page, 0x1000);
+					} catch (const std::exception &) {
+						break;
+					}
+					for (size_t i = (page == (registers.rsp & ~0xfffULL) ? registers.rsp & 0xfff : 0); i + 8 <= bytes.size(); i += 8) {
+						uint64_t value = 0;
+						std::memcpy(&value, bytes.data() + i, 8);
+						if (value < 0x10000)
+							continue;
+						std::fprintf(stderr, "\nraven:   %llx %llx", static_cast<unsigned long long>(page + i),
+							static_cast<unsigned long long>(value));
+					}
+				}
+				std::fprintf(stderr, "\n");
+			} catch (const std::exception &) {
+				std::fprintf(stderr, "raven: fail-fast stack unreadable\n");
+			}
+		}
 		call.process.abandon_call();
 		throw ProcessExit{code, 0, true};
 	});

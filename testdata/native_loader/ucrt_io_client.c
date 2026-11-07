@@ -37,6 +37,18 @@ extern int strcmp(const char *, const char *);
 extern char *_mktemp(char *);
 extern int *_errno(void);
 
+static int invalid_calls;
+static void __cdecl invalid_handler(const wchar_t *expression, const wchar_t *function, const wchar_t *file, unsigned line, uintptr_t reserved)
+{ (void)expression; (void)function; (void)file; (void)line; (void)reserved; ++invalid_calls; }
+
+struct invalid_handler_api { void *(__cdecl *get)(void); void *(__cdecl *set)(void *); };
+static DWORD WINAPI check_invalid_handler_thread(void *opaque)
+{
+	struct invalid_handler_api *api = opaque;
+	if (api->get() || api->set((void *)invalid_handler) || api->get() != (void *)invalid_handler) return 1;
+	return api->set(NULL) != (void *)invalid_handler;
+}
+
 static int temp_names(void)
 {
 	char names[26][32], exhausted[] = "crt-mktemp-XXXXXX", invalid[] = "crt-mktemp-XXXXX";
@@ -153,6 +165,17 @@ static int office_helpers(void)
 	FIND(fmax, double (__cdecl *)(double, double))
 	FIND(nextafter, double (__cdecl *)(double, double))
 	FIND(nextafterf, float (__cdecl *)(float, float))
+	FIND(nexttoward, double (__cdecl *)(double, double))
+	FIND(nexttowardf, float (__cdecl *)(float, double))
+	FIND(remainder, double (__cdecl *)(double, double))
+	FIND(erf, double (__cdecl *)(double))
+	FIND(_strtof_l, float (__cdecl *)(const char *, char **, void *))
+	FIND(c32rtomb, size_t (__cdecl *)(char *, unsigned int, void *))
+	FIND(_strrev, char *(__cdecl *)(char *))
+	FIND(_get_FMA3_enable, int (__cdecl *)(void))
+	FIND(_set_thread_local_invalid_parameter_handler, void *(__cdecl *)(void *))
+	FIND(_get_thread_local_invalid_parameter_handler, void *(__cdecl *)(void))
+	FIND(_invalid_parameter_noinfo, void (__cdecl *)(void))
 	FIND(cbrt, double (__cdecl *)(double))
 	FIND(_ecvt_s, int (__cdecl *)(char *, size_t, double, int, int *, int *))
 	FIND(_gcvt_s, int (__cdecl *)(char *, size_t, double, int))
@@ -171,6 +194,26 @@ static int office_helpers(void)
 #undef FIND
 	if (hypot(3, 4) != 5 || fmax(1, 2) != 2 || fmax(0.0 / 0.0, 2) != 2) return 2;
 	if (nextafter(1.0, 2.0) != 1.0 + 2.220446049250313e-16 || nextafter(0.0, -1.0) >= 0 || nextafterf(1.0f, 0.0f) >= 1.0f) return 3;
+	if (nexttoward(1.0, 2.0) != nextafter(1.0, 2.0) || nexttowardf(1.0f, 1.0000000000000002) <= 1.0f ||
+		remainder(7.0, 2.0) != -1.0 || remainder(5.0, 2.0) != 1.0 || remainder(-7.0, 2.0) != 1.0) return 32;
+	if (erf(0.0) != 0.0 || erf(1.0) < 0.8427007929497 || erf(1.0) > 0.8427007929502 ||
+		erf(2.0) < 0.9953222650188 || erf(2.0) > 0.9953222650191 || erf(-1.0) != -erf(1.0) || erf(6.0) != 1.0) return 36;
+	{
+		char *end = NULL, encoded[2] = {0};
+		if (_strtof_l("12.5x", &end, NULL) != 12.5f || !end || *end != 'x' ||
+			c32rtomb(encoded, 'A', NULL) != 1 || encoded[0] != 'A' || c32rtomb(encoded, 0x10000, NULL) != (size_t)-1) return 33;
+		char reversed[] = "abc";
+		if (_strrev(reversed) != reversed || lstrcmpA(reversed, "cba") || _get_FMA3_enable() != 0 ||
+			_set_thread_local_invalid_parameter_handler((void *)invalid_handler) || _get_thread_local_invalid_parameter_handler() != (void *)invalid_handler) return 34;
+		_invalid_parameter_noinfo();
+		struct invalid_handler_api api = { _get_thread_local_invalid_parameter_handler, _set_thread_local_invalid_parameter_handler };
+		HANDLE thread = CreateThread(NULL, 0, check_invalid_handler_thread, &api, 0, NULL);
+		DWORD code = 1;
+		if (!thread || WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 || !GetExitCodeThread(thread, &code) || code ||
+			_get_thread_local_invalid_parameter_handler() != (void *)invalid_handler || invalid_calls != 1 ||
+			_set_thread_local_invalid_parameter_handler(NULL) != (void *)invalid_handler) return 35;
+		CloseHandle(thread);
+	}
 	if (cbrt(27.0) != 3.0 || cbrt(-8.0) != -2.0) return 4;
 	char text[32];
 	int point, sign;

@@ -33,6 +33,7 @@ struct raven_desktop_window {
 	boolean message_handled;
 	LONG error;
 	WCHAR high_surrogate;
+	int min_width, min_height;
 	BOOL pointer_inside;
 	struct raven_mouse_sample mouse;
 	struct raven_mouse_sample history[POINTER_HISTORY_CAP];
@@ -661,6 +662,16 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
 	BOOL handled = FALSE;
 	LRESULT result = 0;
 	switch (message) {
+	case WM_WINDOWPOSCHANGING: {
+		WINDOWPOS *position = (WINDOWPOS *)lparam;
+		if (!(position->flags & SWP_NOSIZE) && (window->min_width || window->min_height)) {
+			RECT min = {0, 0, window->min_width, window->min_height};
+			AdjustWindowRectEx(&min, (DWORD)GetWindowLongW(hwnd, GWL_STYLE), FALSE, (DWORD)GetWindowLongW(hwnd, GWL_EXSTYLE));
+			if (position->cx < min.right - min.left) position->cx = min.right - min.left;
+			if (position->cy < min.bottom - min.top) position->cy = min.bottom - min.top;
+		}
+		break;
+	}
 	case WM_TIMER: {
 		BOOL recognized = FALSE;
 		record_error(window, raven_window_timer(window->owner, (UINT_PTR)wparam, &recognized));
@@ -766,6 +777,29 @@ static HRESULT access_window(struct raven_desktop_window *window)
 {
 	if (window->thread != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
 	return window->hwnd && !window->closing ? S_OK : RO_E_CLOSED;
+}
+HRESULT raven_desktop_minimum_size(struct raven_desktop_window *window, Size size)
+{
+	HRESULT status = access_window(window);
+	if (FAILED(status)) return status;
+	if (size.Width != size.Width || size.Height != size.Height) { OutputDebugStringA("raven-xaml: size not finite\n"); return E_INVALIDARG; }
+	if (!size.Width && !size.Height) { window->min_width = window->min_height = 0; return S_OK; }
+	if (size.Width < 192) size.Width = 192; else if (size.Width > 500) size.Width = 500;
+	if (size.Height < 48) size.Height = 48; else if (size.Height > 500) size.Height = 500;
+	UINT dpi = GetDpiForWindow(window->hwnd);
+	float scale = dpi ? (float)dpi / 96 : 1;
+	window->min_width = (int)(size.Width * scale + 0.999f);
+	window->min_height = (int)(size.Height * scale + 0.999f);
+	RECT current;
+	if (!GetClientRect(window->hwnd, &current)) return last_error();
+	if (current.right < window->min_width || current.bottom < window->min_height) {
+		RECT outer = {0, 0, current.right, current.bottom};
+		if (outer.right < window->min_width) outer.right = window->min_width;
+		if (outer.bottom < window->min_height) outer.bottom = window->min_height;
+		if (!AdjustWindowRectEx(&outer, (DWORD)GetWindowLongW(window->hwnd,GWL_STYLE), FALSE, (DWORD)GetWindowLongW(window->hwnd,GWL_EXSTYLE)) ||
+			!SetWindowPos(window->hwnd,NULL,0,0,outer.right-outer.left,outer.bottom-outer.top,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE)) return last_error();
+	}
+	return S_OK;
 }
 HRESULT raven_desktop_handle(struct raven_desktop_window *window, HWND *out)
 {

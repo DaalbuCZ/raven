@@ -15,6 +15,7 @@
 #include <winstring.h>
 #include <activation.h>
 #include <windows.storage.h>
+#include <windows.storage.streams.h>
 #include "windows_storage.h"
 
 typedef __x_ABI_CWindows_CStorage_CIApplicationDataStatics appdata_statics_i;
@@ -24,6 +25,8 @@ typedef __x_ABI_CWindows_CStorage_CIStorageFolder folder_i;
 typedef __x_ABI_CWindows_CStorage_CIStorageItem item_i;
 typedef __x_ABI_CWindows_CStorage_CIStorageFile file_i;
 typedef __FIAsyncOperation_1_Windows__CStorage__CStorageFile file_op_i;
+struct file_statics_table { void *base[6]; HRESULT (WINAPI *get_path)(void *,HSTRING,file_op_i **); };
+struct file_statics { const struct file_statics_table *lpVtbl; };
 typedef __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStorageFile file_done_i;
 typedef __FIAsyncOperation_1_HSTRING text_op_i;
 typedef __x_ABI_CWindows_CFoundation_CIAsyncAction action_i;
@@ -225,6 +228,10 @@ int raven_entry(void)
 	SIZE_T dir_keep;
 	HMODULE component;
 	HRESULT (WINAPI *can_unload)(void);
+	{
+		HMODULE (WINAPI *load_packaged)(const WCHAR *, DWORD) = (void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadPackagedLibrary");
+		if (!load_packaged || load_packaged(L"anything.dll", 0) || GetLastError() != 15700) return 83;
+	}
 	if (!RoInitialize || !RoGetActivationFactory) return 20;
 	if (FAILED(RoInitialize(1))) return 1;
 	lstrcpyW(fixture_file_name, L"raven-storage-fixture-");
@@ -248,6 +255,27 @@ int raven_entry(void)
 		if (current->lpVtbl->GetRuntimeClassName(current, &class_name) != S_OK ||
 			!same_text(class_name, L"Windows.Storage.ApplicationData")) return 6;
 		WindowsDeleteString(class_name);
+	}
+	{
+		__x_ABI_CWindows_CStorage_CIApplicationData2 *data2 = NULL;
+		folder_i *cache = NULL, *again = NULL;
+		item_i *cache_item = NULL;
+		IUnknown *identity = NULL;
+		HSTRING cache_path = NULL;
+		if (current->lpVtbl->QueryInterface(current, &IID___x_ABI_CWindows_CStorage_CIApplicationData2, (void **)&data2) != S_OK || !data2 ||
+			data2->lpVtbl->QueryInterface(data2, &IID_IUnknown, (void **)&identity) != S_OK || identity != (IUnknown *)current ||
+			data2->lpVtbl->get_LocalCacheFolder(data2, &cache) != S_OK || !cache ||
+			data2->lpVtbl->get_LocalCacheFolder(data2, &again) != S_OK || again != cache ||
+			cache->lpVtbl->QueryInterface(cache, &IID___x_ABI_CWindows_CStorage_CIStorageItem, (void **)&cache_item) != S_OK || !cache_item ||
+			cache_item->lpVtbl->get_Path(cache_item, &cache_path) != S_OK || !text_ends_with(cache_path, L"\\LocalCache")) return 81;
+		const WCHAR *cache_text = WindowsGetStringRawBuffer(cache_path, NULL);
+		if (!(GetFileAttributesW(cache_text) & FILE_ATTRIBUTE_DIRECTORY) || GetFileAttributesW(cache_text) == INVALID_FILE_ATTRIBUTES) return 82;
+		WindowsDeleteString(cache_path);
+		cache_item->lpVtbl->Release(cache_item);
+		again->lpVtbl->Release(again);
+		cache->lpVtbl->Release(cache);
+		identity->lpVtbl->Release(identity);
+		data2->lpVtbl->Release(data2);
 	}
 	/* the LocalFolder is the LocalState directory beside this executable, created on demand; Name and Path answer
 	   through the IStorageItem the folder also is */
@@ -315,6 +343,28 @@ int raven_entry(void)
 	WindowsDeleteString(text);
 	text = NULL;
 	if (!file_exists(path)) return 25;
+	{
+		__x_ABI_CWindows_CStorage_CStreams_CIInputStreamReference *reference=NULL;
+		__FIAsyncOperation_1_Windows__CStorage__CStreams__CIInputStream *opening=NULL;
+		__x_ABI_CWindows_CStorage_CStreams_CIInputStream *stream=NULL;
+		if (file->lpVtbl->QueryInterface(file,&IID___x_ABI_CWindows_CStorage_CStreams_CIInputStreamReference,(void **)&reference)!=S_OK || !reference ||
+			reference->lpVtbl->OpenSequentialReadAsync(reference,&opening)!=S_OK || !opening ||
+			opening->lpVtbl->GetResults(opening,&stream)!=S_OK || !stream) return 92;
+		stream->lpVtbl->Release(stream); opening->lpVtbl->Release(opening); reference->lpVtbl->Release(reference);
+	}
+	{
+		static const IID iid={0x5984c710,0xdaf2,0x43c8,{0x8b,0xb4,0xa4,0xd3,0xea,0xcf,0xd0,0x3f}};
+		static const WCHAR class_name[]=L"Windows.Storage.StorageFile";
+		struct file_statics *statics=NULL; HSTRING key=NULL, absolute=NULL; file_op_i *lookup=NULL; file_i *found=NULL;
+		if (WindowsCreateString(class_name,ARRAYSIZE(class_name)-1,&key)!=S_OK ||
+			RoGetActivationFactory(key,&iid,(void **)&statics)!=S_OK || !statics ||
+			WindowsCreateString(path,lstrlenW(path),&absolute)!=S_OK ||
+			statics->lpVtbl->get_path(statics,absolute,&lookup)!=S_OK || !lookup ||
+			lookup->lpVtbl->GetResults(lookup,&found)!=S_OK || !found) return 91;
+		found->lpVtbl->Release(found); lookup->lpVtbl->Release(lookup);
+		((IUnknown *)statics)->lpVtbl->Release((IUnknown *)statics);
+		WindowsDeleteString(absolute); WindowsDeleteString(key);
+	}
 	/* the same name under FailIfExists: the call succeeds, the operation completes with the documented error */
 	if (folder->lpVtbl->CreateFileAsync(folder, name, CreationCollisionOption_FailIfExists, &collide) != S_OK ||
 		!collide) return 26;

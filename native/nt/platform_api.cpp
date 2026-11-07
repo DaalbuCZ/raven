@@ -1191,14 +1191,46 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		record.exception = call[2];
 		if (std::getenv("RAVEN_TRACE_EXCEPTIONS")) {
 			std::fprintf(stderr, "raven: originated language error %08x exception %llx message \"", error,
-				static_cast<unsigned long long>(record.exception));
-			for (char16_t character : record.message) {
+				static_cast<unsigned long long>(record.exception));			for (char16_t character : record.message) {
 				if (character >= 0x20 && character < 0x7f && character != u'\\' && character != u'\"')
 					std::fputc(static_cast<char>(character), stderr);
 				else
 					std::fprintf(stderr, "\\u%04x", static_cast<unsigned>(character));
 			}
 			std::fprintf(stderr, "\"\n");
+			// Diagnosis aid: dump the managed exception object's first fields and chase pointer-like values
+			// one level deep — the stack-trace array holds code addresses that resolve to the failing call's
+			// method, which the missing-marshalling diagnosis needs.
+			if (record.exception) {
+				try {
+					const auto bytes = call.read(record.exception, 0x80);
+					std::fprintf(stderr, "raven: exception object %llx:", static_cast<unsigned long long>(record.exception));
+					for (size_t i = 0; i < bytes.size(); i += 8) {
+						uint64_t value = 0;
+						std::memcpy(&value, bytes.data() + i, 8);
+						std::fprintf(stderr, " %llx", static_cast<unsigned long long>(value));
+					}
+					std::fprintf(stderr, "\n");
+					for (size_t i = 8; i < bytes.size(); i += 8) {
+						uint64_t value = 0;
+						std::memcpy(&value, bytes.data() + i, 8);
+						if (value < 0x10000)
+							continue;
+						try {
+							const auto inner = call.read(value, 0x30);
+							std::fprintf(stderr, "raven:   [%02zx] -> %llx:", i, static_cast<unsigned long long>(value));
+							for (size_t j = 0; j < inner.size(); j += 8) {
+								uint64_t word = 0;
+								std::memcpy(&word, inner.data() + j, 8);
+								std::fprintf(stderr, " %llx", static_cast<unsigned long long>(word));
+							}
+							std::fprintf(stderr, "\n");
+						} catch (const std::exception &) {
+						}
+					}
+				} catch (const std::exception &) {
+				}
+			}
 		}
 		call.ret(1);
 	});

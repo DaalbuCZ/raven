@@ -874,6 +874,27 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("FindNLSString", 7, [find_string](ApiCall &call) { find_string(call, call.u32(1), 2, 4, call[6]); });
 	registry.add("FindNLSStringEx", 10, [find_string](ApiCall &call) { find_string(call, call.u32(1), 2, 4, call[6]); });
+	registry.add("FindStringOrdinal", 6, [](ApiCall &call) {
+		const uint32_t flags = call.u32(0);
+		if (!call[1] || !call[3] || call.i32(2) < -1 || call.i32(4) < -1 ||
+			(flags != 0x100000U && flags != 0x200000U && flags != 0x400000U && flags != 0x800000U)) {
+			call.fail(87, uint64_t(int64_t(-1)));
+			return;
+		}
+		auto source = counted_wide(call, call[1], call.i32(2));
+		auto value = counted_wide(call, call[3], call.i32(4));
+		if (call.u32(5)) {
+			for (auto &character : source) character = upper_case(character);
+			for (auto &character : value) character = upper_case(character);
+		}
+		size_t position = std::u16string::npos;
+		if (flags == 0x100000U) { if (source.starts_with(value)) position = 0; }
+		else if (flags == 0x200000U) { if (source.ends_with(value)) position = source.size() - value.size(); }
+		else if (flags == 0x800000U) position = source.rfind(value);
+		else position = source.find(value);
+		call.set_last_error(0);
+		call.ret(position == std::u16string::npos ? uint64_t(int64_t(-1)) : position);
+	});
 	// Code unit by code unit, optionally after upper-casing both, as file systems and the registry compare names.
 	registry.add("CompareStringOrdinal", 5, [](ApiCall &call) {
 		if (!call[0] || !call[2]) {
@@ -1145,7 +1166,21 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetSystemDefaultLangID", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("GetUserDefaultUILanguage", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("GetSystemDefaultUILanguage", 0, [](ApiCall &call) { call.ret(0x409); });
-	registry.add("GetThreadUILanguage", 0, [](ApiCall &call) { call.ret(0x409); });
+	auto ui_languages = std::make_shared<std::map<uint32_t, uint16_t>>();
+	registry.add("GetThreadUILanguage", 0, [&context, ui_languages](ApiCall &call) {
+		const auto found = ui_languages->find(context.threads.current_id());
+		call.ret(found == ui_languages->end() ? 0x409 : found->second);
+	});
+	registry.add("SetThreadUILanguage", 1, [&context, ui_languages](ApiCall &call) {
+		const auto language = uint16_t(call.u32(0));
+		// shortcut: zero selects the console's English fallback without filtering the preferred-language list.
+		if (!language) { call.ret(0x409); return; }
+		const bool known = std::any_of(std::begin(known_locales), std::end(known_locales),
+			[&](const auto &entry) { return entry.second == language; });
+		if (!known) { call.fail(87); return; }
+		(*ui_languages)[context.threads.current_id()] = language;
+		call.ret(language);
+	});
 	registry.add("GetThreadLocale", 0, [](ApiCall &call) { call.ret(0x409); });
 	registry.add("SetThreadLocale", 1, [](ApiCall &call) { call.ret(1); });
 	// The default locales stand for the user's and the system's, both US English here; a language without a sublanguage takes its default.

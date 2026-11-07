@@ -84,19 +84,19 @@ static HRESULT WINAPI uri_fragment(uri_i *iface, HSTRING *out)
 { struct uri *s = (void *)iface; return uri_slice(s, s->query_end, s->length, out); }
 static HRESULT WINAPI uri_notimpl_string(uri_i *iface, HSTRING *out)
 { if (!out) return E_POINTER;
-	*out = NULL; return E_NOTIMPL; }
+	*out = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI uri_notimpl_decoder(uri_i *iface, __x_ABI_CWindows_CFoundation_CIWwwFormUrlDecoderRuntimeClass **out)
 { if (!out) return E_POINTER;
-	*out = NULL; return E_NOTIMPL; }
+	*out = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI uri_notimpl_port(uri_i *iface, INT32 *out)
-{ if (!out) return E_POINTER; return E_NOTIMPL; }
+{ if (!out) return E_POINTER; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI uri_notimpl_bool(uri_i *iface, boolean *out)
-{ if (!out) return E_POINTER; return E_NOTIMPL; }
+{ if (!out) return E_POINTER; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI uri_notimpl_equal(uri_i *iface, uri_i *other, boolean *out)
-{ if (!out || !other) return E_POINTER; return E_NOTIMPL; }
+{ if (!out || !other) return E_POINTER; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI uri_notimpl_combine(uri_i *iface, HSTRING relative, uri_i **out)
 { if (!out) return E_POINTER;
-	*out = NULL; return E_NOTIMPL; }
+	*out = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static const __x_ABI_CWindows_CFoundation_CIUriRuntimeClassVtbl uri_table = {
 	uri_query, uri_addref, uri_release, uri_iids, uri_name, uri_trust,
 	uri_absolute, uri_absolute, uri_notimpl_string, uri_notimpl_string, uri_fragment,
@@ -121,11 +121,11 @@ static HRESULT create_uri(HSTRING input, uri_i **out)
 	struct uri *self;
 	if (!out) return E_POINTER;
 	*out = NULL;
-	if (!length || !((text[0] >= L'a' && text[0] <= L'z') || (text[0] >= L'A' && text[0] <= L'Z'))) return E_INVALIDARG;
+	if (!length || !((text[0] >= L'a' && text[0] <= L'z') || (text[0] >= L'A' && text[0] <= L'Z'))) { OutputDebugStringA("raven-xaml: uri scheme refused\n"); return E_INVALIDARG; }
 	while (scheme < length && ((text[scheme] >= L'a' && text[scheme] <= L'z') ||
 		(text[scheme] >= L'0' && text[scheme] <= L'9') || text[scheme] == L'+' || text[scheme] == L'-' || text[scheme] == L'.')) ++scheme;
 	if (scheme < length && text[scheme] >= L'A' && text[scheme] <= L'Z') return 0x80004011; /* PROBE */
-	if (scheme >= length || text[scheme] != L':') return E_INVALIDARG;
+	if (scheme >= length || text[scheme] != L':') { OutputDebugStringA("raven-xaml: uri colon refused\n"); return E_INVALIDARG; }
 	if (scheme + 2 >= length || text[scheme+1] != L'/' || text[scheme+2] != L'/') return 0x80004012; /* PROBE */
 	authority = scheme + 3; path = authority;
 	while (path < length && text[path] != L'/' && text[path] != L'?' && text[path] != L'#') ++path;
@@ -168,7 +168,7 @@ static ULONG WINAPI activation_release(IActivationFactory *p) { return Interlock
 static HRESULT WINAPI activation_iids(IActivationFactory *p, ULONG *n, IID **i) { if (!n || !i) return E_POINTER; *n=0; *i=NULL; return S_OK; }
 static HRESULT WINAPI activation_name(IActivationFactory *p, HSTRING *n) { return uri_name(NULL,n); }
 static HRESULT WINAPI activation_trust(IActivationFactory *p, TrustLevel *t) { return uri_trust(NULL,t); }
-static HRESULT WINAPI activation_create(IActivationFactory *p, IInspectable **out) { if (!out) return E_POINTER; *out=NULL; return E_NOTIMPL; }
+static HRESULT WINAPI activation_create(IActivationFactory *p, IInspectable **out) { if (!out) return E_POINTER; *out=NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI factory_part_query(uri_factory_i *p, REFIID i, void **out) { return factory_query(i,out); }
 static ULONG WINAPI factory_addref(uri_factory_i *p) { return activation_addref(NULL); }
 static ULONG WINAPI factory_release(uri_factory_i *p) { return activation_release(NULL); }
@@ -177,7 +177,7 @@ static HRESULT WINAPI factory_name(uri_factory_i *p, HSTRING *n) { return uri_na
 static HRESULT WINAPI factory_trust(uri_factory_i *p, TrustLevel *t) { return uri_trust(NULL,t); }
 static HRESULT WINAPI factory_create(uri_factory_i *p, HSTRING value, uri_i **out) { return create_uri(value,out); }
 static HRESULT WINAPI factory_relative(uri_factory_i *p, HSTRING base, HSTRING relative, uri_i **out)
-{ if (!out) return E_POINTER; *out=NULL; return E_NOTIMPL; }
+{ if (!out) return E_POINTER; *out=NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static const IActivationFactoryVtbl activation_table = {
 	activation_query, activation_addref, activation_release, activation_iids, activation_name, activation_trust, activation_create
 };

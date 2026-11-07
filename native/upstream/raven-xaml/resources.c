@@ -14,6 +14,7 @@
 #include "xaml_internal.h"
 #include <windows.foundation.h>
 #include <weakreference.h>
+#include <windows.system.userprofile.h>
 #include "windows_applicationmodel_resources.h"
 
 typedef __x_ABI_CWindows_CApplicationModel_CResources_CCore_CIResourceContext resource_context;
@@ -75,12 +76,12 @@ static int equal_iid(REFIID left, const IID *right)
 		left->Data4[6] == right->Data4[6] && left->Data4[7] == right->Data4[7];
 }
 
-#define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) { (void)This; (void)a1;return E_NOTIMPL; }
+#define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) { (void)This; (void)a1;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB2(iface, name) \
-	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) { (void)This; (void)a1; (void)a2;return E_NOTIMPL; }
+	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) { (void)This; (void)a1; (void)a2;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB3(iface, name) \
 	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2, uint64_t a3) \
-	{ (void)This; (void)a1; (void)a2; (void)a3;return E_NOTIMPL; }
+	{ (void)This; (void)a1; (void)a2; (void)a3;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 /* Weak references: the helper lifted into xaml_internal.h, implemented here. The source part's IUnknown and lifetime are the
  * owner's; the reference it hands out resolves through the owner's own QueryInterface while the owner lives and answers a null
@@ -185,7 +186,7 @@ static HRESULT WINAPI weak_source_name(IWeakReferenceSource *iface, HSTRING *nam
 	if (!name)
 		return E_POINTER;
 	/* The source is a part of the owner; the owner's own class name answers GetRuntimeClassName through its QueryInterface. */
-	return E_NOTIMPL; /* not observed: callers read the class name from the object, not from this part */
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } /* not observed: callers read the class name from the object, not from this part */
 }
 
 static HRESULT WINAPI weak_source_trust(IWeakReferenceSource *iface, TrustLevel *level)
@@ -203,7 +204,7 @@ static HRESULT WINAPI weak_source_get_weak_reference(IWeakReferenceSource *iface
 		return E_POINTER;
 	*out = NULL;
 	if (!target || !target->owner)
-		return E_NOTIMPL; /* the owner disconnected: nothing left to reference weakly */
+		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } /* the owner disconnected: nothing left to reference weakly */
 	reference = (struct raven_weak_ref *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *reference);
 	if (!reference)
 		return E_OUTOFMEMORY;
@@ -269,7 +270,7 @@ static HRESULT WINAPI weak_ref_name(IWeakReference *iface, HSTRING *name)
 	(void)iface;
 	if (!name)
 		return E_POINTER;
-	return E_NOTIMPL; /* not observed: see weak_source_name */
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } /* not observed: see weak_source_name */
 }
 
 static HRESULT WINAPI weak_ref_trust(IWeakReference *iface, TrustLevel *level)
@@ -517,9 +518,9 @@ static HRESULT WINAPI lang_trust(__FIVectorView_1_HSTRING *iface, TrustLevel *le
 	return inspectable_trust(level);
 }
 
-static HRESULT language_read(HSTRING *out)
+static HRESULT language_read(struct language_list *list, HSTRING *out)
 {
-	const WCHAR *text = language_list_value();
+	const WCHAR *text = list->language ? WindowsGetStringRawBuffer(list->language, NULL) : language_list_value();
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
@@ -533,7 +534,7 @@ static HRESULT WINAPI lang_get_at(__FIVectorView_1_HSTRING *iface, UINT32 index,
 		return E_POINTER;
 	if (index)
 		return 0x8000000bU; /* E_BOUNDS: the list holds exactly the default UI language */
-	return language_read(out);
+	return language_read((struct language_list *)iface, out);
 }
 
 static HRESULT WINAPI lang_size(__FIVectorView_1_HSTRING *iface, UINT32 *size)
@@ -555,7 +556,7 @@ static HRESULT WINAPI lang_index_of(__FIVectorView_1_HSTRING *iface, HSTRING val
 	*found = FALSE;
 	*index = 0;
 	if (text) {
-		const WCHAR *own = language_list_value();
+		const WCHAR *own = ((struct language_list *)iface)->language ? WindowsGetStringRawBuffer(((struct language_list *)iface)->language, NULL) : language_list_value();
 		if (CompareStringOrdinal(text, (int)other_length, own, -1, FALSE) == CSTR_EQUAL)
 			*found = TRUE;
 	}
@@ -573,7 +574,7 @@ static HRESULT WINAPI lang_get_many(__FIVectorView_1_HSTRING *iface, UINT32 star
 		return 0x8000000bU; /* E_BOUNDS */
 	if (!items_size)
 		return S_OK;
-	HRESULT result = language_read(items);
+	HRESULT result = language_read((struct language_list *)iface, items);
 	if (FAILED(result)) return result;
 	*count = 1;
 	return S_OK;
@@ -829,19 +830,19 @@ static HRESULT WINAPI map_get_view(__FIMap_2_HSTRING_HSTRING *iface, __FIMapView
 static HRESULT WINAPI map_insert(__FIMap_2_HSTRING_HSTRING *iface, HSTRING key, HSTRING value, boolean *replaced)
 {
 	(void)iface; (void)key; (void)value; (void)replaced;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI map_remove(__FIMap_2_HSTRING_HSTRING *iface, HSTRING key)
 {
 	(void)iface; (void)key;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI map_clear(__FIMap_2_HSTRING_HSTRING *iface)
 {
 	(void)iface;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI map_query(__FIMap_2_HSTRING_HSTRING *iface, REFIID iid, void **out);
@@ -1120,7 +1121,7 @@ static HRESULT WINAPI observable_add_map_changed(__FIObservableMap_2_HSTRING_HST
 	if (!token)
 		return E_POINTER;
 	if (!handler)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at resources.c:1124\n"); return E_INVALIDARG; }
 	EnterCriticalSection(&self->lock);
 	if (self->subscription_count == self->subscription_capacity) {
 		const size_t capacity = self->subscription_capacity ? self->subscription_capacity * 2 : 4;
@@ -1394,5 +1395,123 @@ HRESULT raven_xaml_resource_context_factory(HSTRING name, IActivationFactory **o
 		return CLASS_E_CLASSNOTAVAILABLE;
 	InterlockedIncrement(&factory_instance.refs);
 	*out = (IActivationFactory *)&factory_instance.activation;
+	return S_OK;
+}
+
+/* GlobalizationPreferences shares the UI language source used by ResourceContext. */
+typedef __x_ABI_CWindows_CSystem_CUserProfile_CIGlobalizationPreferencesStatics preferences_i;
+static const WCHAR preferences_name[] = L"Windows.System.UserProfile.GlobalizationPreferences";
+static const IActivationFactoryVtbl preferences_activation_table;
+static const __x_ABI_CWindows_CSystem_CUserProfile_CIGlobalizationPreferencesStaticsVtbl preferences_table;
+static struct { const IActivationFactoryVtbl *activation; const __x_ABI_CWindows_CSystem_CUserProfile_CIGlobalizationPreferencesStaticsVtbl *statics; LONG refs; } preferences = { &preferences_activation_table, &preferences_table, 1 };
+static HRESULT preferences_query(REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory))
+		*out = &preferences.activation;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CSystem_CUserProfile_CIGlobalizationPreferencesStatics))
+		*out = &preferences.statics;
+	else return E_NOINTERFACE;
+	InterlockedIncrement(&preferences.refs);
+	return S_OK;
+}
+#define PREF_COMMON(type, prefix) \
+static HRESULT WINAPI prefix##_query(type *self, REFIID iid, void **out) { (void)self; return preferences_query(iid, out); } \
+static ULONG WINAPI prefix##_addref(type *self) { (void)self; return InterlockedIncrement(&preferences.refs); } \
+static ULONG WINAPI prefix##_release(type *self) { (void)self; return InterlockedDecrement(&preferences.refs); } \
+static HRESULT WINAPI prefix##_iids(type *self, ULONG *count, IID **iids) { static const IID ids[] = { IID___x_ABI_CWindows_CSystem_CUserProfile_CIGlobalizationPreferencesStatics }; (void)self; return static_iids(ids, 1, count, iids); } \
+static HRESULT WINAPI prefix##_name(type *self, HSTRING *out) { (void)self; if (!out) return E_POINTER; return WindowsCreateString(preferences_name, ARRAYSIZE(preferences_name) - 1, out); } \
+static HRESULT WINAPI prefix##_trust(type *self, TrustLevel *out) { (void)self; return inspectable_trust(out); }
+PREF_COMMON(IActivationFactory, pref_activation)
+PREF_COMMON(preferences_i, pref_statics)
+static HRESULT WINAPI pref_activate(IActivationFactory *self, IInspectable **out) { (void)self; if (!out) return E_POINTER; *out = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
+static HRESULT WINAPI pref_unimplemented_list(preferences_i *self, __FIVectorView_1_HSTRING **out) { (void)self; if (!out) return E_POINTER; *out = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
+static HRESULT WINAPI pref_languages(preferences_i *self, __FIVectorView_1_HSTRING **out)
+{
+	struct language_list *list;
+	(void)self;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	list = create_language_list();
+	if (!list) return E_OUTOFMEMORY;
+	*out = (__FIVectorView_1_HSTRING *)list;
+	return S_OK;
+}
+static HRESULT WINAPI pref_region(preferences_i *self, HSTRING *out) { (void)self; if (!out) return E_POINTER; *out = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
+static HRESULT WINAPI pref_week(preferences_i *self, __x_ABI_CWindows_CGlobalization_CDayOfWeek *out) { (void)self; if (!out) return E_POINTER; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
+static const IActivationFactoryVtbl preferences_activation_table = { pref_activation_query, pref_activation_addref, pref_activation_release, pref_activation_iids, pref_activation_name, pref_activation_trust, pref_activate };
+static const __x_ABI_CWindows_CSystem_CUserProfile_CIGlobalizationPreferencesStaticsVtbl preferences_table = { pref_statics_query, pref_statics_addref, pref_statics_release, pref_statics_iids, pref_statics_name, pref_statics_trust, pref_unimplemented_list, pref_unimplemented_list, pref_unimplemented_list, pref_languages, pref_region, pref_week };
+HRESULT raven_xaml_globalization_preferences_factory(HSTRING name, IActivationFactory **out)
+{
+	UINT32 length = 0;
+	const WCHAR *text;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	text = WindowsGetStringRawBuffer(name, &length);
+	if (length != ARRAYSIZE(preferences_name) - 1 || CompareStringOrdinal(text, length, preferences_name, -1, FALSE) != CSTR_EQUAL) return CLASS_E_CLASSNOTAVAILABLE;
+	InterlockedIncrement(&preferences.refs);
+	*out = (IActivationFactory *)&preferences.activation;
+	return S_OK;
+}
+
+
+typedef __x_ABI_CWindows_CGlobalization_CIApplicationLanguagesStatics app_languages_i;
+static const WCHAR app_languages_name[] = L"Windows.Globalization.ApplicationLanguages";
+static const IActivationFactoryVtbl app_languages_activation_table;
+static const __x_ABI_CWindows_CGlobalization_CIApplicationLanguagesStaticsVtbl app_languages_table;
+static struct { const IActivationFactoryVtbl *activation; const __x_ABI_CWindows_CGlobalization_CIApplicationLanguagesStaticsVtbl *statics; LONG refs; } app_languages = { &app_languages_activation_table, &app_languages_table, 1 };
+static HRESULT app_languages_query(REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory)) *out = &app_languages.activation;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CGlobalization_CIApplicationLanguagesStatics)) *out = &app_languages.statics;
+	else return E_NOINTERFACE;
+	InterlockedIncrement(&app_languages.refs);
+	return S_OK;
+}
+#define APP_LANG_COMMON(type, prefix) \
+static HRESULT WINAPI prefix##_query(type *self, REFIID iid, void **out) { (void)self; return app_languages_query(iid, out); } \
+static ULONG WINAPI prefix##_addref(type *self) { (void)self; return InterlockedIncrement(&app_languages.refs); } \
+static ULONG WINAPI prefix##_release(type *self) { (void)self; return InterlockedDecrement(&app_languages.refs); } \
+static HRESULT WINAPI prefix##_iids(type *self, ULONG *count, IID **iids) { static const IID ids[] = { IID___x_ABI_CWindows_CGlobalization_CIApplicationLanguagesStatics }; (void)self; return static_iids(ids, 1, count, iids); } \
+static HRESULT WINAPI prefix##_name(type *self, HSTRING *out) { (void)self; if (!out) return E_POINTER; return WindowsCreateString(app_languages_name, ARRAYSIZE(app_languages_name) - 1, out); } \
+static HRESULT WINAPI prefix##_trust(type *self, TrustLevel *out) { (void)self; return inspectable_trust(out); }
+APP_LANG_COMMON(IActivationFactory, app_lang_activation)
+APP_LANG_COMMON(app_languages_i, app_lang_statics)
+static HRESULT WINAPI app_lang_override(app_languages_i *self, HSTRING *out) { (void)self; return raven_language_override_read(out); }
+static HRESULT WINAPI app_lang_put_override(app_languages_i *self, HSTRING value) { (void)self; return raven_language_override_write(value); }
+/* shortcut: exposes one preferred language, extend the view when the full user language list is available. */
+static HRESULT WINAPI app_lang_list(app_languages_i *self, __FIVectorView_1_HSTRING **out)
+{
+	struct language_list *list;
+	HSTRING value = NULL;
+	HRESULT result;
+	(void)self;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	result = raven_language_override_read(&value);
+	if (FAILED(result)) return result;
+	list = create_language_list();
+	if (!list) { WindowsDeleteString(value); return E_OUTOFMEMORY; }
+	if (WindowsGetStringLen(value)) list->language = value;
+	else WindowsDeleteString(value);
+	*out = (__FIVectorView_1_HSTRING *)list;
+	return S_OK;
+}
+static HRESULT WINAPI app_lang_manifest(app_languages_i *self, __FIVectorView_1_HSTRING **out) { (void)self; if (!out) return E_POINTER; *out = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
+static const IActivationFactoryVtbl app_languages_activation_table = { app_lang_activation_query, app_lang_activation_addref, app_lang_activation_release, app_lang_activation_iids, app_lang_activation_name, app_lang_activation_trust, pref_activate };
+static const __x_ABI_CWindows_CGlobalization_CIApplicationLanguagesStaticsVtbl app_languages_table = { app_lang_statics_query, app_lang_statics_addref, app_lang_statics_release, app_lang_statics_iids, app_lang_statics_name, app_lang_statics_trust, app_lang_override, app_lang_put_override, app_lang_list, app_lang_manifest };
+HRESULT raven_xaml_application_languages_factory(HSTRING name, IActivationFactory **out)
+{
+	UINT32 length = 0;
+	const WCHAR *text;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	text = WindowsGetStringRawBuffer(name, &length);
+	if (length != ARRAYSIZE(app_languages_name) - 1 || CompareStringOrdinal(text, length, app_languages_name, -1, FALSE) != CSTR_EQUAL) return CLASS_E_CLASSNOTAVAILABLE;
+	InterlockedIncrement(&app_languages.refs);
+	*out = (IActivationFactory *)&app_languages.activation;
 	return S_OK;
 }

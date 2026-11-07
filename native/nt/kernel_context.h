@@ -1,6 +1,7 @@
 #pragma once
 
 #include "api.h"
+#include "fls.h"
 #include "access_token.h"
 #include "guest_allocator.h"
 #include "memory.h"
@@ -57,6 +58,8 @@ struct KernelContext {
 	std::function<uint64_t(uint64_t, bool)> module_named;
 	// The environment variables the program has now, as the block a new process receives (set by the system handlers).
 	std::function<std::u16string()> environment_block;
+	// The fiber-local slots FlsAlloc built, whose callbacks the thread exit runs.
+	std::shared_ptr<GuestFls> fls;
 	// Started operations that finish later, such as overlapped socket transfers.
 	std::shared_ptr<Reactor> reactor = std::make_shared<Reactor>();
 	// Named pipes served by this process and the pipe operations that have not finished.

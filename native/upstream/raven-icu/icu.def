@@ -56,3 +56,10 @@ EXPORTS
 	uregex_setText
 	uregex_setUText
 	uregex_start
+
+	uplrules_openForType
+	uplrules_select
+	uplrules_close
+	ulistfmt_open
+	ulistfmt_format
+	ulistfmt_close

@@ -304,6 +304,50 @@ int raven_entry(void)
 	HRESULT (WINAPI *initialize)(int) = runtime ? (void *)GetProcAddress(runtime, "RoInitialize") : NULL;
 	HRESULT (WINAPI *factory)(HSTRING, REFIID, void **) = runtime ? (void *)GetProcAddress(runtime, "RoGetActivationFactory") : NULL;
 	if (!initialize || !factory || initialize(1) != S_OK) return 1;
+	{
+		struct queue_options { DWORD size, thread_type, apartment_type; };
+		void *reservation = VirtualAlloc((void *)(UINT_PTR)0x4c000000, 0x10000, MEM_RESERVE, PAGE_NOACCESS);
+		if (!reservation) return 49;
+		HMODULE messaging = LoadLibraryW(L"CoreMessaging.dll");
+		HRESULT (WINAPI *create)(struct queue_options, IDispatcherQueueController **) = messaging ?
+			(void *)GetProcAddress(messaging, "CreateDispatcherQueueController") : NULL;
+		struct queue_options options = { sizeof options, 1, 0 };
+		IDispatcherQueueController *native = NULL;
+		if (!create || create(options, &native) != S_OK || !native) return 50;
+		IDispatcherQueue *queue = NULL;
+		if (IDispatcherQueueController_get_DispatcherQueue(native, &queue) != S_OK || !queue) return 51;
+		IDispatcherQueue_Release(queue);
+		IDispatcherQueueController_Release(native);
+		options.size = 0;
+		native = (void *)1;
+		if (create(options, &native) != E_INVALIDARG || native) return 52;
+		options.size = sizeof options;
+		options.thread_type = 2;
+		if (create(options, &native) != E_NOTIMPL || native) return 53;
+		FreeLibrary(messaging);
+		VirtualFree(reservation, 0, MEM_RELEASE);
+	}
+	{
+		HANDLE (WINAPI *open_from_app)(ULONG, BOOL, const WCHAR *) = (void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "OpenFileMappingFromApp");
+		HANDLE (WINAPI *create_from_app)(HANDLE, SECURITY_ATTRIBUTES *, ULONG, ULONG64, const WCHAR *) =
+			(void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CreateFileMappingFromApp");
+		void *(WINAPI *map_from_app)(HANDLE, ULONG, ULONG64, SIZE_T) =
+			(void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "MapViewOfFileFromApp");
+		HANDLE original = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 4096, L"raven-app-mapping-fixture");
+		HANDLE opened = open_from_app ? open_from_app(FILE_MAP_READ, FALSE, L"raven-app-mapping-fixture") : NULL;
+		if (!original || !opened) return 54;
+		CloseHandle(opened);
+		CloseHandle(original);
+		original = create_from_app ? create_from_app(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 131072, L"raven-create-app-mapping") : NULL;
+		opened = open_from_app ? open_from_app(FILE_MAP_ALL_ACCESS, FALSE, L"raven-create-app-mapping") : NULL;
+		if (!original || !opened) return 55;
+		void *view = map_from_app ? map_from_app(opened, FILE_MAP_WRITE, 65536, 4096) : NULL;
+		if (!view) return 56;
+		((volatile unsigned char *)view)[4095] = 0x5a;
+		if (((volatile unsigned char *)view)[4095] != 0x5a || !UnmapViewOfFile(view)) return 57;
+		CloseHandle(opened);
+		CloseHandle(original);
+	}
 	static const WCHAR controller_class[] = L"Windows.System.DispatcherQueueController";
 	static const WCHAR queue_class[] = L"Windows.System.DispatcherQueue";
 	HSTRING key = NULL;

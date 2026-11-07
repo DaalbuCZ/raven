@@ -36,6 +36,21 @@ interface __x_ABI_CWindows_CUI_CXaml_CIResourceDictionary {
 
 DEFINE_GUID(IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, 0xc1ea4f24, 0xd6de, 0x4191, 0x8e, 0x3a, 0xf4, 0x86, 0x01, 0xf7, 0x48, 0x9c);
 
+/* Composable ResourceDictionary constructor from Windows.UI.Xaml metadata. */
+typedef struct raven_resource_dictionary_factory raven_resource_dictionary_factory;
+typedef struct raven_resource_dictionary_factory_vtbl {
+	HRESULT (WINAPI *QueryInterface)(raven_resource_dictionary_factory *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(raven_resource_dictionary_factory *);
+	ULONG (WINAPI *Release)(raven_resource_dictionary_factory *);
+	HRESULT (WINAPI *GetIids)(raven_resource_dictionary_factory *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(raven_resource_dictionary_factory *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(raven_resource_dictionary_factory *, TrustLevel *);
+	HRESULT (WINAPI *CreateInstance)(raven_resource_dictionary_factory *, IInspectable *, IInspectable **,
+		__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary **);
+} raven_resource_dictionary_factory_vtbl;
+struct raven_resource_dictionary_factory { const raven_resource_dictionary_factory_vtbl *lpVtbl; };
+DEFINE_GUID(IID_raven_resource_dictionary_factory, 0xea3639b5, 0x31b7, 0x4271, 0x92, 0xc9, 0x7c, 0x95, 0x84, 0xa9, 0x1c, 0x22);
+
 /* Windows.Foundation.Collections.IReference`1<HSTRING> — the boxed string. The compiled markup and a WinRT caller pass string
  * resource keys as this; the dictionary compares two such keys by their string content. mingw has no precomputed instantiation
  * for it. The IID is the signature rule's SHA-1 over the namespace GUID d57af411-737b-c042-abae-878b1e16adee in little-endian

@@ -589,8 +589,12 @@ int main(int argc, char **argv)
 						if (modules.all().contains(file))
 							return;
 						const auto component = component_directory / file;
-						if (imports_any(libraries) && std::filesystem::exists(component))
+						if (imports_any(libraries) && std::filesystem::exists(component)) {
+							if (std::getenv("RAVEN_TRACE_DEBUG"))
+								std::cerr << "raven: component " << file << " from " << component << " ("
+									<< std::filesystem::file_size(component) << " bytes)\n";
 							modules.add(file, read_file(component.c_str()));
+						}
 					};
 					// The user32 component supplies the built-in control classes and dialog manager to programs that use user32.
 					load_component("raven-user32.dll", {"user32.dll"});

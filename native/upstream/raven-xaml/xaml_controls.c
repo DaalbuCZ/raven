@@ -41,6 +41,35 @@ typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIPageFactory page_factory;
 typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIPageStatics page_statics;
 typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl page_content_control;
 typedef __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName xaml_type_name;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty;
+typedef __x_ABI_CWindows_CUI_CCore_CICoreDispatcher ICoreDispatcher;
+
+/* The real IDependencyObject ABI (mingw's windows.ui.xaml.h, uuid 5C526665-F60E-4912-AF59-5FE0680F089D):
+ * the six dependency-value methods after the IInspectable six. The component builds against hand headers
+ * that predate the first object needing this interface, so it is declared here the way IControlTemplate
+ * is; the elements will share it when the trace brings them here. */
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIDependencyObject dependency_object1;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIDependencyObjectVtbl dependency_object1_vtbl;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIDependencyObjectVtbl __x_ABI_CWindows_CUI_CXaml_CIDependencyObjectVtbl;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIDependencyObject __x_ABI_CWindows_CUI_CXaml_CIDependencyObject;
+struct __x_ABI_CWindows_CUI_CXaml_CIDependencyObjectVtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(dependency_object1 *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(dependency_object1 *This);
+	ULONG (STDMETHODCALLTYPE *Release)(dependency_object1 *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(dependency_object1 *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(dependency_object1 *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(dependency_object1 *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *GetValue)(dependency_object1 *This, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp, IInspectable **result);
+	HRESULT (STDMETHODCALLTYPE *SetValue)(dependency_object1 *This, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp, IInspectable *value);
+	HRESULT (STDMETHODCALLTYPE *ClearValue)(dependency_object1 *This, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp);
+	HRESULT (STDMETHODCALLTYPE *ReadLocalValue)(dependency_object1 *This, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp, IInspectable **result);
+	HRESULT (STDMETHODCALLTYPE *GetAnimationBaseValue)(dependency_object1 *This, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp, IInspectable **result);
+	HRESULT (STDMETHODCALLTYPE *get_Dispatcher)(dependency_object1 *This, ICoreDispatcher **value);
+	END_INTERFACE
+};
+interface __x_ABI_CWindows_CUI_CXaml_CIDependencyObject { CONST_VTBL dependency_object1_vtbl *lpVtbl; };
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CIDependencyObject, 0x5c526665, 0xf60e, 0x4912, 0xaf, 0x59, 0x5f, 0xe0, 0x68, 0x0f, 0x08, 0x9d);
 
 /* The real IControlTemplate ABI (Windows.UI.Xaml.winmd, uuid EFD2418E-41E0-48BB-8B82-91EDA1BA3FE2): TargetType get/put
  * after the six IInspectable methods, nothing else — the real interface carries no content member, the template's tree
@@ -99,9 +128,9 @@ static int equal_iid(REFIID left, const IID *right)
 }
 
 #define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) \
-	{ (void)This; if (a1) *(void **)(uintptr_t)a1 = NULL; return E_NOTIMPL; }
+	{ (void)This; if (a1) *(void **)(uintptr_t)a1 = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB2(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) \
-	{ (void)This; (void)a1; (void)a2; return E_NOTIMPL; }
+	{ (void)This; (void)a1; (void)a2; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 struct frame;
 
@@ -110,6 +139,8 @@ struct frame2_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIFrame2Vtbl *lp
 struct frame3_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIFrame3Vtbl *lpVtbl; struct frame *owner; };
 struct frame4_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIFrame4Vtbl *lpVtbl; struct frame *owner; };
 struct frame5_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIFrame5Vtbl *lpVtbl; struct frame *owner; };
+struct frame_inner_part { const IInspectableVtbl *lpVtbl; struct frame *owner; };
+struct frame_dependency_part { const __x_ABI_CWindows_CUI_CXaml_CIDependencyObjectVtbl *lpVtbl; struct frame *owner; };
 
 struct frame {
 	struct frame1_part first;
@@ -117,6 +148,10 @@ struct frame {
 	struct frame3_part third;
 	struct frame4_part fourth;
 	struct frame5_part fifth;
+	struct frame_inner_part inner;
+	struct raven_tracker_part tracker;
+	struct frame_dependency_part dependency;
+	IInspectable *outer;
 	LONG refs;
 	HSTRING name;
 	HSTRING source_type;
@@ -155,9 +190,9 @@ static HRESULT WINAPI frame5_name(frame5 *This, HSTRING *name);
 
 #define FRAME_BOILERPLATE(part, iface, query_fn, addref_fn, release_fn) \
 	static HRESULT WINAPI query_fn(iface *This, REFIID iid, void **out) \
-	{ return frame_query_any(((struct part *)This)->owner, iid, out); } \
-	static ULONG WINAPI addref_fn(iface *This) { return frame_addref(((struct part *)This)->owner); } \
-	static ULONG WINAPI release_fn(iface *This) { return frame_release(((struct part *)This)->owner); }
+	{ struct frame *s=((struct part *)This)->owner; return s->outer ? IInspectable_QueryInterface(s->outer,iid,out) : frame_query_any(s,iid,out); } \
+	static ULONG WINAPI addref_fn(iface *This) { struct frame *s=((struct part *)This)->owner; return s->outer ? IInspectable_AddRef(s->outer) : frame_addref(s); } \
+	static ULONG WINAPI release_fn(iface *This) { struct frame *s=((struct part *)This)->owner; return s->outer ? IInspectable_Release(s->outer) : frame_release(s); }
 
 FRAME_BOILERPLATE(frame1_part, frame1, frame1_query, frame1_addref, frame1_release)
 FRAME_BOILERPLATE(frame2_part, frame2, frame2_query, frame2_addref, frame2_release)
@@ -181,11 +216,17 @@ FRAME_INSPECTABLE(frame5, frame5, frame_class)
 
 static HRESULT frame_query_any(struct frame *self, REFIID iid, void **out)
 {
+	char note[80];
+	wsprintfA(note, "raven-frame: query %08lx-%04x\n", (unsigned long)iid->Data1, iid->Data2);
+	OutputDebugStringA(note);
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
-		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame))
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable)) {
+		*out = self->outer ? (void *)&self->inner : (void *)&self->first;
+		frame_addref(self);
+		return S_OK;
+	} else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame))
 		*out = &self->first;
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame2))
 		*out = &self->second;
@@ -195,20 +236,180 @@ static HRESULT frame_query_any(struct frame *self, REFIID iid, void **out)
 		*out = &self->fourth;
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame5))
 		*out = &self->fifth;
-	else
+	else if (equal_iid(iid, &IID_IAgileObject)) {
+		/* The object runs apartment-free in the engine's single process, the way the runtime's agility
+		 * negotiation expects of a XAML object. The handed pointer must release against whatever was
+		 * AddRef'd: the delegating first part would land its Release on the outer, whose count never
+		 * gained the reference — the traced Shapr3D run loses one outer reference per agility ask and
+		 * its wrapper machinery tears a wrapper down twice — so the aggregated frame answers with the
+		 * non-delegating inner part, which releases against the frame like the AddRef does. */
+		*out = self->outer ? (void *)&self->inner : (void *)&self->first;
+		frame_addref(self);
+		return S_OK;
+	} else if (equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CIDependencyObject)) {
+		/* The base XAML property face; the part is non-delegating, so the answer releases against the
+		 * frame exactly like the AddRef it pairs with. */
+		*out = &self->dependency;
+		frame_addref(self);
+		return S_OK;
+	} else if (equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CHosting_CIReferenceTracker)) {
+		/* The tracker face most XAML framework objects carry; .NET Native's SharedLibrary asks for it when
+		 * the object is handed to managed code and coordinates wrapper lifetimes through it. */
+		*out = &self->tracker;
+		frame_addref(self);
+		return S_OK;
+	} else {
+		char line[100];
+		wsprintfA(line, "raven-xaml: frame has no interface %08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x\n",
+			(unsigned long)iid->Data1, iid->Data2, iid->Data3, iid->Data4[0], iid->Data4[1], iid->Data4[2],
+			iid->Data4[3], iid->Data4[4], iid->Data4[5], iid->Data4[6], iid->Data4[7]);
+		OutputDebugStringA(line);
 		return E_NOINTERFACE;
-	frame_addref(self);
+	}
+	if (self->outer) IInspectable_AddRef(self->outer); else frame_addref(self);
 	return S_OK;
 }
 
+static HRESULT WINAPI frame_inner_query(IInspectable *iface, REFIID iid, void **out) { return frame_query_any(((struct frame_inner_part *)iface)->owner,iid,out); }
+static ULONG WINAPI frame_inner_addref(IInspectable *iface) { return frame_addref(((struct frame_inner_part *)iface)->owner); }
+static ULONG WINAPI frame_inner_release(IInspectable *iface) { return frame_release(((struct frame_inner_part *)iface)->owner); }
+static HRESULT WINAPI frame_inner_iids(IInspectable *iface,ULONG *count,IID **out) { (void)iface; return inspectable_iids(count,out); }
+static HRESULT WINAPI frame_inner_name(IInspectable *iface,HSTRING *out) { (void)iface; return WindowsCreateString(frame_class,ARRAYSIZE(frame_class)-1,out); }
+static HRESULT WINAPI frame_inner_trust(IInspectable *iface,TrustLevel *out) { (void)iface; return inspectable_trust(out); }
+static const IInspectableVtbl frame_inner_table={frame_inner_query,frame_inner_addref,frame_inner_release,frame_inner_iids,frame_inner_name,frame_inner_trust};
+
+/* The tracker part forwards its IUnknown to the frame through this adapter, the shape the weak source takes. */
+static HRESULT WINAPI frame_owner_query(void *owner, REFIID iid, void **out)
+{
+	return frame_query_any((struct frame *)owner, iid, out);
+}
+
+/* ---- IDependencyObject ----
+ *
+ * The base XAML interface the managed interop asks for before it drives the object's properties (the
+ * traced Shapr3D run asks it of the Frame right after activation, names the frame RootFrame, and dies on
+ * a null reference when the ask is refused). The dependency-value methods have no engine backing yet and
+ * trace their refusal; the dispatcher is the view's own, the way a XAML object's is. */
+static HRESULT WINAPI frame_dependency_query(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface, REFIID iid, void **out)
+{
+	struct frame *self = ((struct frame_dependency_part *)iface)->owner;
+	return frame_query_any(self, iid, out);
+}
+
+static ULONG WINAPI frame_dependency_addref(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface)
+{
+	struct frame *self = ((struct frame_dependency_part *)iface)->owner;
+	return self->outer ? IInspectable_AddRef(self->outer) : frame_addref(self);
+}
+
+static ULONG WINAPI frame_dependency_release(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface)
+{
+	struct frame *self = ((struct frame_dependency_part *)iface)->owner;
+	return self->outer ? IInspectable_Release(self->outer) : frame_release(self);
+}
+
+static HRESULT WINAPI frame_dependency_iids(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI frame_dependency_name(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface, HSTRING *name)
+{
+	(void)iface;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(frame_class, (UINT32)lstrlenW(frame_class), name);
+}
+
+static HRESULT WINAPI frame_dependency_trust(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface, TrustLevel *level)
+{
+	(void)iface;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI frame_dependency_get_value(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp, IInspectable **result)
+{
+	(void)iface; (void)dp;
+	if (result)
+		*result = NULL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
+}
+
+static HRESULT WINAPI frame_dependency_put_value(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp, IInspectable *value)
+{
+	(void)iface; (void)dp; (void)value;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
+}
+
+static HRESULT WINAPI frame_dependency_clear_value(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp)
+{
+	(void)iface; (void)dp;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
+}
+
+static HRESULT WINAPI frame_dependency_read_local(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp, IInspectable **result)
+{
+	(void)iface; (void)dp;
+	if (result)
+		*result = NULL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
+}
+
+static HRESULT WINAPI frame_dependency_animation_base(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *dp, IInspectable **result)
+{
+	(void)iface; (void)dp;
+	if (result)
+		*result = NULL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
+}
+
+static HRESULT WINAPI frame_dependency_dispatcher(__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *iface,
+	ICoreDispatcher **value)
+{
+	struct frame *self = ((struct frame_dependency_part *)iface)->owner;
+	(void)self;
+	if (!value)
+		return E_POINTER;
+	*value = NULL;
+	{
+		__x_ABI_CWindows_CUI_CCore_CICoreWindow *core = NULL;
+		HRESULT result = raven_current_window(&core);
+		if (FAILED(result))
+			return result;
+		result = core->lpVtbl->get_Dispatcher(core, value);
+		core->lpVtbl->Release(core);
+		return result;
+	}
+}
+
+static const __x_ABI_CWindows_CUI_CXaml_CIDependencyObjectVtbl frame_dependency_table = {
+	frame_dependency_query, frame_dependency_addref, frame_dependency_release,
+	frame_dependency_iids, frame_dependency_name, frame_dependency_trust,
+	frame_dependency_get_value, frame_dependency_put_value, frame_dependency_clear_value,
+	frame_dependency_read_local, frame_dependency_animation_base, frame_dependency_dispatcher,
+};
+
 static ULONG frame_addref(struct frame *self)
 {
-	return (ULONG)InterlockedIncrement(&self->refs);
+	char note[80];
+	ULONG refs = (ULONG)InterlockedIncrement(&self->refs);
+	wsprintfA(note, "raven-frame: addref -> %lu (outer %p)\n", refs, (void *)self->outer);
+	OutputDebugStringA(note);
+	return refs;
 }
 
 static ULONG frame_release(struct frame *self)
 {
+	char note[80];
 	const LONG refs = InterlockedDecrement(&self->refs);
+	wsprintfA(note, "raven-frame: release -> %ld (outer %p)\n", refs, (void *)self->outer);
+	OutputDebugStringA(note);
 	if (!refs) {
 		if (self->name)
 			WindowsDeleteString(self->name);
@@ -333,6 +534,7 @@ static HRESULT frame_navigate(struct frame *self, uint64_t type_address, uint64_
 	if (FAILED(raven_xaml_create_named(text, length, &page_object)) || !page_object) {
 		if (page_object)
 			IInspectable_Release(page_object);
+		raven_trace_note("raven-xaml: frame navigate found no page\n");
 		return S_OK;
 	}
 	frame_set_source(self, text, length);
@@ -368,22 +570,22 @@ static HRESULT WINAPI frame_navigate_type(frame5 *iface, uint64_t type, uint64_t
 
 static HRESULT WINAPI frame_go_back(frame1 *iface) { (void)iface; return S_OK; }
 static HRESULT WINAPI frame_go_forward(frame1 *iface) { (void)iface; return S_OK; }
-static HRESULT WINAPI frame_go_back_one(frame3 *iface, uint64_t count) { (void)iface; (void)count; return E_NOTIMPL; }
+static HRESULT WINAPI frame_go_back_one(frame3 *iface, uint64_t count) { (void)iface; (void)count; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI frame_state_out(frame1 *iface, uint64_t out)
 {
 	(void)iface;
 	if (out)
 		*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
-static HRESULT WINAPI frame_state_in(frame1 *iface, uint64_t state) { (void)iface; (void)state; return E_NOTIMPL; }
-static HRESULT WINAPI frame_set_state2(frame4 *iface, uint64_t state, uint64_t frame_state) { (void)iface; (void)state; (void)frame_state; return E_NOTIMPL; }
+static HRESULT WINAPI frame_state_in(frame1 *iface, uint64_t state) { (void)iface; (void)state; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
+static HRESULT WINAPI frame_set_state2(frame4 *iface, uint64_t state, uint64_t frame_state) { (void)iface; (void)state; (void)frame_state; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI frame_stack_out(frame2 *iface, uint64_t out)
 {
 	(void)iface;
 	if (out)
 		*(void **)(uintptr_t)out = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI frame_stack_enabled(frame5 *iface, uint64_t out)
 {
@@ -497,6 +699,11 @@ static struct frame *create_frame(void)
 	frame->fourth.owner = frame;
 	frame->fifth.lpVtbl = &frame5_table;
 	frame->fifth.owner = frame;
+	frame->inner.lpVtbl = &frame_inner_table;
+	frame->inner.owner = frame;
+	raven_tracker_part_init(&frame->tracker, frame, &frame->refs, frame_owner_query);
+	frame->dependency.lpVtbl = &frame_dependency_table;
+	frame->dependency.owner = frame;
 	frame->refs = 1;
 	frame->stack_enabled = TRUE;
 	InterlockedIncrement(&raven_xaml_objects);
@@ -926,13 +1133,13 @@ HRESULT __declspec(dllexport) raven_xaml_control_template_put_root(IInspectable 
 		&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, (void **)&iface)) || !iface) {
 		if (root)
 			IInspectable_Release(root);
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_controls.c:958\n"); return E_INVALIDARG; }
 	}
 	if (iface->lpVtbl != &template_table) {
 		iface->lpVtbl->Release(iface);
 		if (root)
 			IInspectable_Release(root);
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_controls.c:964\n"); return E_INVALIDARG; }
 	}
 	self = (struct control_template *)iface;
 	(void)raven_xaml_control_template_root(template_object, &probe);
@@ -1007,7 +1214,7 @@ static HRESULT WINAPI sc_scale(raven_swapchain_panel *iface, FLOAT *out)
 	if (!out) return E_POINTER;
 	*out = 0;
 	/* No layout attachment exists from which to obtain a composition scale. */
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI sc_add_scale(raven_swapchain_panel *iface, IUnknown *handler, EventRegistrationToken *token)
 {
@@ -1015,10 +1222,10 @@ static HRESULT WINAPI sc_add_scale(raven_swapchain_panel *iface, IUnknown *handl
 	if (!token) return E_POINTER;
 	token->value = 0;
 	/* No composition-scale source: do not accept a subscription that never fires. */
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI sc_remove_scale(raven_swapchain_panel *iface, EventRegistrationToken token)
-{ (void)iface; (void)token; return E_NOTIMPL; }
+{ (void)iface; (void)token; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 static HRESULT WINAPI sc_input(raven_swapchain_panel *iface,
 	INT32 types, __x_ABI_CWindows_CUI_CCore_CICoreInputSourceBase **out)
 {
@@ -1026,7 +1233,7 @@ static HRESULT WINAPI sc_input(raven_swapchain_panel *iface,
 	if (!out) return E_POINTER;
 	*out = NULL;
 	/* There is no independent GPU input surface or input worker. */
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI scn_query(raven_swapchain_native *iface, REFIID iid, void **out)
 { return swapchain_query(((struct swapchain_native_part *)iface)->owner, iid, out); }
@@ -1040,7 +1247,7 @@ static HRESULT WINAPI scn_set(raven_swapchain_native *iface, IDXGISwapChain *cha
 	if (self->thread != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
 	/* E_NOTIMPL: no DXGI composition-swapchain import into the wl_shm/GDI tree.
 	 * Refusal leaves storage untouched; NULL can always detach the stored contract reference. */
-	if (chain) return E_NOTIMPL;
+	if (chain) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	IDXGISwapChain *old = self->stored;
 	self->stored = NULL;
 	if (old) old->lpVtbl->Release(old);
@@ -1335,10 +1542,13 @@ static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable *
 		return E_POINTER;
 	*out = NULL;
 	if (self->kind == factory_frame) {
-		struct frame *frame = create_frame();
+		struct frame *frame;
+		raven_trace_note("raven-xaml: frame ActivateInstance entered\n");
+		frame = create_frame();
 		if (!frame)
 			return E_OUTOFMEMORY;
 		*out = (IInspectable *)&frame->first;
+		raven_trace_note("raven-xaml: frame activated\n");
 	} else if (self->kind == factory_page) {
 		struct page *page = create_page();
 		if (!page)
@@ -1356,19 +1566,24 @@ static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable *
 	return S_OK;
 }
 
-/* Composable factories: the created base is returned as the instance and no separate inner object is reported. */
+/* A composed frame exposes its nondelegating inner identity to its outer object. */
 static HRESULT WINAPI frame_create(frame_factory *iface, uint64_t outer, uint64_t inner, uint64_t instance)
 {
 	struct frame *frame;
 	(void)iface;
-	(void)outer;
-	if (!instance)
+	raven_trace_note("raven-xaml: frame CreateInstance entered\n");
+	if (!instance || (outer && !inner))
 		return E_POINTER;
 	*(void **)(uintptr_t)instance = NULL;
 	if (inner)
 		*(void **)(uintptr_t)inner = NULL;
 	if (!(frame = create_frame()))
 		return E_OUTOFMEMORY;
+	frame->outer=(IInspectable *)(uintptr_t)outer;
+	if (outer) {
+		*(void **)(uintptr_t)inner=&frame->inner;
+		IInspectable_AddRef(frame->outer);
+	}
 	*(void **)(uintptr_t)instance = &frame->first;
 	return S_OK;
 }

@@ -161,11 +161,11 @@ static int equal_iid(REFIID left, const IID *right)
 }
 
 #define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) \
-	{ (void)This; if (a1) *(void **)(uintptr_t)a1 = NULL; return E_NOTIMPL; }
+	{ (void)This; if (a1) *(void **)(uintptr_t)a1 = NULL; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB1_SET(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) \
-	{ (void)This; (void)a1; return E_NOTIMPL; }
+	{ (void)This; (void)a1; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB2(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) \
-	{ (void)This; (void)a1; (void)a2; return E_NOTIMPL; }
+	{ (void)This; (void)a1; (void)a2; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 /* The UIElement part every element class answers: the pointer events the routing delivers, the hit-test visibility, and the
  * owner plumbing, since the refcount and the identity live on the owning element and every part of it must answer as one COM
@@ -226,27 +226,27 @@ static HRESULT WINAPI ui_trust(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, Tru
 static HRESULT WINAPI ui_stub0(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This)
 {
 	(void)This;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI ui_stub1(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1)
 {
 	(void)This;
 	if (a1)
 		*(void **)(uintptr_t)a1 = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI ui_stub1_set(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1)
 {
 	(void)This;
 	(void)a1;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI ui_stub2(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2)
 {
 	(void)This;
 	(void)a1;
 	(void)a2;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 static HRESULT WINAPI ui_stub3(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2, uint64_t a3)
 {
@@ -254,7 +254,7 @@ static HRESULT WINAPI ui_stub3(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uin
 	(void)a1;
 	(void)a2;
 	(void)a3;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 #define UI_POINTER_ADDREMOVE(NAME, KIND) \
@@ -600,7 +600,7 @@ static HRESULT WINAPI vector_get_view(struct children_vector *self, void **value
 	(void)self;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI vector_index_of(struct children_vector *self, ui_element *element, UINT32 *index, boolean *value)
@@ -636,7 +636,7 @@ static HRESULT WINAPI vector_set_at(struct children_vector *self, UINT32 index, 
 	(void)self;
 	(void)index;
 	(void)value;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI vector_insert_at(struct children_vector *self, UINT32 index, ui_element *value)
@@ -644,14 +644,14 @@ static HRESULT WINAPI vector_insert_at(struct children_vector *self, UINT32 inde
 	(void)self;
 	(void)index;
 	(void)value;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI vector_remove_at(struct children_vector *self, UINT32 index)
 {
 	(void)self;
 	(void)index;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI vector_append(struct children_vector *self, ui_element *value)
@@ -682,7 +682,7 @@ static HRESULT WINAPI vector_append(struct children_vector *self, ui_element *va
 static HRESULT WINAPI vector_remove_at_end(struct children_vector *self)
 {
 	(void)self;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI vector_clear(struct children_vector *self)
@@ -703,7 +703,7 @@ static HRESULT WINAPI vector_get_many(struct children_vector *self, UINT32 start
 	(void)items;
 	if (value)
 		*value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI vector_replace_all(struct children_vector *self, UINT32 count, ui_element **items)
@@ -711,7 +711,7 @@ static HRESULT WINAPI vector_replace_all(struct children_vector *self, UINT32 co
 	(void)self;
 	(void)count;
 	(void)items;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const struct children_vector_vtbl vector_table = {
@@ -1090,7 +1090,7 @@ static HRESULT WINAPI text_put_font_size(textblock1 *iface, uint64_t value)
 	struct textblock *self = (struct textblock *)iface;
 	const float size = float_of_word(value);
 	if (size <= 0.0f)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1093\n"); return E_INVALIDARG; }
 	self->font_size = size;
 	raven_render_changed();
 	return S_OK;
@@ -1197,7 +1197,7 @@ STUB1(textblock1, text_remove_context)
 static HRESULT WINAPI textblock_select_all(textblock1 *iface)
 {
 	(void)iface;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 STUB2(textblock1, text_select)
 STUB2(textblock1, text_focus)
@@ -1548,7 +1548,7 @@ static HRESULT WINAPI base_put_click_mode(__x_ABI_CWindows_CUI_CXaml_CControls_C
 {
 	struct button *self = ((struct buttonbase_part *)This)->owner;
 	if (value > raven_xaml_click_hover)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1551\n"); return E_INVALIDARG; }
 	self->click_mode = (UINT32)value;
 	return S_OK;
 }
@@ -1706,7 +1706,7 @@ static HRESULT button_put_template(struct button *self, IInspectable *template_o
 	}
 	kind = raven_xaml_control_template_root(template_object, &root);
 	if (kind != S_OK)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1709\n"); return E_INVALIDARG; }
 	if (root)
 		root->lpVtbl->Release(root);
 	button_store_template(self, template_object);
@@ -1732,9 +1732,9 @@ static HRESULT WINAPI control_put_template(control1 *This, uint64_t value)
 /* The IControl members the engine does not store answer E_NOTIMPL: the slots carry the exact interface order, the values
  * wait for the stages that will read them. */
 #define CONTROL_STUB(name) static HRESULT WINAPI name(control1 *This, uint64_t a1) \
-	{ (void)This; (void)a1; return E_NOTIMPL; }
+	{ (void)This; (void)a1; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define CONTROL_STUB2(name) static HRESULT WINAPI name(control1 *This, uint64_t a1, uint64_t a2) \
-	{ (void)This; (void)a1; (void)a2; return E_NOTIMPL; }
+	{ (void)This; (void)a1; (void)a2; { raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 CONTROL_STUB(control_font_size_get)
 CONTROL_STUB(control_font_size_put)
@@ -2255,7 +2255,7 @@ static HRESULT presenter_store_content_template(IInspectable *object, IInspectab
 		if (root)
 			root->lpVtbl->Release(root);
 		if (kind != S_OK)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2258\n"); return E_INVALIDARG; }
 	}
 	if (value)
 		value->lpVtbl->AddRef(value);
@@ -2500,7 +2500,7 @@ HRESULT raven_xaml_elements_set_float(IInspectable *object, const WCHAR *name, U
 	if (same_text(name, length, L"Row") || same_text(name, length, L"Column") ||
 		same_text(name, length, L"RowSpan") || same_text(name, length, L"ColumnSpan")) {
 		if (value < 0.0f || value > 65535.0f)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2503\n"); return E_INVALIDARG; }
 		return store_slot(object,
 			same_text(name, length, L"Row") ? grid_slot_row :
 			same_text(name, length, L"Column") ? grid_slot_column :
@@ -2517,7 +2517,7 @@ HRESULT raven_xaml_elements_set_float(IInspectable *object, const WCHAR *name, U
 			struct textblock *self = (struct textblock *)textblock;
 			if (value <= 0.0f) {
 				textblock->lpVtbl->Release(textblock);
-				return E_INVALIDARG;
+				{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2520\n"); return E_INVALIDARG; }
 			}
 			self->font_size = value;
 			raven_render_changed();
@@ -2856,12 +2856,12 @@ static HRESULT grid_apply_setter(void *state, const WCHAR *name, UINT32 length, 
 		}
 		/* A value that is neither a colour brush nor a colour name — a number where a colour is wanted, or a spelling
 		 * the engine does not know — fails the application; put_Style answers E_INVALIDARG and stores nothing. */
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2859\n"); return E_INVALIDARG; }
 	}
 	if (same_text(name, length, L"Width") || same_text(name, length, L"Height")) {
 		float number = 0;
 		if (!value || !style_boxed_number(value, &number))
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2864\n"); return E_INVALIDARG; }
 		if (!check_only) {
 			if (same_text(name, length, L"Width"))
 				self->width = number;
@@ -2903,14 +2903,14 @@ static HRESULT textblock_apply_setter(void *state, const WCHAR *name, UINT32 len
 				return S_OK;
 			}
 		}
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2906\n"); return E_INVALIDARG; }
 	}
 	if (same_text(name, length, L"FontSize")) {
 		float number = 0;
 		if (!value || !style_boxed_number(value, &number))
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2911\n"); return E_INVALIDARG; }
 		if (number <= 0.0f)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2913\n"); return E_INVALIDARG; }
 		if (!check_only) {
 			self->font_size = number;
 			raven_render_changed();
@@ -2920,7 +2920,7 @@ static HRESULT textblock_apply_setter(void *state, const WCHAR *name, UINT32 len
 	if (same_text(name, length, L"Text")) {
 		HSTRING string = NULL;
 		if (!value || !style_boxed_text(value, &string))
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2923\n"); return E_INVALIDARG; }
 		if (!check_only) {
 			UINT32 text_length = 0;
 			const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
@@ -2963,12 +2963,12 @@ static HRESULT button_apply_setter(void *state, const WCHAR *name, UINT32 length
 				return S_OK;
 			}
 		}
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2966\n"); return E_INVALIDARG; }
 	}
 	if (same_text(name, length, L"Width") || same_text(name, length, L"Height")) {
 		float number = 0;
 		if (!value || !style_boxed_number(value, &number))
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2971\n"); return E_INVALIDARG; }
 		if (!check_only) {
 			if (same_text(name, length, L"Width"))
 				self->width = number;
@@ -2984,7 +2984,7 @@ static HRESULT button_apply_setter(void *state, const WCHAR *name, UINT32 length
 		 * template untouched. A NULL value clears. */
 		IInspectable *root = NULL;
 		if (value && raven_xaml_control_template_root(value, &root) != S_OK)
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2987\n"); return E_INVALIDARG; }
 		if (root)
 			root->lpVtbl->Release(root);
 		if (!check_only)
@@ -3098,7 +3098,7 @@ HRESULT __declspec(dllexport) raven_xaml_element_apply_value(IInspectable *objec
 			return S_FALSE;
 		if (FAILED(value->lpVtbl->QueryInterface(value, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&base)) || !base) {
 			style->lpVtbl->Release(style);
-			return E_INVALIDARG;
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3101\n"); return E_INVALIDARG; }
 		}
 		base->lpVtbl->Release(base);
 		result = style->lpVtbl->put_BasedOn(style, (uint64_t)(uintptr_t)value);

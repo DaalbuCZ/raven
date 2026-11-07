@@ -57,9 +57,9 @@ static int equal_iid(REFIID left, const IID *right)
 		left->Data4[6] == right->Data4[6] && left->Data4[7] == right->Data4[7];
 }
 
-#define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) { (void)This; (void)a1;return E_NOTIMPL; }
+#define STUB1(iface, name) static HRESULT WINAPI name(iface *This, uint64_t a1) { (void)This; (void)a1;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 #define STUB2(iface, name) \
-	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) { (void)This; (void)a1; (void)a2;return E_NOTIMPL; }
+	static HRESULT WINAPI name(iface *This, uint64_t a1, uint64_t a2) { (void)This; (void)a1; (void)a2;{ raven_trace_not_implemented(__func__); return E_NOTIMPL; } }
 
 struct factory;
 

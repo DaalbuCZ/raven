@@ -68,7 +68,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 cmake --build build -j2
 ```
 
-DXVK and vkd3d-proton are only needed for Direct3D programs and games. The Microsoft root certificates let installers check the signatures of the packages they download, as setups built with WiX Burn and the .NET and Visual C++ redistributables do.
+DXVK and vkd3d-proton are only needed for Direct3D programs and games. When their 64-bit directories are configured, the build places their DLLs beside Raven for normal launches. The Microsoft root certificates let installers check the signatures of the packages they download, as setups built with WiX Burn and the .NET and Visual C++ redistributables do.
 
 On an X11 session, `--desktop=x11` takes the place of `--desktop=wayland`. The X11 desktop is experimental; `-DRAVEN_DESKTOP_WAYLAND=OFF` builds Raven without Wayland at all.
 

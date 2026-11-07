@@ -14,6 +14,7 @@ public:
 	bool dispatch(std::string_view name);
 	void set_loader(std::function<uint64_t(std::string)> load, std::function<bool(uint64_t)> free);
 	void set_call(std::function<NativeResult(uint64_t, std::span<const uint64_t>)> caller) { invoke = std::move(caller); }
+	void set_package_root(std::string root) { package_root = std::move(root); }
 	// The flags of the LoadLibraryEx call being served, zero for LoadLibrary.
 	uint32_t load_flags() const { return flags; }
 	// A library asked for by a path is a particular file, which only the loader that read it can tell is already in the process.
@@ -31,6 +32,7 @@ private:
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> invoke;
 	std::function<uint64_t(const std::string &)> path_lookup;
 	uint32_t flags = 0;
+	std::string package_root;
 	std::optional<std::string> guest_name(uint64_t address, bool wide) const;
 	uint64_t procedure(uint64_t handle, uint64_t name);
 };

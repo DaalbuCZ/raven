@@ -138,6 +138,31 @@ int raven_entry(void)
 		WindowsDeleteString(app_path); WindowsDeleteString(source_path); WindowsDeleteString(dictionary_name);
 		FreeLibrary(component);
 	}
+	/* The dependency's two differently sized theme filenames must become valid URIs and both merge. */
+	{
+		HSTRING name = make(L"Microsoft.UI.Xaml.Controls.XamlControlsResources");
+		IInspectable *controls = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
+		__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *merged = NULL;
+		UINT32 count = 0;
+		if (RoActivateInstance(name, &controls) != S_OK || !controls ||
+			IInspectable_QueryInterface(controls, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary) != S_OK ||
+			dictionary->lpVtbl->get_MergedDictionaries(dictionary, (void **)&merged) != S_OK || !merged ||
+			merged->lpVtbl->get_Size(merged, &count) != S_OK || count != 2) return 21;
+		for (UINT32 i = 0; i < count; ++i) {
+			__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *child = NULL;
+			__FIMap_2_IInspectable_IInspectable *map = NULL;
+			IInspectable *source = NULL;
+			UINT32 entries = 0;
+			if (merged->lpVtbl->GetAt(merged, i, &child) != S_OK || !child ||
+				IInspectable_QueryInterface((IInspectable *)child, &IID___FIMap_2_IInspectable_IInspectable, (void **)&map) != S_OK ||
+				map->lpVtbl->get_Size(map, &entries) != S_OK || entries != 1 ||
+				child->lpVtbl->get_Source(child, (uint64_t)(uintptr_t)&source) != S_OK || !source) return 22;
+			IInspectable_Release(source); map->lpVtbl->Release(map); child->lpVtbl->Release(child);
+		}
+		merged->lpVtbl->Release(merged); dictionary->lpVtbl->Release(dictionary); IInspectable_Release(controls);
+		WindowsDeleteString(name);
+	}
 	IInspectable_Release(wrong);
 	uri->lpVtbl->Release(uri); missing->lpVtbl->Release(missing); invalid->lpVtbl->Release(invalid);
 	dictionaries->lpVtbl->Release(dictionaries); missing_type->lpVtbl->Release(missing_type); uris->lpVtbl->Release(uris);

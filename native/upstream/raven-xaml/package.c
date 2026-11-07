@@ -12,7 +12,7 @@
  * A manifest that is missing or carries no usable Identity answers the failure a process without package identity gets:
  * get_Current still succeeds and hands out the package with an empty Id (empty Name and Publisher, version 0.0.0.0),
  * which a guest can tell apart from an identified package without catching. The collection-valued properties
- * (Dependencies' vector view, InstalledLocation's folder, Logo's Uri) answer E_NOTIMPL: no observed startup path has
+ * (Dependencies' vector view and Logo's Uri) answer E_NOTIMPL: no observed startup path has
  * asked for them yet. */
 #define INITGUID
 #define CINTERFACE
@@ -207,6 +207,8 @@ struct package_manifest {
 	UINT32 dependency_count;
 	BOOL framework;
 	BOOL has_identity; /* an Identity element was read; its Name attribute decides whether it identifies */
+	const WCHAR *requested_class;
+	WCHAR server_path[MAX_PATH], server_candidate[MAX_PATH];
 };
 
 /* A decoded value collects into a UTF-8 staging buffer before it becomes UTF-16. */
@@ -538,7 +540,8 @@ enum capture_kind {
 	capture_display_name,
 	capture_publisher_display,
 	capture_description,
-	capture_logo
+	capture_logo,
+	capture_server_path
 };
 
 /* The scanner walks tags and text with a tolerant hand: only the elements the identity needs are recognized, matched by
@@ -551,6 +554,7 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 	struct { BYTE name[64]; UINT32 length; } stack[16];
 	UINT32 depth = 0;
 	UINT32 position = 0;
+	BOOL winrt_extension = FALSE;
 	enum capture_kind capture = capture_none;
 	struct utf8_value value;
 	utf8_clear(&value);
@@ -597,6 +601,7 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 			continue;
 		}
 		if (position + 2 <= length && data[position + 1] == '/') {
+			if (depth && stack_is(stack[depth - 1].name, stack[depth - 1].length, "Extension")) winrt_extension = FALSE;
 			position += 2;
 			while (position < length && data[position] != '>')
 				++position;
@@ -616,6 +621,11 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 				case capture_logo:
 					store_utf8(manifest->logo, MANIFEST_TEXT_MAX, &value);
 					break;
+				case capture_server_path:
+					if (value.length < sizeof value.text && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+						(const char *)value.text, (INT)value.length, NULL, 0) < MAX_PATH)
+						store_utf8(manifest->server_candidate, MAX_PATH, &value);
+					break;
 				default:
 					break;
 				}
@@ -633,6 +643,7 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 			BOOL is_identity = FALSE;
 			BOOL is_application = FALSE;
 			BOOL in_dependencies = FALSE;
+			BOOL is_extension = FALSE, is_server = FALSE, is_class = FALSE;
 			struct package_dependency *dependency = NULL;
 			enum capture_kind property = capture_none;
 			position = name_start;
@@ -646,6 +657,20 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 			is_application = depth && stack_is(stack[depth - 1].name, stack[depth - 1].length, "Applications") &&
 				bytes_equal(data, name_start, name_length, "Application");
 			in_dependencies = depth && stack_is(stack[depth - 1].name, stack[depth - 1].length, "Dependencies");
+			is_extension = bytes_equal(data, name_start, name_length, "Extension");
+			is_server = winrt_extension && depth && stack_is(stack[depth - 1].name, stack[depth - 1].length, "Extension") &&
+				bytes_equal(data, name_start, name_length, "InProcessServer");
+			is_class = winrt_extension && depth >= 2 && stack_is(stack[depth - 2].name, stack[depth - 2].length, "Extension") &&
+				stack_is(stack[depth - 1].name, stack[depth - 1].length, "InProcessServer") &&
+				bytes_equal(data, name_start, name_length, "ActivatableClass");
+			if (is_extension) winrt_extension = FALSE;
+			if (is_server) manifest->server_candidate[0] = 0;
+			if (winrt_extension && depth >= 2 && stack_is(stack[depth - 2].name, stack[depth - 2].length, "Extension") &&
+				stack_is(stack[depth - 1].name, stack[depth - 1].length, "InProcessServer") &&
+				bytes_equal(data, name_start, name_length, "Path")) {
+				capture = capture_server_path;
+				utf8_clear(&value);
+			}
 			if (is_identity)
 				manifest->has_identity = TRUE;
 			if (in_dependencies && bytes_equal(data, name_start, name_length, "PackageDependency") &&
@@ -699,7 +724,19 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 					break;
 				value_length = position - value_start;
 				++position;
-				if (is_identity) {
+				if (is_extension && bytes_equal(data, attribute_name, attribute_length, "Category")) {
+					winrt_extension = bytes_equal(data, value_start, value_length, "windows.activatableClass.inProcessServer");
+				} else if (is_class && manifest->requested_class && manifest->server_candidate[0] && !manifest->server_path[0] &&
+					bytes_equal(data, attribute_name, attribute_length, "ActivatableClassId")) {
+					WCHAR id[MANIFEST_TEXT_MAX];
+					utf8_clear(&value);
+					utf8_markup(&value, data + value_start, value_length);
+					if (value.length < sizeof value.text && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+						(const char *)value.text, (INT)value.length, NULL, 0) < ARRAYSIZE(id)) {
+						store_utf8(id, ARRAYSIZE(id), &value);
+						if (!lstrcmpW(id, manifest->requested_class)) lstrcpyW(manifest->server_path, manifest->server_candidate);
+					}
+				} else if (is_identity) {
 					if (bytes_equal(data, attribute_name, attribute_length, "Name")) {
 						utf8_clear(&value);
 						utf8_markup(&value, data + value_start, value_length);
@@ -765,8 +802,10 @@ static void parse_manifest(const BYTE *data, UINT32 length, struct package_manif
 			if (position >= length || data[position] != '>')
 				break;
 			++position;
-			if (self_closing)
+			if (self_closing) {
+				if (is_extension) winrt_extension = FALSE;
 				continue;
+			}
 			if (depth < sizeof stack / sizeof stack[0]) {
 				stack[depth].length = name_length < sizeof stack[depth].name ? name_length : sizeof stack[depth].name;
 				memcpy(stack[depth].name, data + name_start, stack[depth].length);
@@ -827,7 +866,26 @@ static HRESULT WINAPI package_trust(package_i *iface, TrustLevel *level);
 	static HRESULT WINAPI part##_trust(iface_type *iface, TrustLevel *level) \
 	{ (void)iface; return inspectable_trust(level); }
 
-PACKAGE_PART_LIFETIME(package_id, package_id_i)
+/* PackageId is a separate WinRT object, even though it shares the singleton's lifetime and data. */
+static HRESULT WINAPI package_id_query(package_id_i *iface, REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID___x_ABI_CWindows_CApplicationModel_CIPackageId) && !equal_iid(iid, &IID_IAgileObject)) return E_NOINTERFACE;
+	*out = iface;
+	package_addref((package_i *)((struct package_id_part *)iface)->owner);
+	return S_OK;
+}
+static ULONG WINAPI package_id_addref(package_id_i *iface)
+{ return package_addref((package_i *)((struct package_id_part *)iface)->owner); }
+static ULONG WINAPI package_id_release(package_id_i *iface)
+{ return package_release((package_i *)((struct package_id_part *)iface)->owner); }
+static HRESULT WINAPI package_id_iids(package_id_i *iface, ULONG *count, IID **iids)
+{ (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI package_id_trust(package_id_i *iface, TrustLevel *level)
+{ (void)iface; return inspectable_trust(level); }
+
 PACKAGE_PART_LIFETIME(package2, package2_i)
 PACKAGE_PART_LIFETIME(package3, package3_i)
 
@@ -951,14 +1009,12 @@ static HRESULT WINAPI package_query(package_i *iface, REFIID iid, void **out)
 		return E_POINTER;
 	*out = NULL;
 	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
-		equal_iid(iid, &IID___x_ABI_CWindows_CApplicationModel_CIPackage))
+		equal_iid(iid, &IID___x_ABI_CWindows_CApplicationModel_CIPackage) || equal_iid(iid, &IID_IAgileObject))
 		*out = iface;
 	else if (equal_iid(iid, &IID___x_ABI_CWindows_CApplicationModel_CIPackage2))
 		*out = &((struct package_object *)iface)->second;
 	else if (equal_iid(iid, &IID___x_ABI_CWindows_CApplicationModel_CIPackage3))
 		*out = &((struct package_object *)iface)->third;
-	else if (equal_iid(iid, &IID___x_ABI_CWindows_CApplicationModel_CIPackageId))
-		*out = &((struct package_object *)iface)->id;
 	else
 		return E_NOINTERFACE;
 	package_addref(iface);
@@ -1004,14 +1060,20 @@ static HRESULT WINAPI package_get_id(package_i *iface, package_id_i **value)
 	return S_OK;
 }
 
-/* The folder object the real Windows answers with is not built; no observed startup path has asked for it yet. */
+/* The manifest's directory is the root Raven uses for this package. */
 static HRESULT WINAPI package_get_installed_location(package_i *iface, __x_ABI_CWindows_CStorage_CIStorageFolder **value)
 {
+	WCHAR path[MAX_PATH];
 	(void)iface;
-	if (!value)
-		return E_POINTER;
+	if (!value) return E_POINTER;
 	*value = NULL;
-	return E_NOTIMPL;
+	if (!find_manifest(path)) return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+	WCHAR *slash = path + lstrlenW(path);
+	while (slash > path && *slash != L'\\') --slash;
+	if (*slash != L'\\') return E_FAIL;
+	if (slash == path + 2 && path[1] == L':') slash[1] = 0;
+	else *slash = 0;
+	return raven_storage_installed_folder(path, value);
 }
 
 static HRESULT WINAPI package_get_is_framework(package_i *iface, boolean *value)
@@ -1030,7 +1092,7 @@ static HRESULT WINAPI package_get_dependencies(package_i *iface, __FIVectorView_
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI package2_get_display_name(package2_i *iface, HSTRING *value)
@@ -1058,7 +1120,7 @@ static HRESULT WINAPI package2_get_logo(package2_i *iface, __x_ABI_CWindows_CFou
 	if (!value)
 		return E_POINTER;
 	*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI package2_get_is_resource_package(package2_i *iface, boolean *value)
@@ -1212,7 +1274,7 @@ static HRESULT WINAPI package3_get_installed_date(package3_i *iface, __x_ABI_CWi
 	if (!value)
 		return E_POINTER;
 	ZeroMemory(value, sizeof *value);
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI package3_get_app_list_entries_async(package3_i *iface,
@@ -1222,7 +1284,7 @@ static HRESULT WINAPI package3_get_app_list_entries_async(package3_i *iface,
 	if (!operation)
 		return E_POINTER;
 	*operation = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI package_id_get_name(package_id_i *iface, HSTRING *value)
@@ -1488,7 +1550,8 @@ static HRESULT WINAPI factory_query(IActivationFactory *iface, REFIID iid, void 
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory))
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory) ||
+		equal_iid(iid, &IID_IAgileObject))
 		*out = &self->activation;
 	else if (equal_iid(iid, &IID___x_ABI_CWindows_CApplicationModel_CIPackageStatics))
 		*out = &self->statics;
@@ -1606,6 +1669,47 @@ __declspec(dllexport) HRESULT raven_package_manifest_application_entry_point(con
 	return create_string(manifest.entry_point, out);
 }
 
+/* shortcut: only the current package's unprefixed in-process declarations are searched; include framework dependencies
+ * and XML namespace prefixes when package graph activation is implemented. */
+__declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id, HSTRING *out)
+{
+	WCHAR manifest_path[MAX_PATH], path[MAX_PATH];
+	struct package_manifest manifest;
+	BYTE *data;
+	UINT32 length;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (!class_id) return E_INVALIDARG;
+	if (!find_manifest(manifest_path) || !read_file(manifest_path, &data, &length)) return S_FALSE;
+	memset(&manifest, 0, sizeof manifest);
+	manifest.requested_class = WindowsGetStringRawBuffer(class_id, NULL);
+	parse_manifest(data, length, &manifest);
+	FREE(data);
+	if (!manifest.server_path[0]) return S_FALSE;
+	/* Package paths are relative and cannot escape their root or select another drive. */
+	const WCHAR *p = manifest.server_path, *part = p;
+	for (;;) {
+		if ((*p && *p < 32) || *p == L':' || *p == L'/' || *p == L'*' || *p == L'?' ||
+			*p == L'"' || *p == L'<' || *p == L'>' || *p == L'|') return E_INVALIDARG;
+		if (*p == L'\\' || !*p) {
+			UINT32 count = (UINT32)(p - part);
+			if (!count || part[count - 1] == L'.' || part[count - 1] == L' ') return E_INVALIDARG;
+			if (!*p) break;
+			part = p + 1;
+		}
+		++p;
+	}
+	WCHAR *slash = manifest_path + lstrlenW(manifest_path);
+	while (slash > manifest_path && *slash != L'\\') --slash;
+	if (*slash != L'\\') return E_INVALIDARG;
+	*slash = 0;
+	if (lstrlenW(manifest_path) + 1 + lstrlenW(manifest.server_path) >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+	lstrcpyW(path, manifest_path);
+	lstrcatW(path, L"\\");
+	lstrcatW(path, manifest.server_path);
+	return WindowsCreateString(path, (UINT32)lstrlenW(path), out);
+}
+
 HRESULT raven_package_factory(HSTRING name, IActivationFactory **out)
 {
 	UINT32 length = 0;
@@ -1619,4 +1723,27 @@ HRESULT raven_package_factory(HSTRING name, IActivationFactory **out)
 	InterlockedIncrement(&factory_instance.refs);
 	*out = (IActivationFactory *)&factory_instance.activation;
 	return S_OK;
+}
+
+/* The manifest's directory, the root the current package's files live under; the xml_dom
+ * module maps ms-appx:/// URIs onto it. */
+BOOL raven_package_root(WCHAR *path, UINT32 capacity)
+{
+	WCHAR manifest[MAX_PATH];
+	WCHAR *slash;
+	if (!path || !capacity || !find_manifest(manifest))
+		return FALSE;
+	slash = manifest + lstrlenW(manifest);
+	while (slash > manifest && *slash != L'\\')
+		--slash;
+	if (*slash != L'\\')
+		return FALSE;
+	if (slash == manifest + 2 && manifest[1] == L':')
+		slash[1] = 0;
+	else
+		*slash = 0;
+	if ((UINT32)lstrlenW(manifest) + 1 > capacity)
+		return FALSE;
+	lstrcpyW(path, manifest);
+	return TRUE;
 }

@@ -688,3 +688,64 @@ BOOL raven_input_element_contains(IInspectable *element, const __x_ABI_CWindows_
 	IUnknown_Release(identity);
 	return contained;
 }
+
+/* FocusManager statics6 owns process-wide event registrations. The current input
+ * router does not yet model keyboard focus, so it cannot deliver these events. */
+static const IID focus_statics6_iid = {0x3546a1b6,0x20bf,0x5007,{0x92,0x9d,0xe6,0xd3,0x2e,0x16,0xaf,0xe4}};
+static const WCHAR focus_name[] = L"Windows.UI.Xaml.Input.FocusManager";
+static IActivationFactory focus_factory;
+struct focus_statics6_vtbl {
+	HRESULT (WINAPI *query)(void *, REFIID, void **);
+	ULONG (WINAPI *addref)(void *), (WINAPI *release)(void *);
+	HRESULT (WINAPI *iids)(void *, ULONG *, IID **), (WINAPI *name)(void *, HSTRING *), (WINAPI *trust)(void *, TrustLevel *);
+	HRESULT (WINAPI *add_got)(void *, IUnknown *, EventRegistrationToken *), (WINAPI *remove_got)(void *, EventRegistrationToken);
+	HRESULT (WINAPI *add_lost)(void *, IUnknown *, EventRegistrationToken *), (WINAPI *remove_lost)(void *, EventRegistrationToken);
+	HRESULT (WINAPI *add_getting)(void *, IUnknown *, EventRegistrationToken *), (WINAPI *remove_getting)(void *, EventRegistrationToken);
+	HRESULT (WINAPI *add_losing)(void *, IUnknown *, EventRegistrationToken *), (WINAPI *remove_losing)(void *, EventRegistrationToken);
+};
+struct focus_statics6 { const struct focus_statics6_vtbl *lpVtbl; };
+static struct focus_statics6 focus_statics;
+static struct raven_event_list focus_events[4];
+static INIT_ONCE focus_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK focus_initialize(PINIT_ONCE once, PVOID parameter, PVOID *context)
+{
+	(void)once; (void)parameter; (void)context;
+	for (int i=0; i<4; ++i) InitializeCriticalSection(&focus_events[i].lock);
+	return TRUE;
+}
+static HRESULT WINAPI focus_query(void *self, REFIID iid, void **out)
+{
+	(void)self;
+	if (!out) return E_POINTER;
+	*out=NULL;
+	if (IsEqualIID(iid,&IID_IUnknown) || IsEqualIID(iid,&IID_IInspectable) || IsEqualIID(iid,&IID_IActivationFactory) || IsEqualIID(iid,&IID_IAgileObject)) *out=&focus_factory;
+	else if (IsEqualIID(iid,&focus_statics6_iid)) *out=&focus_statics;
+	else return E_NOINTERFACE;
+	return S_OK;
+}
+static ULONG WINAPI focus_addref(void *self) { (void)self; return 2; }
+static ULONG WINAPI focus_release(void *self) { (void)self; return 1; }
+static HRESULT WINAPI focus_iids(void *self, ULONG *count, IID **out) { (void)self; if (!count || !out) return E_POINTER; *count=0; *out=NULL; return S_OK; }
+static HRESULT WINAPI focus_get_name(void *self, HSTRING *out) { (void)self; if (!out) return E_POINTER; return WindowsCreateString(focus_name,ARRAYSIZE(focus_name)-1,out); }
+static HRESULT WINAPI focus_trust(void *self, TrustLevel *out) { (void)self; if (!out) return E_POINTER; *out=BaseTrust; return S_OK; }
+static HRESULT WINAPI focus_activate(IActivationFactory *self,IInspectable **out) { (void)self; if (!out) return E_POINTER; *out=NULL; return E_NOTIMPL; }
+#define FOCUS_EVENT(n,i) \
+static HRESULT WINAPI focus_add_##n(void *self,IUnknown *handler,EventRegistrationToken *token) { (void)self; return raven_event_add(&focus_events[i],handler,token); } \
+static HRESULT WINAPI focus_remove_##n(void *self,EventRegistrationToken token) { (void)self; return raven_event_remove(&focus_events[i],token); }
+FOCUS_EVENT(got,0) FOCUS_EVENT(lost,1) FOCUS_EVENT(getting,2) FOCUS_EVENT(losing,3)
+#undef FOCUS_EVENT
+static const struct focus_statics6_vtbl focus_statics_table = {focus_query,focus_addref,focus_release,focus_iids,focus_get_name,focus_trust,
+	focus_add_got,focus_remove_got,focus_add_lost,focus_remove_lost,focus_add_getting,focus_remove_getting,focus_add_losing,focus_remove_losing};
+static struct focus_statics6 focus_statics = {&focus_statics_table};
+static const IActivationFactoryVtbl focus_factory_table = {(void *)focus_query,(void *)focus_addref,(void *)focus_release,(void *)focus_iids,(void *)focus_get_name,(void *)focus_trust,focus_activate};
+static IActivationFactory focus_factory = {&focus_factory_table};
+HRESULT raven_focus_manager_factory(HSTRING key,IActivationFactory **out)
+{
+	UINT32 length=0; const WCHAR *text=WindowsGetStringRawBuffer(key,&length);
+	if (!out) return E_POINTER;
+	*out=NULL;
+	if (length!=ARRAYSIZE(focus_name)-1 || CompareStringOrdinal(text,length,focus_name,-1,FALSE)!=CSTR_EQUAL) return CLASS_E_CLASSNOTAVAILABLE;
+	InitOnceExecuteOnce(&focus_once,focus_initialize,NULL,NULL);
+	*out=&focus_factory;
+	return S_OK;
+}

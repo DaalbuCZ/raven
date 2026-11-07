@@ -50,6 +50,26 @@ static const WCHAR cursor_name[] = L"Windows.UI.Core.CoreCursor";
 static const WCHAR dispatcher_name[] = L"Windows.UI.Core.CoreDispatcher";
 static const WCHAR action_name[] = L"Windows.Foundation.IAsyncAction";
 
+void raven_trace_not_implemented(const char *function)
+{
+	char message[128];
+	UINT32 at = 0;
+	static const char head[] = "raven-xaml not implemented: ";
+	for (const char *scan = head; *scan && at < ARRAYSIZE(message) - 1; ++scan)
+		message[at++] = *scan;
+	for (const char *scan = function; *scan && at < ARRAYSIZE(message) - 1; ++scan)
+		message[at++] = *scan;
+	message[at] = 0;
+	/* The host plays the debugger when RAVEN_TRACE_DEBUG is set; the guest's own environment never carries it. */
+	OutputDebugStringA(message);
+}
+
+/* A one-line note for the RAVEN_TRACE_DEBUG diagnosis of an activation route. */
+void raven_trace_note(const char *text)
+{
+	OutputDebugStringA(text);
+}
+
 LONG raven_xaml_objects;
 static LONG next_action_id;
 static DWORD window_tls = TLS_OUT_OF_INDEXES;
@@ -389,7 +409,7 @@ static HRESULT cursor_create(__x_ABI_CWindows_CUI_CCore_CCoreCursorType type, UI
 		return E_POINTER;
 	*out = NULL;
 	if (type < CoreCursorType_Arrow || type > cursor_type_last())
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:412\n"); return E_INVALIDARG; }
 	struct cursor *self = ALLOC(sizeof *self);
 	if (!self)
 		return E_OUTOFMEMORY;
@@ -1150,7 +1170,7 @@ static HRESULT WINAPI dispatcher_process_events(core_dispatcher *iface, __x_ABI_
 	if (window->thread != GetCurrentThreadId())
 		return RPC_E_WRONG_THREAD;
 	if (options < CoreProcessEventsOption_ProcessOneAndAllPending || options > CoreProcessEventsOption_ProcessAllIfPresent)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:1173\n"); return E_INVALIDARG; }
 	for (;;) {
 		struct queued *node;
 		MSG message;
@@ -1264,7 +1284,7 @@ static HRESULT WINAPI dispatcher_run_async(core_dispatcher *iface, __x_ABI_CWind
 	if (!callback)
 		return E_POINTER;
 	if (priority < CoreDispatcherPriority_Idle || priority > CoreDispatcherPriority_High)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:1287\n"); return E_INVALIDARG; }
 	if (!(action = ALLOC(sizeof *action)))
 		return E_OUTOFMEMORY;
 	action->lpVtbl = &action_table;
@@ -1826,6 +1846,11 @@ HRESULT raven_current_window(core_window **out)
 	return statics_for_current_thread(NULL, out);
 }
 
+HRESULT raven_window_minimum_size(core_window *iface, __x_ABI_CWindows_CFoundation_CSize size)
+{
+	return raven_desktop_minimum_size(((struct window *)iface)->desktop, size);
+}
+
 HRESULT raven_dispatcher_queue_current(__x_ABI_CWindows_CSystem_CIDispatcherQueue **out)
 {
 	if (!out) return E_POINTER;
@@ -1846,6 +1871,160 @@ HRESULT raven_dispatcher_queue_current(__x_ABI_CWindows_CSystem_CIDispatcherQueu
 HRESULT raven_window_timer(core_window *iface, UINT_PTR id, BOOL *handled)
 {
 	return raven_dispatcher_queue_timer(((struct window *)iface)->system_queue, id, handled);
+}
+
+
+/* The attribute classes a .NET Native runtime synthesizes for the contract checks of the APIs it compiled
+ * ("Windows.Foundation.Metadata.ApiI" among them): no Windows metadata declares them, and the guest's own
+ * runtime registers them on a real system. The factory serves a bare attribute object, whose only real
+ * surface is its IInspectable identity; the attributes carry no members a guest can call. */
+static const WCHAR metadata_attribute_name[] = L"Windows.Foundation.Metadata.ApiI";
+static const IActivationFactoryVtbl metadata_attribute_activation_table;
+static const IInspectableVtbl metadata_attribute_object_table;
+static struct {
+	const IActivationFactoryVtbl *activation;
+	const IInspectableVtbl *object;
+	LONG refs;
+} metadata_attribute = {&metadata_attribute_activation_table, &metadata_attribute_object_table, 1};
+
+static HRESULT WINAPI metadata_attribute_object_query(IInspectable *iface, REFIID iid, void **out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, &IID_IAgileObject))
+		return E_NOINTERFACE;
+	*out = (void *)&metadata_attribute.object;
+	InterlockedIncrement(&metadata_attribute.refs);
+	return S_OK;
+}
+
+static ULONG WINAPI metadata_attribute_object_addref(IInspectable *iface)
+{
+	(void)iface;
+	return (ULONG)InterlockedIncrement(&metadata_attribute.refs);
+}
+
+static ULONG WINAPI metadata_attribute_object_release(IInspectable *iface)
+{
+	(void)iface;
+	return (ULONG)InterlockedDecrement(&metadata_attribute.refs);
+}
+
+static HRESULT WINAPI metadata_attribute_object_iids(IInspectable *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	if (!count || !iids)
+		return E_POINTER;
+	*count = 0;
+	*iids = NULL;
+	return S_OK;
+}
+
+static HRESULT WINAPI metadata_attribute_object_name(IInspectable *iface, HSTRING *out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	return WindowsCreateString(metadata_attribute_name, ARRAYSIZE(metadata_attribute_name) - 1, out);
+}
+
+static HRESULT WINAPI metadata_attribute_object_trust(IInspectable *iface, TrustLevel *out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	*out = BaseTrust;
+	return S_OK;
+}
+
+static const IInspectableVtbl metadata_attribute_object_table = {
+	metadata_attribute_object_query, metadata_attribute_object_addref, metadata_attribute_object_release,
+	metadata_attribute_object_iids, metadata_attribute_object_name, metadata_attribute_object_trust,
+};
+
+static HRESULT WINAPI metadata_attribute_activation_query(IActivationFactory *iface, REFIID iid, void **out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) &&
+		!equal_iid(iid, &IID_IActivationFactory) && !equal_iid(iid, &IID_IAgileObject))
+		return E_NOINTERFACE;
+	*out = (void *)&metadata_attribute.activation;
+	InterlockedIncrement(&metadata_attribute.refs);
+	return S_OK;
+}
+
+static ULONG WINAPI metadata_attribute_activation_addref(IActivationFactory *iface)
+{
+	(void)iface;
+	return (ULONG)InterlockedIncrement(&metadata_attribute.refs);
+}
+
+static ULONG WINAPI metadata_attribute_activation_release(IActivationFactory *iface)
+{
+	(void)iface;
+	return (ULONG)InterlockedDecrement(&metadata_attribute.refs);
+}
+
+static HRESULT WINAPI metadata_attribute_activation_iids(IActivationFactory *iface, ULONG *count, IID **iids)
+{
+	(void)iface;
+	if (!count || !iids)
+		return E_POINTER;
+	*count = 0;
+	*iids = NULL;
+	return S_OK;
+}
+
+static HRESULT WINAPI metadata_attribute_activation_name(IActivationFactory *iface, HSTRING *out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	return WindowsCreateString(metadata_attribute_name, ARRAYSIZE(metadata_attribute_name) - 1, out);
+}
+
+static HRESULT WINAPI metadata_attribute_activation_trust(IActivationFactory *iface, TrustLevel *out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	*out = BaseTrust;
+	return S_OK;
+}
+
+static HRESULT WINAPI metadata_attribute_activate(IActivationFactory *iface, IInspectable **out)
+{
+	(void)iface;
+	if (!out)
+		return E_POINTER;
+	*out = (IInspectable *)&metadata_attribute.object;
+	InterlockedIncrement(&metadata_attribute.refs);
+	return S_OK;
+}
+
+static const IActivationFactoryVtbl metadata_attribute_activation_table = {
+	metadata_attribute_activation_query, metadata_attribute_activation_addref, metadata_attribute_activation_release,
+	metadata_attribute_activation_iids, metadata_attribute_activation_name, metadata_attribute_activation_trust,
+	metadata_attribute_activate,
+};
+
+static HRESULT raven_metadata_attribute_factory(HSTRING name, IActivationFactory **out)
+{
+	UINT32 length = 0;
+	const WCHAR *text = WindowsGetStringRawBuffer(name, &length);
+	/* the family the runtime may synthesize: ApiI and its siblings share one bare object */
+	if (length < ARRAYSIZE(L"Windows.Foundation.Metadata.Api") - 1 ||
+		CompareStringOrdinal(text, ARRAYSIZE(L"Windows.Foundation.Metadata.Api") - 1,
+			L"Windows.Foundation.Metadata.Api", ARRAYSIZE(L"Windows.Foundation.Metadata.Api") - 1, FALSE) != CSTR_EQUAL)
+		return CLASS_E_CLASSNOTAVAILABLE;
+	InterlockedIncrement(&metadata_attribute.refs);
+	*out = (IActivationFactory *)&metadata_attribute.activation;
+	return S_OK;
 }
 
 /* The surface a composition target for this window presents into: the desktop window handle and its DIP-to-pixel scale. */
@@ -1885,6 +2064,10 @@ static HRESULT raven_core_cursor_factory(HSTRING name, IActivationFactory **out)
 HRESULT raven_property_set_factory(HSTRING name, IActivationFactory **out);
 
 /* PropertyValue lives in property_value.c; declared here so the manifest-driven activation chain can route to it. */
+HRESULT raven_colors_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_focus_manager_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_application_view_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_system_support_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_property_value_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_uri_factory(HSTRING name, IActivationFactory **out);
 
@@ -1911,7 +2094,22 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 	if (length != ARRAYSIZE(window_name) - 1 ||
 		CompareStringOrdinal(text, (int)length, window_name, -1, FALSE) != CSTR_EQUAL)
 	{
-		HRESULT result = raven_core_cursor_factory(name, out);
+		/* the real ApiInformation factory answers before the synthesized-attribute family, whose prefix match would take it */
+	HRESULT result = raven_colors_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_focus_manager_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_application_view_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_system_support_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_api_information_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_metadata_attribute_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_xaml_xml_dom_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_core_cursor_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_application_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
@@ -1926,6 +2124,10 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 			result = raven_composition_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_xaml_resource_context_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_xaml_globalization_preferences_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_xaml_application_languages_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_xaml_memory_manager_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
@@ -1946,6 +2148,10 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 			result = raven_uri_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_automation_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_automation_properties_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_data_writer_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_dictionary_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)

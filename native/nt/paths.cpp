@@ -51,6 +51,24 @@ std::optional<std::string> case_match(const std::filesystem::path &directory, co
 
 }
 
+std::optional<std::u16string> NativePaths::application_package_root(std::u16string_view image_path) const
+{
+	const auto slash = image_path.find_last_of(u"\\/");
+	if (slash == image_path.npos) return std::nullopt;
+	const std::u16string directory(image_path.substr(0, slash == 2 && image_path.size() > 2 && image_path[1] == u':' ? 3 : slash));
+	auto manifest_exists = [&](const std::u16string &root) {
+		const auto manifest = resolve(root + u"\\AppxManifest.xml");
+		std::error_code error;
+		return manifest && manifest->exists && std::filesystem::is_regular_file(manifest->host, error);
+	};
+	if (manifest_exists(directory)) return directory;
+	auto stem = std::u16string(image_path.substr(slash + 1));
+	if (stem.size() > 4 && equal_fold(std::u16string_view(stem).substr(stem.size() - 4), u".exe")) stem.resize(stem.size() - 4);
+	const auto fixture = directory + u"\\" + stem;
+	if (manifest_exists(fixture)) return fixture;
+	return std::nullopt;
+}
+
 std::u16string NativePaths::volume_name(char16_t letter)
 {
 	constexpr char16_t hex[] = u"0123456789abcdef";

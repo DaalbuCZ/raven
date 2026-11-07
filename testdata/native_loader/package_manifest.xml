@@ -9,4 +9,14 @@
   <Resources>
     <Resource Language="en-US"/>
   </Resources>
+  <Extensions>
+    <Extension Category="other"><InProcessServer><Path>wrong.dll</Path><ActivatableClass ActivatableClassId="Fixture.WrongCategory"/></InProcessServer></Extension>
+    <Extension Category="windows.activatableClass.inProcessServer"><InProcessServer>
+      <Path>fixture-winrt.dll</Path>
+      <ActivatableClass ActivatableClassId="Fixture.PackagedClass" ThreadingModel="both"/>
+    </InProcessServer></Extension>
+    <Extension Category="windows.activatableClass.inProcessServer"><InProcessServer>
+      <Path>..\escape.dll</Path><ActivatableClass ActivatableClassId="Fixture.Traversal" ThreadingModel="both"/>
+    </InProcessServer></Extension>
+  </Extensions>
 </Package>

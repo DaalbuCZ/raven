@@ -53,6 +53,24 @@ CRT float nextafterf(float x, float y)
 	return v.value;
 }
 
+/* Microsoft long double has the same representation as double. */
+__asm__(".section .drectve\n\t.ascii \" -export:nexttoward=raven_nexttoward -export:nexttowardf=raven_nexttowardf\"\n\t.text");
+double raven_nexttoward(double x, double y) { return nextafter(x, y); }
+float raven_nexttowardf(float x, double y)
+{
+	if (x != x || y != y) return (float)(x + y);
+	if ((double)x == y) return (float)y;
+	return nextafterf(x, y > x ? 1.0f / 0.0f : -1.0f / 0.0f);
+}
+
+/* FPREM1 computes the nearest-even quotient without losing precision for very large ratios. */
+CRT double remainder(double x, double y)
+{
+	unsigned short status;
+	do { __asm__ volatile("fprem1; fnstsw %0" : "=a"(status), "+t"(x) : "u"(y) : "cc"); } while (status & 0x400);
+	return x;
+}
+
 /* A first guess from the logarithm, then Newton steps, which double the correct digits each time. */
 CRT double cbrt(double x)
 {
@@ -103,6 +121,42 @@ CRT float remainderf(float x, float y)
 		return 0.0f / 0.0f;
 	const double quotient = rint((double)x / y);
 	return (float)((double)x - quotient * y);
+}
+
+/* The regularized incomplete gamma at a = 1/2: a series near zero, a continued fraction in the tail. */
+CRT double erf(double x)
+{
+	if (x != x || x == 0) return x;
+	const double magnitude = fabs(x);
+	if (magnitude >= 6.0) return x < 0 ? -1.0 : 1.0;
+	const double z = magnitude * magnitude;
+	const double inverse_sqrt_pi = 0.56418958354775628695;
+	double result;
+	if (z < 1.5) {
+		double term = 2.0, sum = term;
+		for (int i = 1; i < 200; ++i) {
+			term *= z / (i + 0.5);
+			sum += term;
+			if (term <= sum * 1e-16) break;
+		}
+		result = magnitude * exp(-z) * inverse_sqrt_pi * sum;
+	} else {
+		double b = z + 0.5, c = 1e300, d = 1 / b, fraction = d;
+		for (int i = 1; i < 200; ++i) {
+			const double a = -(double)i * (i - 0.5);
+			b += 2;
+			d = a * d + b;
+			if (fabs(d) < 1e-300) d = 1e-300;
+			c = b + a / c;
+			if (fabs(c) < 1e-300) c = 1e-300;
+			d = 1 / d;
+			const double change = d * c;
+			fraction *= change;
+			if (fabs(change - 1) < 1e-15) break;
+		}
+		result = 1 - exp(-z) * magnitude * inverse_sqrt_pi * fraction;
+	}
+	return x < 0 ? -result : result;
 }
 
 /* The logarithm of the gamma function: the Lanczos series for positive arguments and the reflection formula below one half. */
@@ -171,6 +225,7 @@ CRT void _fpreset(void)
 
 CRT void _set_controlfp(unsigned value, unsigned mask) { _controlfp(value, mask); }
 CRT int _set_FMA3_enable(int enable) { return 0; }
+CRT int _get_FMA3_enable(void) { return 0; }
 CRT short _dtest(double *x) { return _dclass(*x); }
 CRT short _fdtest(float *x) { return _fdclass(*x); }
 CRT short _ldtest(double *x) { return _dclass(*x); }
@@ -239,6 +294,9 @@ CRT wchar_t *_ltow(long value, wchar_t *to, int radix)
 CRT double _atof_l(const char *text, _locale_t locale) { return text ? raven_strtod(text, NULL) : 0.0; }
 CRT double _wtof_l(const wchar_t *text, _locale_t locale) { return text ? raven_wcstod(text, NULL) : 0.0; }
 CRT double _strtod_l(const char *text, char **end, _locale_t locale) { return raven_strtod(text, end); }
+__asm__(".section .drectve\n\t.ascii \" -export:_strtof_l=raven_strtof_l\"\n\t.text");
+float raven_strtof_l(const char *text, char **end, _locale_t locale) { (void)locale; return (float)raven_strtod(text, end); }
+
 
 /* The significant decimal digits of a positive finite value, rounded at `count`, and the power of ten of the first. The value is
    scaled into [1, 10) in extended precision, which keeps the digits a double holds. */
@@ -1068,9 +1126,6 @@ CRT void _wassert(const wchar_t *expression, const wchar_t *file, unsigned line)
 	ExitProcess(3);
 }
 
-typedef void (__cdecl *invalid_parameter_handler)(const wchar_t *, const wchar_t *, const wchar_t *, unsigned, uintptr_t);
-static invalid_parameter_handler current_invalid_parameter_handler;
-
 CRT invalid_parameter_handler _set_invalid_parameter_handler(invalid_parameter_handler handler)
 {
 	const invalid_parameter_handler previous = current_invalid_parameter_handler;
@@ -1079,6 +1134,13 @@ CRT invalid_parameter_handler _set_invalid_parameter_handler(invalid_parameter_h
 }
 
 CRT invalid_parameter_handler _get_invalid_parameter_handler(void) { return current_invalid_parameter_handler; }
+CRT invalid_parameter_handler _set_thread_local_invalid_parameter_handler(invalid_parameter_handler handler)
+{
+	invalid_parameter_handler previous = thread_errors()->invalid_handler;
+	thread_errors()->invalid_handler = handler;
+	return previous;
+}
+CRT invalid_parameter_handler _get_thread_local_invalid_parameter_handler(void) { return thread_errors()->invalid_handler; }
 
 CRT int _get_pgmptr(char **out)
 {

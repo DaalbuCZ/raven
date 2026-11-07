@@ -80,6 +80,7 @@ static const struct stable_property_entry properties[] = {
 	{858, L"ColumnDefinitions"},
 	/* Style.TargetType: the one property whose value is a compiled type rather than a constant
 	 * (SetValueTypeConvertedResolvedType). The loader applies it through the style setter, which stores the short name. */
+	{244, L"BasedOn"},
 	{247, L"TargetType"},
 };
 
@@ -173,7 +174,7 @@ HRESULT raven_xaml_create_named(const WCHAR *name, UINT32 length, IInspectable *
 		return E_POINTER;
 	*out = NULL;
 	if (!name)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_metadata.c:177\n"); return E_INVALIDARG; }
 	for (size_t index = 0; index < ARRAYSIZE(entries); ++index) {
 		if (!same_text(name, length, entries[index].class_name) && !same_text(name, length, entries[index].name))
 			continue;

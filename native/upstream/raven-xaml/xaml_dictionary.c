@@ -97,6 +97,7 @@ struct merged_vector;
 struct dictionary_store;
 
 struct resource_part { const __x_ABI_CWindows_CUI_CXaml_CIResourceDictionaryVtbl *lpVtbl; struct dictionary *owner; };
+struct inner_part { const IInspectableVtbl *lpVtbl; struct dictionary *owner; };
 struct map_part {
 	const __FIMap_2_IInspectable_IInspectableVtbl *lpVtbl;
 	struct dictionary *owner;
@@ -106,6 +107,11 @@ struct map_part {
 struct dictionary_entry {
 	IInspectable *key;
 	IInspectable *value;
+	UINT32 string_hash;
+	void *deferred;
+	UINT32 token;
+	raven_resource_realize_fn realize;
+	raven_resource_release_fn release;
 };
 
 /* One map's storage. The dictionary owns two: its own contents — the IMap it derives from — and ThemeDictionaries, whose
@@ -129,6 +135,9 @@ struct dictionary {
 	struct resource_part resource;
 	struct map_part map;
 	struct map_part theme;
+	struct inner_part inner;
+	struct raven_weak_source weak;
+	IInspectable *outer;
 	LONG refs;
 	struct dictionary_store store;
 	struct dictionary_store themes;
@@ -180,19 +189,68 @@ static int key_matches(IInspectable *stored, IInspectable *probe)
 	return matches;
 }
 
+/* Avoid COM string comparisons for unequal resource keys while retaining full equality checks for collisions. */
+static UINT32 key_string_hash(IInspectable *key)
+{
+	boxed_string *reference = NULL;
+	HSTRING value = NULL;
+	UINT32 hash = 0;
+	if (key && SUCCEEDED(key->lpVtbl->QueryInterface(key, &IID___FIReference_1_HSTRING, (void **)&reference)) && reference) {
+		if (SUCCEEDED(reference->lpVtbl->get_Value(reference, &value))) {
+			UINT32 length = 0;
+			const WCHAR *text = WindowsGetStringRawBuffer(value, &length);
+			hash = 2166136261u;
+			for (UINT32 i = 0; i < length; ++i) hash = (hash ^ text[i]) * 16777619u;
+		}
+		WindowsDeleteString(value);
+		reference->lpVtbl->Release(reference);
+	}
+	return hash;
+}
+
 static struct dictionary_entry *store_find(struct dictionary_store *store, IInspectable *key)
 {
+	const UINT32 hash = key_string_hash(key);
 	for (UINT32 index = 0; index < store->count; ++index)
-		if (key_matches(store->entries[index].key, key))
+		if ((!hash || !store->entries[index].string_hash || hash == store->entries[index].string_hash) &&
+			key_matches(store->entries[index].key, key))
 			return &store->entries[index];
 	return NULL;
+}
+
+static void entry_release_deferred(struct dictionary_entry *entry)
+{
+	void *context = entry->deferred;
+	raven_resource_release_fn release = entry->release;
+	entry->deferred = NULL; entry->realize = NULL; entry->release = NULL;
+	if (release) release(context);
+}
+
+static HRESULT entry_read(struct dictionary *owner, struct dictionary_store *store, IInspectable *key,
+	IInspectable **out)
+{
+	struct dictionary_entry *entry = store_find(store, key);
+	*out = NULL;
+	if (!entry) return E_BOUNDS;
+	if (entry->realize) {
+		HRESULT result = entry->realize(entry->deferred, (IInspectable *)&owner->resource, entry->token);
+		if (FAILED(result)) return result;
+		/* Realization may grow the store or replace several aliases. */
+		entry = store_find(store, key);
+		if (!entry || entry->realize) return E_UNEXPECTED;
+	}
+	*out = entry->value;
+	if (*out) (*out)->lpVtbl->AddRef(*out);
+	return S_OK;
 }
 
 static void store_clear(struct dictionary_store *store)
 {
 	for (UINT32 index = 0; index < store->count; ++index) {
+		entry_release_deferred(&store->entries[index]);
 		if (store->entries[index].key)
-			store->entries[index].key->lpVtbl->Release(store->entries[index].key);
+			entry_release_deferred(&store->entries[index]);
+		store->entries[index].key->lpVtbl->Release(store->entries[index].key);
 		if (store->entries[index].value)
 			store->entries[index].value->lpVtbl->Release(store->entries[index].value);
 	}
@@ -222,6 +280,7 @@ static ULONG dictionary_release(struct dictionary *self)
 {
 	const LONG refs = InterlockedDecrement(&self->refs);
 	if (!refs) {
+		raven_weak_source_disconnect(&self->weak);
 		store_clear(&self->store);
 		store_clear(&self->themes);
 		if (self->source)
@@ -343,17 +402,20 @@ BOOL raven_xaml_resource_reference_key(IInspectable *object, const WCHAR **key, 
 
 static HRESULT WINAPI resource_query(resource1 *iface, REFIID iid, void **out)
 {
-	return dictionary_query_any(((struct resource_part *)iface)->owner, iid, out);
+	struct dictionary *self = ((struct resource_part *)iface)->owner;
+	return self->outer ? IInspectable_QueryInterface(self->outer, iid, out) : dictionary_query_any(self, iid, out);
 }
 
 static ULONG WINAPI resource_addref(resource1 *iface)
 {
-	return dictionary_addref(((struct resource_part *)iface)->owner);
+	struct dictionary *self = ((struct resource_part *)iface)->owner;
+	return self->outer ? IInspectable_AddRef(self->outer) : dictionary_addref(self);
 }
 
 static ULONG WINAPI resource_release(resource1 *iface)
 {
-	return dictionary_release(((struct resource_part *)iface)->owner);
+	struct dictionary *self = ((struct resource_part *)iface)->owner;
+	return self->outer ? IInspectable_Release(self->outer) : dictionary_release(self);
 }
 
 static HRESULT WINAPI resource_iids(resource1 *iface, ULONG *count, IID **iids)
@@ -403,7 +465,7 @@ static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
 	struct dictionary *loaded = NULL;
 	HRESULT result;
 	if (!locator)
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_dictionary.c:468\n"); return E_INVALIDARG; }
 	result = IInspectable_QueryInterface(locator, &IID___x_ABI_CWindows_CFoundation_CIUriRuntimeClass, (void **)&uri);
 	if (FAILED(result))
 		return result;
@@ -504,7 +566,7 @@ static HRESULT WINAPI resource_put_source(resource1 *iface, uint64_t value)
 	if (InterlockedIncrement(&source_depth) > SOURCE_DEPTH) {
 		InterlockedDecrement(&source_depth);
 		/* A Source graph that names itself compiles to no usable dictionary; the document is refused, not followed. */
-		return E_INVALIDARG;
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_dictionary.c:569\n"); return E_INVALIDARG; }
 	}
 	result = adopt_source(self, (IInspectable *)(uintptr_t)value);
 	InterlockedDecrement(&source_depth);
@@ -551,17 +613,20 @@ static const __x_ABI_CWindows_CUI_CXaml_CIResourceDictionaryVtbl resource_table 
 
 static HRESULT WINAPI map_query(__FIMap_2_IInspectable_IInspectable *iface, REFIID iid, void **out)
 {
-	return dictionary_query_any(((struct map_part *)iface)->owner, iid, out);
+	struct dictionary *self = ((struct map_part *)iface)->owner;
+	return self->outer ? IInspectable_QueryInterface(self->outer, iid, out) : dictionary_query_any(self, iid, out);
 }
 
 static ULONG WINAPI map_addref(__FIMap_2_IInspectable_IInspectable *iface)
 {
-	return dictionary_addref(((struct map_part *)iface)->owner);
+	struct dictionary *self = ((struct map_part *)iface)->owner;
+	return self->outer ? IInspectable_AddRef(self->outer) : dictionary_addref(self);
 }
 
 static ULONG WINAPI map_release(__FIMap_2_IInspectable_IInspectable *iface)
 {
-	return dictionary_release(((struct map_part *)iface)->owner);
+	struct dictionary *self = ((struct map_part *)iface)->owner;
+	return self->outer ? IInspectable_Release(self->outer) : dictionary_release(self);
 }
 
 static HRESULT WINAPI map_iids(__FIMap_2_IInspectable_IInspectable *iface, ULONG *count, IID **iids)
@@ -584,7 +649,7 @@ static HRESULT WINAPI map_trust(__FIMap_2_IInspectable_IInspectable *iface, Trus
 
 /* One store's content lookup: the key a compiled document names resolves through the same boxed-string comparison the map
  * uses, so a resource key and an entry inserted by the document meet in the middle. */
-static HRESULT store_lookup(struct dictionary_store *store, const WCHAR *text, UINT32 length, IInspectable **out)
+static HRESULT store_lookup(struct dictionary *owner, struct dictionary_store *store, const WCHAR *text, UINT32 length, IInspectable **out)
 {
 	IInspectable *key;
 	struct dictionary_entry *entry;
@@ -596,11 +661,7 @@ static HRESULT store_lookup(struct dictionary_store *store, const WCHAR *text, U
 	if (!key)
 		return E_OUTOFMEMORY;
 	entry = store_find(store, key);
-	if (entry && entry->value) {
-		entry->value->lpVtbl->AddRef(entry->value);
-		*out = entry->value;
-		result = S_OK;
-	}
+	if (entry && (entry->value || entry->realize)) result = entry_read(owner, store, key, out);
 	key->lpVtbl->Release(key);
 	return result;
 }
@@ -627,7 +688,7 @@ static struct dictionary *dictionary_of(IInspectable *object)
 static HRESULT dictionary_lookup_depth(struct dictionary *self, const WCHAR *text, UINT32 length, IInspectable **out,
 	int depth)
 {
-	HRESULT result = store_lookup(&self->store, text, length, out);
+	HRESULT result = store_lookup(self, &self->store, text, length, out);
 	if (SUCCEEDED(result) || depth >= LOOKUP_DEPTH)
 		return result;
 	for (UINT32 index = self->merged->count; index; ) {
@@ -653,33 +714,42 @@ HRESULT raven_xaml_dictionary_lookup(IInspectable *object, const WCHAR *text, UI
 	return dictionary_lookup_depth(self, text, length, out, 0);
 }
 
-/* A theme resource adds the ThemeDictionaries stage: the selector the requested theme names ("Dark"/"Light"), then
- * "Default", each one a dictionary the entry is looked up in. The plain stage runs first, as in the real lookup. */
+/* Each dictionary's own entries and selected theme precede its merged dictionaries, newest first. */
+static HRESULT dictionary_lookup_theme_depth(struct dictionary *self, const WCHAR *text, UINT32 length,
+	const WCHAR *theme, UINT32 theme_length, IInspectable **out, int depth)
+{
+	static const WCHAR fallback[] = L"Default";
+	IInspectable *selected = NULL;
+	HRESULT result = store_lookup(self, &self->store, text, length, out);
+	if (SUCCEEDED(result) || depth >= LOOKUP_DEPTH) return result;
+	if (theme && theme_length)
+		result = store_lookup(self, &self->themes, theme, theme_length, &selected);
+	if (FAILED(result))
+		result = store_lookup(self, &self->themes, fallback, ARRAYSIZE(fallback) - 1, &selected);
+	if (SUCCEEDED(result) && selected) {
+		struct dictionary *child = dictionary_of(selected);
+		result = child ? dictionary_lookup_depth(child, text, length, out, depth + 1) : E_NOINTERFACE;
+		selected->lpVtbl->Release(selected);
+		if (result != E_BOUNDS) return result;
+	}
+	for (UINT32 index = self->merged->count; index; ) {
+		struct dictionary *child = dictionary_of((IInspectable *)self->merged->items[--index]);
+		if (!child) continue;
+		result = dictionary_lookup_theme_depth(child, text, length, theme, theme_length, out, depth + 1);
+		if (result != E_BOUNDS) return result;
+	}
+	return E_BOUNDS;
+}
+
 HRESULT raven_xaml_dictionary_lookup_theme(IInspectable *object, const WCHAR *text, UINT32 length,
 	const WCHAR *theme, UINT32 theme_length, IInspectable **out)
 {
-	static const WCHAR fallback[] = L"Default";
 	struct dictionary *self;
-	IInspectable *selected = NULL;
-	HRESULT result;
-	if (!out)
-		return E_POINTER;
+	if (!out) return E_POINTER;
 	*out = NULL;
 	self = dictionary_of(object);
-	if (!self)
-		return E_NOINTERFACE;
-	result = dictionary_lookup_depth(self, text, length, out, 0);
-	if (SUCCEEDED(result))
-		return result;
-	if (theme && theme_length)
-		result = store_lookup(&self->themes, theme, theme_length, &selected);
-	if (FAILED(result))
-		result = store_lookup(&self->themes, fallback, ARRAYSIZE(fallback) - 1, &selected);
-	if (FAILED(result) || !selected)
-		return E_BOUNDS;
-	result = raven_xaml_dictionary_lookup(selected, text, length, out);
-	selected->lpVtbl->Release(selected);
-	return result;
+	if (!self) return E_NOINTERFACE;
+	return dictionary_lookup_theme_depth(self, text, length, theme, theme_length, out, 0);
 }
 
 /* A key that answers IReference`1<HSTRING>: its text is what matches a merged dictionary's entries, the way a compiled
@@ -706,12 +776,7 @@ static int key_is_string(IInspectable *key, HSTRING *text)
 static HRESULT map_read(struct map_part *part, IInspectable *key, IInspectable **value)
 {
 	struct dictionary_entry *entry = store_find(part->store, key);
-	if (entry) {
-		*value = entry->value;
-		if (*value)
-			(*value)->lpVtbl->AddRef(*value);
-		return S_OK;
-	}
+	if (entry) return entry_read(part->owner, part->store, key, value);
 	*value = NULL;
 	if (part->store == &part->owner->store) {
 		HSTRING text = NULL;
@@ -746,21 +811,29 @@ static HRESULT WINAPI map_size(__FIMap_2_IInspectable_IInspectable *iface, UINT3
 	return S_OK;
 }
 
+static BOOL dictionary_contains(struct dictionary *self, IInspectable *key, unsigned depth)
+{
+	if (store_find(&self->store, key)) return TRUE;
+	if (depth >= LOOKUP_DEPTH) return FALSE;
+	for (UINT32 i = self->merged->count; i; ) {
+		struct dictionary *child = dictionary_of((IInspectable *)self->merged->items[--i]);
+		if (child && dictionary_contains(child, key, depth + 1)) return TRUE;
+	}
+	return FALSE;
+}
+
 static HRESULT WINAPI map_has_key(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key, boolean *found)
 {
 	struct map_part *part = (struct map_part *)iface;
-	IInspectable *value = NULL;
-	HRESULT result;
-	if (!found)
-		return E_POINTER;
+	HSTRING text = NULL;
+	if (!found) return E_POINTER;
 	*found = FALSE;
-	if (!key)
-		return E_POINTER;
-	result = map_read(part, key, &value);
-	if (value)
-		value->lpVtbl->Release(value);
-	if (SUCCEEDED(result))
-		*found = TRUE;
+	if (!key) return E_POINTER;
+	if (store_find(part->store, key)) *found = TRUE;
+	else if (part->store == &part->owner->store && key_is_string(key, &text)) {
+		*found = dictionary_contains(part->owner, key, 0);
+		WindowsDeleteString(text);
+	}
 	return S_OK;
 }
 
@@ -785,6 +858,7 @@ static HRESULT WINAPI map_insert(__FIMap_2_IInspectable_IInspectable *iface, IIn
 			value->lpVtbl->AddRef(value);
 		if (entry->value)
 			entry->value->lpVtbl->Release(entry->value);
+		entry_release_deferred(entry);
 		entry->value = value;
 		return S_OK;
 	}
@@ -802,6 +876,8 @@ static HRESULT WINAPI map_insert(__FIMap_2_IInspectable_IInspectable *iface, IIn
 		store->entries = entries;
 		store->capacity = capacity;
 	}
+	memset(&store->entries[store->count], 0, sizeof store->entries[store->count]);
+	store->entries[store->count].string_hash = key_string_hash(key);
 	store->entries[store->count].key = key;
 	store->entries[store->count].value = value;
 	key->lpVtbl->AddRef(key);
@@ -809,6 +885,24 @@ static HRESULT WINAPI map_insert(__FIMap_2_IInspectable_IInspectable *iface, IIn
 		value->lpVtbl->AddRef(value);
 	++store->count;
 	return S_OK;
+}
+
+HRESULT raven_xaml_dictionary_defer(IInspectable *object, const WCHAR *text, UINT32 length, void *context,
+	UINT32 token, raven_resource_realize_fn realize, raven_resource_release_fn release)
+{
+	struct dictionary *self = dictionary_of(object);
+	IInspectable *key;
+	HRESULT result;
+	if (!self || !realize || !release) return E_INVALIDARG;
+	key = raven_xaml_boxed_string(text, length);
+	if (!key) return E_OUTOFMEMORY;
+	result = map_insert((__FIMap_2_IInspectable_IInspectable *)&self->map, key, NULL, NULL);
+	if (SUCCEEDED(result)) {
+		struct dictionary_entry *entry = store_find(&self->store, key);
+		entry->deferred = context; entry->token = token; entry->realize = realize; entry->release = release;
+	}
+	key->lpVtbl->Release(key);
+	return result;
 }
 
 static HRESULT WINAPI map_remove(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key)
@@ -819,6 +913,7 @@ static HRESULT WINAPI map_remove(__FIMap_2_IInspectable_IInspectable *iface, IIn
 	for (UINT32 index = 0; index < store->count; ++index) {
 		if (!key_matches(store->entries[index].key, key))
 			continue;
+		entry_release_deferred(&store->entries[index]);
 		store->entries[index].key->lpVtbl->Release(store->entries[index].key);
 		if (store->entries[index].value)
 			store->entries[index].value->lpVtbl->Release(store->entries[index].value);
@@ -834,6 +929,7 @@ static HRESULT WINAPI map_clear(__FIMap_2_IInspectable_IInspectable *iface)
 {
 	struct dictionary_store *store = ((struct map_part *)iface)->store;
 	for (UINT32 index = 0; index < store->count; ++index) {
+		entry_release_deferred(&store->entries[index]);
 		store->entries[index].key->lpVtbl->Release(store->entries[index].key);
 		if (store->entries[index].value)
 			store->entries[index].value->lpVtbl->Release(store->entries[index].value);
@@ -874,11 +970,13 @@ static HRESULT WINAPI theme_query(__FIMap_2_IInspectable_IInspectable *iface, RE
 	*out = iface;
 	return S_OK;
 }
+static ULONG WINAPI theme_addref(__FIMap_2_IInspectable_IInspectable *iface) { return dictionary_addref(((struct map_part *)iface)->owner); }
+static ULONG WINAPI theme_release(__FIMap_2_IInspectable_IInspectable *iface) { return dictionary_release(((struct map_part *)iface)->owner); }
 
 static const __FIMap_2_IInspectable_IInspectableVtbl theme_table = {
 	.QueryInterface = theme_query,
-	.AddRef = map_addref,
-	.Release = map_release,
+	.AddRef = theme_addref,
+	.Release = theme_release,
 	.GetIids = map_iids,
 	.GetRuntimeClassName = map_name,
 	.GetTrustLevel = map_trust,
@@ -961,10 +1059,7 @@ static HRESULT WINAPI view_lookup(__FIMapView_2_IInspectable_IInspectable *iface
 	entry = store_find(store, key);
 	if (!entry)
 		return E_BOUNDS;
-	*value = entry->value;
-	if (*value)
-		(*value)->lpVtbl->AddRef(*value);
-	return S_OK;
+	return entry_read(((struct map_view *)iface)->owner, store, key, value);
 }
 
 static HRESULT WINAPI view_size(__FIMapView_2_IInspectable_IInspectable *iface, UINT32 *value)
@@ -995,7 +1090,7 @@ static HRESULT WINAPI view_split(__FIMapView_2_IInspectable_IInspectable *iface,
 		*first = NULL;
 	if (second)
 		*second = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const __FIMapView_2_IInspectable_IInspectableVtbl map_view_table = {
@@ -1117,7 +1212,7 @@ static HRESULT WINAPI merged_get_view(__FIVector_1_Windows__CUI__CXaml__CResourc
 	(void)iface;
 	if (value)
 		*value = NULL;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI merged_index_of(__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *iface, resource1 *element,
@@ -1156,7 +1251,7 @@ static HRESULT WINAPI merged_set_at(__FIVector_1_Windows__CUI__CXaml__CResourceD
 	(void)iface;
 	(void)index;
 	(void)value;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI merged_insert_at(__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *iface, UINT32 index,
@@ -1165,14 +1260,14 @@ static HRESULT WINAPI merged_insert_at(__FIVector_1_Windows__CUI__CXaml__CResour
 	(void)iface;
 	(void)index;
 	(void)value;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI merged_remove_at(__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *iface, UINT32 index)
 {
 	(void)iface;
 	(void)index;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI merged_append(__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *iface, resource1 *value)
@@ -1202,7 +1297,7 @@ static HRESULT WINAPI merged_append(__FIVector_1_Windows__CUI__CXaml__CResourceD
 static HRESULT WINAPI merged_remove_at_end(__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *iface)
 {
 	(void)iface;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI merged_clear(__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *iface)
@@ -1224,7 +1319,7 @@ static HRESULT WINAPI merged_get_many(__FIVector_1_Windows__CUI__CXaml__CResourc
 	(void)items;
 	if (value)
 		*value = 0;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static HRESULT WINAPI merged_replace_all(__FIVector_1_Windows__CUI__CXaml__CResourceDictionary *iface, UINT32 count,
@@ -1233,7 +1328,7 @@ static HRESULT WINAPI merged_replace_all(__FIVector_1_Windows__CUI__CXaml__CReso
 	(void)iface;
 	(void)count;
 	(void)items;
-	return E_NOTIMPL;
+	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
 
 static const __FIVector_1_Windows__CUI__CXaml__CResourceDictionaryVtbl merged_table = {
@@ -1274,16 +1369,29 @@ static HRESULT dictionary_query_any(struct dictionary *self, REFIID iid, void **
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
-		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary))
+	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable)) {
+		*out = self->outer ? (void *)&self->inner : (void *)&self->resource;
+		dictionary_addref(self);
+		return S_OK;
+	} else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary))
 		*out = &self->resource;
 	else if (equal_iid(iid, &IID___FIMap_2_IInspectable_IInspectable))
 		*out = &self->map;
-	else
-		return E_NOINTERFACE;
-	dictionary_addref(self);
+	else if (!self->outer && equal_iid(iid, &IID_IWeakReferenceSource))
+		*out = &self->weak;
+	else return E_NOINTERFACE;
+	if (self->outer) IInspectable_AddRef(self->outer);
+	else dictionary_addref(self);
 	return S_OK;
 }
+
+static HRESULT WINAPI inner_query(IInspectable *iface, REFIID iid, void **out) { return dictionary_query_any(((struct inner_part *)iface)->owner, iid, out); }
+static ULONG WINAPI inner_addref(IInspectable *iface) { return dictionary_addref(((struct inner_part *)iface)->owner); }
+static ULONG WINAPI inner_release(IInspectable *iface) { return dictionary_release(((struct inner_part *)iface)->owner); }
+static HRESULT WINAPI inner_iids(IInspectable *iface, ULONG *count, IID **iids) { (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI inner_name(IInspectable *iface, HSTRING *name) { (void)iface; return make_name(class_name, name); }
+static HRESULT WINAPI inner_trust(IInspectable *iface, TrustLevel *level) { (void)iface; return inspectable_trust(level); }
+static const IInspectableVtbl inner_table = {inner_query,inner_addref,inner_release,inner_iids,inner_name,inner_trust};
 
 static struct dictionary *create_dictionary(void)
 {
@@ -1298,9 +1406,13 @@ static struct dictionary *create_dictionary(void)
 	dictionary->theme.lpVtbl = &theme_table;
 	dictionary->theme.owner = dictionary;
 	dictionary->theme.store = &dictionary->themes;
+	dictionary->inner.lpVtbl = &inner_table;
+	dictionary->inner.owner = dictionary;
 	dictionary->refs = 1;
+	raven_weak_source_init(&dictionary->weak, dictionary, &dictionary->refs, (raven_weak_query_fn)dictionary_query_any);
 	dictionary->merged = create_merged();
 	if (!dictionary->merged) {
+		raven_weak_source_disconnect(&dictionary->weak);
 		FREE(dictionary);
 		return NULL;
 	}
@@ -1310,10 +1422,14 @@ static struct dictionary *create_dictionary(void)
 
 /* The factory, reached by name through the catalog like every class of the component. */
 
+struct dictionary_factory;
+struct composable_factory_part { const raven_resource_dictionary_factory_vtbl *lpVtbl; struct dictionary_factory *owner; };
 struct dictionary_factory {
 	const IActivationFactoryVtbl *lpVtbl;
 	LONG refs;
+	struct composable_factory_part composable;
 };
+static struct dictionary_factory factory_instance;
 
 static HRESULT WINAPI factory_query(IActivationFactory *iface, REFIID iid, void **out)
 {
@@ -1321,10 +1437,12 @@ static HRESULT WINAPI factory_query(IActivationFactory *iface, REFIID iid, void 
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, &IID_IActivationFactory))
-		return E_NOINTERFACE;
+	if (self == &factory_instance && equal_iid(iid, &IID_raven_resource_dictionary_factory))
+		*out = &self->composable;
+	else if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) || equal_iid(iid, &IID_IActivationFactory))
+		*out = self;
+	else return E_NOINTERFACE;
 	InterlockedIncrement(&self->refs);
-	*out = self;
 	return S_OK;
 }
 
@@ -1379,7 +1497,27 @@ static const IActivationFactoryVtbl factory_table = {
 	.ActivateInstance = factory_activate,
 };
 
-static struct dictionary_factory factory_instance = {&factory_table, 1};
+static HRESULT WINAPI composable_query(raven_resource_dictionary_factory *iface, REFIID iid, void **out) { return factory_query((IActivationFactory *)((struct composable_factory_part *)iface)->owner, iid, out); }
+static ULONG WINAPI composable_addref(raven_resource_dictionary_factory *iface) { return factory_addref((IActivationFactory *)((struct composable_factory_part *)iface)->owner); }
+static ULONG WINAPI composable_release(raven_resource_dictionary_factory *iface) { return factory_release((IActivationFactory *)((struct composable_factory_part *)iface)->owner); }
+static HRESULT WINAPI composable_iids(raven_resource_dictionary_factory *iface, ULONG *count, IID **iids) { (void)iface; return inspectable_iids(count,iids); }
+static HRESULT WINAPI composable_name(raven_resource_dictionary_factory *iface, HSTRING *name) { return factory_name((IActivationFactory *)((struct composable_factory_part *)iface)->owner,name); }
+static HRESULT WINAPI composable_trust(raven_resource_dictionary_factory *iface, TrustLevel *level) { (void)iface; return inspectable_trust(level); }
+static HRESULT WINAPI composable_create(raven_resource_dictionary_factory *iface, IInspectable *outer, IInspectable **inner, resource1 **out)
+{
+	(void)iface;
+	if (!out || (outer && !inner)) return E_POINTER;
+	*out = NULL;
+	if (inner) *inner = NULL;
+	struct dictionary *dictionary = create_dictionary();
+	if (!dictionary) return E_OUTOFMEMORY;
+	dictionary->outer = outer;
+	if (outer) { *inner = (IInspectable *)&dictionary->inner; IInspectable_AddRef(outer); }
+	*out = (resource1 *)&dictionary->resource;
+	return S_OK;
+}
+static const raven_resource_dictionary_factory_vtbl composable_table = {composable_query,composable_addref,composable_release,composable_iids,composable_name,composable_trust,composable_create};
+static struct dictionary_factory factory_instance = {&factory_table, 1, {&composable_table, &factory_instance}};
 
 /* The WinUI controls dictionary activates under its own runtime class name: the factory reports the Microsoft.UI name and
  * every instance it builds carries the name override, while the plumbing (queries, references, trust) is the base factory's. */
@@ -1406,7 +1544,7 @@ static const IActivationFactoryVtbl controls_factory_table = {
 	.ActivateInstance = factory_activate_controls,
 };
 
-static struct dictionary_factory controls_factory_instance = {&controls_factory_table, 1};
+static struct dictionary_factory controls_factory_instance = {&controls_factory_table, 1, {&composable_table, &controls_factory_instance}};
 
 HRESULT raven_dictionary_factory(HSTRING name, IActivationFactory **out)
 {
@@ -1452,23 +1590,24 @@ static void merge_framework_dictionaries(struct dictionary *dictionary, const WC
 		static const WCHAR tail[] = L"/";
 		WCHAR text[192];
 		UINT32 at = 0;
+		const UINT32 filename_length = (UINT32)lstrlenW(framework_themes[file]);
 		struct dictionary *loaded = NULL;
 		IInspectable *uri = NULL;
 		HRESULT result;
 		if (package_length + ARRAYSIZE(head) - 1 + ARRAYSIZE(tail) - 1 +
-			ARRAYSIZE(framework_themes[file]) - 1 + 1 > ARRAYSIZE(text))
-			return;
+			filename_length + 1 > ARRAYSIZE(text))
+			break;
 		memcpy(text, head, (ARRAYSIZE(head) - 1) * sizeof(WCHAR));
 		at = ARRAYSIZE(head) - 1;
 		memcpy(text + at, package, (SIZE_T)package_length * sizeof(WCHAR));
 		at += package_length;
 		memcpy(text + at, tail, (ARRAYSIZE(tail) - 1) * sizeof(WCHAR));
 		at += ARRAYSIZE(tail) - 1;
-		memcpy(text + at, framework_themes[file], (ARRAYSIZE(framework_themes[file]) - 1) * sizeof(WCHAR));
-		at += ARRAYSIZE(framework_themes[file]) - 1;
+		memcpy(text + at, framework_themes[file], (filename_length) * sizeof(WCHAR));
+		at += filename_length;
 		text[at] = 0;
 		if (!(loaded = create_dictionary())) {
-			return;
+			break;
 		}
 		result = raven_xaml_uri_create(text, at, &uri);
 		if (SUCCEEDED(result)) {
@@ -1490,7 +1629,7 @@ static void merge_framework_dictionaries(struct dictionary *dictionary, const WC
 		dictionary_release(loaded);
 		if (FAILED(result)) {
 			g_tolerant_adopt = 0;
-			return;
+			break;
 		}
 	}
 	g_tolerant_adopt = 0;
