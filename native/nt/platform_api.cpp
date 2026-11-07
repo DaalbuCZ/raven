@@ -1407,7 +1407,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			// method, which the missing-marshalling diagnosis needs.
 			if (record.exception) {
 				try {
-					const auto bytes = call.read(record.exception, 0x80);
+					const auto bytes = call.read(record.exception, 0x100);
 					std::fprintf(stderr, "raven: exception object %llx:", static_cast<unsigned long long>(record.exception));
 					for (size_t i = 0; i < bytes.size(); i += 8) {
 						uint64_t value = 0;
@@ -1420,13 +1420,17 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 						std::memcpy(&value, bytes.data() + i, 8);
 						if (value < 0x10000)
 							continue;
+						if (const auto text = describe_text(call.process, value); !text.empty())
+							std::fprintf(stderr, "raven:   [%02zx] text: %s\n", i, text.c_str());
 						try {
-							const auto inner = call.read(value, 0x30);
+							const auto inner = call.read(value, 0x80);
 							std::fprintf(stderr, "raven:   [%02zx] -> %llx:", i, static_cast<unsigned long long>(value));
 							for (size_t j = 0; j < inner.size(); j += 8) {
 								uint64_t word = 0;
 								std::memcpy(&word, inner.data() + j, 8);
 								std::fprintf(stderr, " %llx", static_cast<unsigned long long>(word));
+								if (const auto text = describe_text(call.process, word); !text.empty())
+									std::fprintf(stderr, "<%s>", text.c_str());
 							}
 							std::fprintf(stderr, "\n");
 						} catch (const ApiFault &) {
