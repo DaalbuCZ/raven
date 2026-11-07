@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <sys/mman.h>
+#include <utility>
 
 namespace raven {
 
@@ -153,6 +154,23 @@ bool NativeWindows::has_hook(int32_t id) const
 	return std::any_of(hooks.begin(), hooks.end(), [&](const Hook &hook) { return hook.id == id && hook_applies(hook); });
 }
 
+void NativeWindows::publish_hooks()
+{
+	if (!quiet_table)
+		return;
+	auto *table = quiet_table + hook_table_at;
+	const uint32_t count = hooks.size() <= hook_entries ? uint32_t(hooks.size()) : uint32_t(hook_entries + 1);
+	// Another guest thread may read the chain meanwhile: it finds no hooks, and so asks the runtime, until the entries are written.
+	__atomic_store_n(reinterpret_cast<uint32_t *>(table), 0U, __ATOMIC_RELEASE);
+	for (size_t index = 0; index < std::min<size_t>(hooks.size(), hook_entries); ++index) {
+		auto *entry = table + 16 + index * hook_entry;
+		std::memcpy(entry, &hooks[index].handle, 8);
+		std::memcpy(entry + 8, &hooks[index].id, 4);
+		std::memcpy(entry + 12, &hooks[index].thread, 4);
+	}
+	__atomic_store_n(reinterpret_cast<uint32_t *>(table), count, __ATOMIC_RELEASE);
+}
+
 // Runs the hook chain of one kind; `after` names the hook whose successors should run (CallNextHookEx).
 uint64_t NativeWindows::call_hooks(int32_t id, int32_t code, uint64_t wparam, uint64_t lparam, uint64_t after)
 {
@@ -175,7 +193,7 @@ uint64_t NativeWindows::call_hooks(int32_t id, int32_t code, uint64_t wparam, ui
 
 void NativeWindows::caret_sync()
 {
-	if (!caret || !caret->window || !objects.window(caret->window))
+	if (!caret || !caret->window || !std::as_const(objects).window(caret->window))
 		return;
 	const bool want = caret->hidden <= 0 && objects.window_visible(caret->window);
 	if (want == caret->drawn)
@@ -239,7 +257,7 @@ void NativeWindows::track_pointer(uint64_t window)
 		return;
 	const auto tracked = tracking.window;
 	tracking = {};
-	if (objects.window(tracked))
+	if (std::as_const(objects).window(tracked))
 		post(tracked, 0x2a3, 0, 0);
 }
 
@@ -299,7 +317,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 
 	// Message filtering never blocks.
 	registry.add("ChangeWindowMessageFilterEx", 4, [this](ApiCall &call) {
-		if (!objects.window(call[0])) {
+		if (!std::as_const(objects).window(call[0])) {
 			call.fail(1400);
 			return;
 		}
@@ -308,7 +326,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 
 	// ---- timers owned by the system (carets, control scrolling) ----
 	registry.add("SetSystemTimer", 4, [this](ApiCall &call) {
-		if (call[0] && !objects.window(call[0])) {
+		if (call[0] && !std::as_const(objects).window(call[0])) {
 			call.fail(1400);
 			return;
 		}
@@ -329,7 +347,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 
 	// ---- caret ----
 	registry.add("CreateCaret", 4, [this](ApiCall &call) {
-		if (!objects.window(call[0])) {
+		if (!std::as_const(objects).window(call[0])) {
 			call.fail(1400);
 			return;
 		}
@@ -464,7 +482,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		const auto found = clipboard_data.find(13);
 		if (found == clipboard_data.end() || !found->second)
 			return;
-		const auto text = to_utf8(call.wide(found->second));
+		const auto text = to_utf8(call.wide(global_data ? global_data(found->second) : found->second, 1 << 24));
 		std::string host;
 		for (size_t at = 0; at < text.size(); ++at)
 			if (text[at] != '\r' || at + 1 >= text.size() || text[at + 1] != '\n')
@@ -516,6 +534,66 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		clipboard_window = 0;
 		publish_host(call);
 		call.ret(1);
+	});
+	// A data object put on the OLE clipboard gives up its text at once, as global memory the clipboard keeps; its other formats are not
+	// offered. The object itself is not kept, so the clipboard never names it as the current one.
+	registry.add("OleSetClipboard", 1, [this, publish_host, block = uint64_t(0)](ApiCall &call) mutable {
+		if (clipboard_window) {
+			call.ret(0x800401d0); // CLIPBRD_E_CANT_OPEN
+			return;
+		}
+		clipboard_data.clear();
+		clipboard_owner = 0;
+		++clipboard_sequence;
+		const uint64_t object = call[0];
+		const size_t width = call.pointer_width();
+		if (!block && object && global_allocator)
+			block = global_allocator(64);
+		if (!object || !block) {
+			call.ret(object ? 0x8007000e : 0);
+			return;
+		}
+		// FORMATETC, then STGMEDIUM, in the guest's layout.
+		const uint64_t format = block, medium = block + 32;
+		const auto run = [this](uint64_t procedure, std::initializer_list<uint64_t> list) {
+			const std::vector<uint64_t> arguments(list);
+			const auto result = invoke(procedure, arguments);
+			if (result.stop != NativeStop::returned)
+				throw result;
+			return uint32_t(result.value);
+		};
+		const uint64_t table = call.load_pointer(object);
+		for (const uint16_t kind : {uint16_t(13), uint16_t(1)}) {
+			call.write(block, std::vector<uint8_t>(64));
+			call.store<uint16_t>(format, kind);
+			call.store<uint32_t>(format + 2 * width, 1); // DVASPECT_CONTENT
+			call.store<int32_t>(format + 2 * width + 4, -1);
+			call.store<uint32_t>(format + 2 * width + 8, 1); // TYMED_HGLOBAL
+			if (run(call.load_pointer(table + 3 * width), {object, format, medium}) || call.load<uint32_t>(medium) != 1)
+				continue;
+			const uint64_t handle = call.load_pointer(medium + width), owner = call.load_pointer(medium + 2 * width);
+			const uint64_t memory = global_data && handle ? global_data(handle) : handle;
+			if (!memory)
+				continue;
+			if (!owner) {
+				clipboard_data[kind] = handle;
+				continue;
+			}
+			// The object keeps the memory it hands out with an owner, so the clipboard takes a copy.
+			const auto text = kind == 13 ? call.wide(memory, 1 << 24) : std::u16string();
+			const auto narrow = kind == 1 ? call.narrow(memory, 1 << 24) : std::string();
+			const size_t size = kind == 13 ? (text.size() + 1) * 2 : narrow.size() + 1;
+			if (const auto copy = global_allocator(size)) {
+				if (kind == 13)
+					call.write(copy, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(text.c_str()), size));
+				else
+					call.write(copy, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(narrow.c_str()), size));
+				clipboard_data[kind] = copy;
+			}
+			run(call.load_pointer(call.load_pointer(owner) + 2 * width), {owner});
+		}
+		publish_host(call);
+		call.ret(0);
 	});
 	registry.add("EmptyClipboard", 0, [this](ApiCall &call) {
 		if (!clipboard_window) {
@@ -591,7 +669,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 			}
 		});
 	}
-	registry.add("MapVirtualKeyW", 2, [](ApiCall &call) {
+	const auto map_key = [](ApiCall &call) {
 		const uint32_t code = call.u32(0), type = call.u32(1);
 		if (type == 0 || type == 4) {
 			for (uint32_t scan = 1; scan < 89; ++scan)
@@ -607,8 +685,11 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		} else {
 			call.ret(0);
 		}
-	});
-	registry.add("MapVirtualKeyA", 2, [](ApiCall &call) {
+	};
+	// There is one keyboard layout, whichever layout the Ex forms name.
+	registry.add("MapVirtualKeyW", 2, map_key);
+	registry.add("MapVirtualKeyExW", 3, map_key);
+	const auto map_key_ansi = [](ApiCall &call) {
 		const uint32_t code = call.u32(0), type = call.u32(1);
 		if (type == 1 || type == 3)
 			call.ret(code < 89 ? scan_to_vk[code] : 0);
@@ -622,7 +703,9 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		} else {
 			call.ret(key_characters(code).first ? std::toupper(key_characters(code).first) : 0);
 		}
-	});
+	};
+	registry.add("MapVirtualKeyA", 2, map_key_ansi);
+	registry.add("MapVirtualKeyExA", 3, map_key_ansi);
 	// There is one keyboard layout, whichever layout VkKeyScanEx names.
 	const auto key_scan = [](ApiCall &call) {
 		const char16_t c = char16_t(call.u32(0));
@@ -698,7 +781,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 			call.ret(1);
 			return;
 		}
-		if (!objects.window(window)) {
+		if (!std::as_const(objects).window(window)) {
 			call.fail(1400);
 			return;
 		}
@@ -708,7 +791,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 	registry.add("_TrackMouseEvent", 1, [this](ApiCall &call) {
 		const uint32_t flags = call.load<uint32_t>(call[0] + 4);
 		const uint64_t window = call.load<uint64_t>(call[0] + 8);
-		if (objects.window(window) && !(flags & 0x80000000U))
+		if (std::as_const(objects).window(window) && !(flags & 0x80000000U))
 			tracking = {window, flags};
 		call.ret(1);
 	});
@@ -720,6 +803,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		}
 		Hook hook{++next_hook, id, call[1], call.u32(3)};
 		hooks.insert(hooks.begin(), hook);
+		publish_hooks();
 		call.ret(hook.handle);
 	});
 	registry.add("SetWindowsHookExA", 4, [this](ApiCall &call) {
@@ -730,13 +814,14 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		}
 		Hook hook{++next_hook, id, call[1], call.u32(3)};
 		hooks.insert(hooks.begin(), hook);
+		publish_hooks();
 		call.ret(hook.handle);
 	});
 	// AnimateWindow shows or hides at once: the slide, roll and blend effects only change how the transition looks. Showing a visible
 	// window or hiding a hidden one fails, as it does on Windows.
 	registry.add("AnimateWindow", 3, [this](ApiCall &call) {
 		const uint32_t flags = call.u32(2);
-		if (!objects.window(call[0])) {
+		if (!std::as_const(objects).window(call[0])) {
 			call.fail(1400);
 			return;
 		}
@@ -756,6 +841,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 	registry.add("UnhookWindowsHookEx", 1, [this](ApiCall &call) {
 		const auto before = hooks.size();
 		std::erase_if(hooks, [&](const Hook &hook) { return hook.handle == call[0]; });
+		publish_hooks();
 		if (before == hooks.size())
 			call.fail(1404);
 		else
@@ -775,21 +861,21 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 
 	// ---- window regions and the system menu ----
 	registry.add("SetWindowRgn", 3, [this](ApiCall &call) {
-		if (!objects.window(call[0])) {
+		if (!std::as_const(objects).window(call[0])) {
 			call.fail(1400);
 			return;
 		}
 		call.ret(1);
 	});
 	registry.add("GetWindowRgn", 2, [this](ApiCall &call) {
-		if (!objects.window(call[0])) {
+		if (!std::as_const(objects).window(call[0])) {
 			call.fail(1400);
 			return;
 		}
 		call.ret(0);
 	});
 	registry.add("GetSystemMenu", 2, [this](ApiCall &call) {
-		const auto *window = objects.window(call[0]);
+		const auto *window = std::as_const(objects).window(call[0]);
 		if (!window) {
 			call.fail(1400);
 			return;
@@ -852,12 +938,12 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		call.ret(1);
 	});
 	registry.add("InvalidateRgn", 3, [this](ApiCall &call) {
-		if (!objects.window(call[0])) {
+		if (!std::as_const(objects).window(call[0])) {
 			call.fail(1400);
 			return;
 		}
 		if (!call[1]) {
-			const auto *window = objects.window(call[0]);
+			const auto *window = std::as_const(objects).window(call[0]);
 			objects.invalidate(call[0], {0, 0, window->width, window->height}, call.u32(2) != 0);
 		} else if (const auto *region = objects.region(call[1])) {
 			const auto bounds = region->bounds();
@@ -870,7 +956,7 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 	});
 	registry.add("GetDCEx", 3, [this](ApiCall &call) {
 		const auto target = call[0] ? call[0] : desktop_window();
-		if (!objects.window(target)) {
+		if (!std::as_const(objects).window(target)) {
 			// A window of another process: a context over the pixels shared with it.
 			try {
 				call.ret(foreign_dc(target));
@@ -960,6 +1046,12 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 	registry.add("GetWindowTextA", 3, [=, this](ApiCall &call) {
 		if (call.i32(2) <= 0) {
 			call.ret(0);
+			return;
+		}
+		if (const auto foreign = std::as_const(objects).window(call[0]) ? std::nullopt : foreign_window_traits(call[0])) {
+			const auto text = to_ansi(from_utf8(foreign->title), 1252);
+			call.put_narrow(call[1], text, size_t(call.i32(2)));
+			call.ret(std::min<size_t>(text.size(), size_t(call.i32(2)) - 1));
 			return;
 		}
 		call.ret(send_ansi(call, call[0], 0x0d, call[2], call[1]));

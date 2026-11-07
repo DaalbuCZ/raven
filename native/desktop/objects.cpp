@@ -189,6 +189,7 @@ uint64_t DesktopObjects::add(Object object)
 		count_selection(device->bitmap, 1);
 	}
 	if (std::holds_alternative<DesktopIcon>(objects.at(handle))) icons_touched.touch(handle);
+	if (std::holds_alternative<DesktopRegion>(objects.at(handle))) regions_touched.touch(handle);
 	return handle;
 }
 
@@ -206,6 +207,7 @@ bool DesktopObjects::erase(uint64_t handle)
 	if (std::holds_alternative<DesktopBitmap>(found->second)) bitmaps_touched.touch(handle);
 	if (std::holds_alternative<DesktopDC>(found->second)) dcs_touched.touch(handle);
 	if (std::holds_alternative<DesktopIcon>(found->second)) icons_touched.touch(handle);
+	if (std::holds_alternative<DesktopRegion>(found->second)) regions_touched.touch(handle);
 	if (const auto *menu=std::get_if<DesktopMenu>(&found->second)) {
 		if (menu->parent) return false;
 		for (const auto &item:menu->items) if (item.submenu) {
@@ -403,6 +405,14 @@ std::vector<uint64_t> DesktopObjects::icon_handles() const
 	return result;
 }
 
+std::vector<uint64_t> DesktopObjects::region_handles() const
+{
+	std::vector<uint64_t> result;
+	for (const auto &[handle,object] : objects)
+		if (std::holds_alternative<DesktopRegion>(object)) result.push_back(handle);
+	return result;
+}
+
 std::vector<uint64_t> DesktopObjects::dc_handles() const
 {
 	std::vector<uint64_t> result;
@@ -485,6 +495,14 @@ void DesktopObjects::finish_paint(uint64_t handle)
 	select_brush(record->dc,desktop_stock_brush);
 	select_pen(record->dc,desktop_stock_pen+1);device->position_x=device->position_y=0;
 	device->text_color=0; device->background_color=0xffffff; device->background_mode=2;
+}
+
+void DesktopObjects::abandon_paint(uint64_t handle)
+{
+	auto *record=window(handle);
+	if (!record || !record->painting) return;
+	if (auto *device=dc(record->dc); device && device->clip) { used-=device->clip->bytes(); device->clip.reset(); }
+	record->painting=false;
 }
 
 static bool same_name(std::string_view a,std::string_view b)

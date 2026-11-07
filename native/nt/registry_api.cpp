@@ -199,7 +199,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 				data = from_ansi_bytes(data, ansi_page);
 			call.ret(hive.set(call[0], name, type, data));
 		});
-		registry.add("RegQueryValueEx" + suffix, 6, [&hive, text_of, wide, ansi_page](ApiCall &call) {
+		const auto query_value = [&hive, text_of, wide, ansi_page](ApiCall &call) {
 			const auto name = text_of(call, call[1], wide);
 			if (call[4] && !call[5]) {
 				call.ret(error_invalid_parameter);
@@ -228,7 +228,10 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 			}
 			call.write(call[4], data);
 			call.ret(0);
-		});
+		};
+		registry.add("RegQueryValueEx" + suffix, 6, query_value);
+		// SHQueryValueEx takes the same arguments; a REG_EXPAND_SZ value is answered as stored, its variables not expanded.
+		registry.add("SHQueryValueEx" + suffix, 6, query_value);
 		registry.add("RegDeleteValue" + suffix, 2, [&hive, text_of, wide](ApiCall &call) { call.ret(hive.remove_value(call[0], text_of(call, call[1], wide))); });
 		registry.add("RegDeleteKey" + suffix, 2, [&hive, text_of, wide, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], wide)))); });
 		// The older form: the buffer size is a plain count of characters, not a pointer to one.
@@ -408,7 +411,11 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 	};
 	registry.add("NtOpenKey", 3, open_key);
 	registry.add("NtOpenKeyEx", 4, open_key);
-	registry.add("NtDeleteKey", 1, [&hive, status_of](ApiCall &call) { call.ret(status_of(hive.remove_key(call[0], u""))); });
+	// A key that still has subkeys cannot be deleted: STATUS_CANNOT_DELETE, which RegDeleteKey reports as access denied.
+	registry.add("NtDeleteKey", 1, [&hive, status_of](ApiCall &call) {
+		const auto result = hive.remove_key(call[0], u"");
+		call.ret(result == 5 ? 0xc0000121U : status_of(result));
+	});
 	const auto name_of = [handle_width](ApiCall &call, uint64_t address) {
 		if (!address)
 			return std::u16string();
@@ -868,6 +875,7 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 	});
 	registry.add("RegDeleteKeyExW", 4, [&hive, text_of, view](ApiCall &call) { call.ret(hive.remove_key(call[0], view(call[0], text_of(call, call[1], true), call.u32(2)))); });
 	registry.add("RegCloseKey", 1, [&hive](ApiCall &call) { call.ret(hive.close(call[0])); });
+	registry.add("RegOverridePredefKey", 2, [&hive](ApiCall &call) { call.ret(hive.override_root(call[0], call[1])); });
 	registry.add("RegFlushKey", 1, [](ApiCall &call) { call.ret(0); });
 	// Predefined keys are resolved for each operation; no cached handles need invalidating.
 	registry.add("RegDisablePredefinedCache", 0, [](ApiCall &call) { call.ret(0); });

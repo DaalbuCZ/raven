@@ -72,21 +72,25 @@ std::optional<std::vector<uint8_t>> sid_from_text(std::u16string text)
 	size_t count = 0;
 	if (text.size() < 5 || text[0] != u'S' || text[1] != u'-' || text[2] != u'1' || text[3] != u'-')
 		return std::nullopt;
-	for (size_t at = 4; at < text.size() && count < 16;) {
+	// The authority and up to 15 subauthorities (SID_MAX_SUB_AUTHORITIES), as capability SIDs carry ten.
+	size_t at = 4;
+	while (at < text.size()) {
+		if (count == 16)
+			return std::nullopt;
 		unsigned long long value = 0;
 		size_t digits = 0;
-		while (at < text.size() && text[at] >= u'0' && text[at] <= u'9') {
+		while (at < text.size() && text[at] >= u'0' && text[at] <= u'9' && digits < 16) {
 			value = value * 10 + (text[at] - u'0');
 			++at;
 			++digits;
 		}
-		if (!digits || (at < text.size() && text[at] != u'-'))
+		if (!digits || (at < text.size() && text[at] != u'-') || value > (count ? 0xffffffffULL : 0xffffffffffffULL))
 			return std::nullopt;
 		numbers[count++] = value;
-		if (at < text.size())
-			++at;
+		if (at < text.size() && ++at == text.size())
+			return std::nullopt;
 	}
-	if (count < 2 || count > 9)
+	if (count < 2)
 		return std::nullopt;
 	std::vector<uint8_t> sid{1, uint8_t(count - 1), 0, 0, 0, 0, 0, 0};
 	for (int index = 0; index < 6; ++index)
@@ -467,6 +471,15 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint16_t>(call[0] + 4, uint16_t(count + 1));
 		call.ret(1);
 	};
+	// User Account Control is on, as the token information below describes it: elevation helpers ask for it before restarting elevated.
+	registry.add("CheckElevationEnabled", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.ret(87);
+			return;
+		}
+		call.store<uint32_t>(call[0], 1);
+		call.ret(0);
+	});
 	// Token information: the account is one fixed user in session 1, an administrator under User Account Control: medium integrity and a
 	// limited token, or high integrity and the full token when the process runs elevated.
 	registry.add("GetTokenInformation", 5, [&objects, &context](ApiCall &call) {
@@ -664,6 +677,70 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		if (!allowed)
 			call.set_last_error(5);
 		call.ret(1);
+	});
+	// DsMakeSpn: "class/instance[:port][/service]", the instance being the service's host when none is named and the service part left
+	// out when it is the instance itself. The length is in characters with the terminator, the needed one when the buffer is short.
+	for (const bool wide : {true, false})
+		registry.add(wide ? "DsMakeSpnW" : "DsMakeSpnA", 7, [wide](ApiCall &call) {
+			if (!call[0] || !call[1] || !call[5]) {
+				call.ret(87);
+				return;
+			}
+			const auto text = [&](uint64_t address) {
+				if (wide)
+					return call.wide(address, 4096);
+				const auto narrow = call.narrow(address, 4096);
+				return std::u16string(narrow.begin(), narrow.end());
+			};
+			const auto service_class = text(call[0]), service = text(call[1]);
+			const auto instance = call[2] ? text(call[2]) : service;
+			std::u16string spn = service_class + u"/" + instance;
+			if (const auto port = uint16_t(call[3]))
+				for (const char digit : ":" + std::to_string(port))
+					spn += char16_t(digit);
+			if (service != instance)
+				spn += u"/" + service;
+			const auto capacity = call.load<uint32_t>(call[5]);
+			call.store<uint32_t>(call[5], uint32_t(spn.size() + 1));
+			if (!call[6] || capacity < spn.size() + 1) {
+				call.ret(111);
+				return;
+			}
+			if (wide)
+				call.put_wide(call[6], spn, capacity);
+			else
+				call.put_narrow(call[6], std::string(spn.begin(), spn.end()), capacity);
+			call.ret(0);
+		});
+	// Every token here belongs to the one user and carries the same groups, so two tokens differ only in their integrity level and in
+	// which privileges they still hold; whether a privilege is enabled does not count.
+	registry.add("NtCompareTokens", 3, [&objects](ApiCall &call) {
+		const auto first = objects.object_as<AccessToken>(call[0]);
+		const auto second = objects.object_as<AccessToken>(call[1]);
+		if (!first || !second) {
+			call.ret(0xc0000008U);
+			return;
+		}
+		if (!(objects.access_of(call[0]) & 8) || !(objects.access_of(call[1]) & 8)) {
+			call.ret(0xc0000022U);
+			return;
+		}
+		const auto held = [](const AccessToken::Data &data) {
+			std::vector<uint64_t> luids;
+			for (const auto &privilege : data.privileges)
+				if (!(privilege.attributes & 4))
+					luids.push_back(privilege.luid);
+			std::sort(luids.begin(), luids.end());
+			return luids;
+		};
+		const auto one = first->data(), other = second->data();
+		try {
+			call.store<uint8_t>(call[2], one.integrity == other.integrity && held(one) == held(other));
+		} catch (const ApiFault &) {
+			call.ret(0xc0000005U);
+			return;
+		}
+		call.ret(0);
 	});
 	// Copies own their DACL and integrity level; changing one leaves the source token unchanged.
 	registry.add("DuplicateTokenEx", 6, [&objects](ApiCall &call) {
@@ -1000,12 +1077,7 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 	});
 	// The descriptor of a kernel object, self-relative: the user owns what the process made, with the user's domain group, and a DACL that is
 	// present but null leaves the object open to everyone, which is how the runtime checks access to its objects.
-	registry.add("NtQuerySecurityObject", 5, [&objects](ApiCall &call) {
-		if (call[0] != UINT64_MAX && call[0] != UINT64_MAX - 1 && !objects.object(call[0])) {
-			call.ret(0xc0000008U);
-			return;
-		}
-		const uint32_t wanted = call.u32(1);
+	const auto object_descriptor = [](uint32_t wanted) {
 		const auto sid = [](uint32_t last) {
 			std::vector<uint8_t> bytes{1, 5, 0, 0, 0, 0, 0, 5};
 			for (const uint32_t value : {21u, 1000u, 1000u, 1000u, last})
@@ -1028,10 +1100,34 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		if (wanted & 4)
 			control |= 0x4;
 		std::memcpy(descriptor.data() + 2, &control, 2);
+		return descriptor;
+	};
+	registry.add("NtQuerySecurityObject", 5, [&objects, object_descriptor](ApiCall &call) {
+		if (call[0] != UINT64_MAX && call[0] != UINT64_MAX - 1 && !objects.object(call[0])) {
+			call.ret(0xc0000008U);
+			return;
+		}
+		const auto descriptor = object_descriptor(call.u32(1));
 		if (call[4])
 			call.store<uint32_t>(call[4], uint32_t(descriptor.size()));
 		if (call.u32(3) < descriptor.size()) {
 			call.ret(0xc0000023U);
+			return;
+		}
+		call.write(call[2], descriptor);
+		call.ret(0);
+	});
+	// A registry key answers the same descriptor as the runtime's objects; the size needed comes back with ERROR_INSUFFICIENT_BUFFER.
+	registry.add("RegGetKeySecurity", 4, [object_descriptor](ApiCall &call) {
+		if (!call[0] || !call[3]) {
+			call.ret(!call[0] ? 6 : 87);
+			return;
+		}
+		const auto descriptor = object_descriptor(call.u32(1));
+		const uint32_t capacity = call.load<uint32_t>(call[3]);
+		call.store<uint32_t>(call[3], uint32_t(descriptor.size()));
+		if (capacity < descriptor.size() || !call[2]) {
+			call.ret(122);
 			return;
 		}
 		call.write(call[2], descriptor);

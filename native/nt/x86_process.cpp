@@ -131,11 +131,13 @@ constexpr std::string_view shared_allowed[] = {
 	"WaitForSingleObjectEx",
 	// ICONINFO is read at the program's pointer width.
 	"CreateIconIndirect",
-	"EnumProcesses", "K32EnumProcesses",
+	"EnumProcesses", "K32EnumProcesses", "NtQuerySystemInformation",
+	"CharLowerBuffW", "CharUpperBuffW", "PathCommonPrefixW", "PathIsPrefixW", "RegGetKeySecurity", "RegOverridePredefKey", "SHQueryValueExW", "SHQueryValueExA",
+	"GetProcessShutdownParameters",
 	"QueryFullProcessImageNameW", "QueryFullProcessImageNameA",
 	"NtQueryInformationProcess", "NtReadVirtualMemory", "NtWriteVirtualMemory", "ReadProcessMemory", "WriteProcessMemory", "OpenProcess",
 	"NtSetInformationThread", "NtOpenThreadToken", "NtOpenThreadTokenEx", "NtOpenThread", "NtOpenProcess", "NtOpenProcessToken", "NtOpenProcessTokenEx", "NtQueryInformationThread", "OpenThread", "GetThreadId",
-	"VirtualAllocEx", "VirtualFreeEx", "VirtualProtectEx", "VirtualQueryEx",
+	"VirtualAllocEx", "VirtualAllocExNuma", "VirtualFreeEx", "VirtualProtectEx", "VirtualQueryEx",
 	"SetDllDirectoryW", "SetDllDirectoryA", "SetConsoleTitleW", "SetConsoleTitleA", "OpenSCManagerW", "OpenSCManagerA", "OpenServiceW", "OpenServiceA", "CreateServiceW", "CreateServiceA",
 	"CloseServiceHandle", "DeleteService", "ChangeServiceConfigW", "ChangeServiceConfig2W", "ChangeServiceConfig2A", "QueryServiceConfigW", "QueryServiceConfigA", "GetServiceDisplayNameW", "GetServiceDisplayNameA",
 	"QueryServiceObjectSecurity", "SetServiceObjectSecurity", "RegQueryInfoKeyA", "RegQueryInfoKeyW", "LookupPrivilegeValueA", "QueryServiceStatus", "QueryServiceStatusEx", "StartServiceW", "ControlService",
@@ -152,14 +154,15 @@ constexpr std::string_view shared_allowed[] = {
 	"IsWindowEnabled", "EnableWindow", "FindWindowExW", "SetForegroundWindow", "GetMessagePos", "OpenClipboard", "EmptyClipboard",
 	"SetClipboardData", "CloseClipboard", "CharNextA", "CharNextW", "CharPrevA", "CharPrevW", "SystemParametersInfoW", "GetSystemMenu",
 	"EnableMenuItem", "AppendMenuW", "CreatePopupMenu", "LoadBitmapW", "LoadImageW",
-	"SHGetSpecialFolderLocation", "SHCloneSpecialIDList", "SHGetPathFromIDListW", "SHGetFileInfoW", "SHGetFileInfoA", "ShellExecuteW", "SHFileOperationW",
-	"OleInitialize", "OleUninitialize", "CoTaskMemFree", "CoCreateInstance", "CoInitializeSecurity",
+	"SHGetSpecialFolderLocation", "SHCloneSpecialIDList", "SHGetPathFromIDListW", "SHGetFileInfoW", "SHGetFileInfoA", "ShellExecuteW", "ShellExecuteExW", "SHFileOperationW",
+	"OleInitialize", "OleUninitialize", "CoTaskMemFree", "CoCreateInstance", "CoInitializeSecurity", "CoRegisterPSClsid", "CoSetProxyBlanket",
+	"WinHttpGetDefaultProxyConfiguration", "WinHttpSetDefaultProxyConfiguration",
 	"GetTempPathW", "GetTempPath2W", "GetTempPath2A", "CompareFileTime", "MoveFileExW", "lstrcatW", "lstrcpynW", "GetTempFileNameW", "GetTempFileNameA", "GetDiskFreeSpaceW", "GetExitCodeProcess",
 	"CreateProcessW", "GetProcessHandleCount", "OpenProcessToken", "LookupPrivilegeValueW", "AdjustTokenPrivileges", "SetFileSecurityW",
 	"RegCloseKey", "RegDisablePredefinedCache", "RegDisablePredefinedCacheEx", "RegCreateKeyExA", "RegCreateKeyExW", "RegOpenKeyA", "RegOpenKeyW", "RegOpenKeyExA", "RegOpenKeyExW", "RegQueryValueExA",
 	"RegQueryValueExW", "RegSetValueExA", "RegSetValueExW", "RegDeleteKeyA", "RegDeleteKeyW", "RegDeleteValueA", "RegDeleteValueW",
 	"RegEnumKeyA", "RegEnumKeyW", "RegEnumKeyExA", "RegEnumKeyExW", "RegEnumValueA", "RegEnumValueW", "RegGetValueA", "RegGetValueW",
-	"GetAdaptersInfo", "GetNetworkParams", "RtlConvertDeviceFamilyInfoToString", "GetPackagesByPackageFamily", "GetUserDefaultGeoName", "SLGetWindowsInformation", "SLGetWindowsInformationDWORD",
+	"GetAdaptersInfo", "GetNetworkParams", "RtlConvertDeviceFamilyInfoToString", "RtlGetDeviceFamilyInfoEnum", "CryptFindOIDInfo", "GetPackagesByPackageFamily", "GetUserDefaultGeoName", "SLGetWindowsInformation", "SLGetWindowsInformationDWORD",
 	"GetWindowLongW", "SetWindowLongW", "GetFileVersionInfoA", "GetFileVersionInfoExW", "GetFileVersionInfoSizeA", "GetFileVersionInfoSizeExW",
 	"GetFileVersionInfoSizeW", "GetFileVersionInfoW", "VerQueryValueA", "VerQueryValueW", "GetSystemDirectoryW", "GetSystemDirectoryA", "GetWindowsDirectoryW", "LocalAlloc", "LocalReAlloc", "GlobalReAlloc", "GlobalSize", "GetComputerNameA",
 	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
@@ -582,6 +585,19 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	if (launch)
 		program_libraries = ProgramLibraries(launch->image_path, false);
 	// Libraries whose argument counts come from their own implementation or the unsupported-service table.
+	// The common controls are the component's when a program that does not import them loads them later; the provider is then
+	// only the fallback.
+	const auto late_controls = [&](std::string_view dll) {
+		return dll == "comctl32.dll" && std::none_of(modules.all().begin(), modules.all().end(), [](const auto &item) {
+			return std::any_of(item.second->imports.begin(), item.second->imports.end(), [](const auto &symbol) {
+				auto library = symbol.module;
+				for (auto &character : library)
+					if (character >= 'A' && character <= 'Z')
+						character = static_cast<char>(character + ('a' - 'A'));
+				return library == "comctl32.dll" || library == "comctl32";
+			});
+		});
+	};
 	const auto add_library = [&](const char *dll, std::span<const std::string_view> exports, std::span<const std::string_view> data,
 		const std::function<uint32_t(std::string_view)> &count, std::span<const std::pair<std::string_view, uint16_t>> ordinals = {}) {
 		std::string provider_key = dll;
@@ -591,7 +607,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 			provider_key = std::string("system32-") + dll;
 			if (modules.all().contains(provider_key))
 				return;
-		} else if (program_libraries.contains(dll)) {
+		} else if (program_libraries.contains(dll) || late_controls(dll)) {
 			provider_key = std::string("system32-") + dll;
 			if (modules.all().contains(provider_key))
 				return;

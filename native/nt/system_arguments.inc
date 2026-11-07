@@ -2378,10 +2378,10 @@ static constexpr std::pair<std::string_view, uint8_t> winspool_words[]{
 	{"XcvDataW",8},
 };
 static constexpr std::pair<std::string_view, uint8_t> ravenhost_words[]{
-	{"RavenCanvasCreate",2},{"RavenCanvasDestroy",1},{"RavenCanvasDraw",4},{"RavenCanvasPixels",8},{"RavenCanvasSize",2},{"RavenFontClose",1},
-	{"RavenFontGlyphs",4},{"RavenFontInfo",2},{"RavenFontMetrics",3},{"RavenFontName",4},{"RavenFontOpen",3},{"RavenFontOutline",4},
-	{"RavenFontRender",10},{"RavenFontScan",2},{"RavenFontTable",5},{"RavenPathCombine",8},{"RavenPathWiden",7},{"RavenShaderRelease",1},
-	{"RavenShaderRequest",2},{"RavenShaderResult",4},{"RavenTrace",1},
+	{"RavenCanvasBatch",2},{"RavenCanvasCreate",2},{"RavenCanvasDestroy",1},{"RavenCanvasDraw",4},{"RavenCanvasPixels",8},{"RavenCanvasSize",2},
+	{"RavenFontClose",1},{"RavenFontGlyphs",4},{"RavenFontInfo",2},{"RavenFontMetrics",3},{"RavenFontName",4},{"RavenFontOpen",3},
+	{"RavenFontOutline",4},{"RavenFontRender",10},{"RavenFontScan",2},{"RavenFontTable",5},{"RavenPathCombine",8},{"RavenPathWiden",7},
+	{"RavenShaderRelease",1},{"RavenShaderRequest",2},{"RavenShaderResult",4},{"RavenTrace",1},
 };
 static constexpr std::pair<std::string_view, uint8_t> secur32_words[]{
 	{"AcceptSecurityContext",9},{"AcquireCredentialsHandleA",9},{"AcquireCredentialsHandleW",9},{"AddCredentialsA",8},{"AddCredentialsW",8},{"AddSecurityPackageA",2},
@@ -2509,12 +2509,12 @@ static constexpr std::pair<std::string_view, uint8_t> dsound_words[]{
 	{"DirectSoundEnumerateA",2},{"DirectSoundEnumerateW",2},{"DirectSoundFullDuplexCreate",10},{"GetDeviceID",2},
 };
 static constexpr std::pair<std::string_view, uint8_t> combase_words[]{
-	{"CLSIDFromString",2},{"CoCreateFreeThreadedMarshaler",2},{"CoCreateGuid",1},{"CoCreateInstance",5},{"CoDecrementMTAUsage",1},{"CoGetApartmentType",2},{"CoGetMalloc",2},
-	{"CoIncrementMTAUsage",1},{"CoInitializeEx",2},{"CoTaskMemAlloc",1},{"CoTaskMemFree",1},{"CoTaskMemRealloc",2},{"CoUninitialize",0},
-	{"GetErrorInfo",2},{"RoActivateInstance",2},{"RoGetActivationFactory",3},{"RoGetParameterizedTypeInstanceIID",5},{"RoInitialize",1},{"RoOriginateError",2},
-	{"RoOriginateErrorW",3},{"RoOriginateLanguageException",3},{"RoParseTypeName",3},{"RoResolveNamespace",7},{"RoUninitialize",0},{"SetErrorInfo",2},
-	{"StringFromGUID2",3},{"WindowsCompareStringOrdinal",3},{"WindowsCreateString",3},{"WindowsCreateStringReference",4},{"WindowsDeleteString",1},{"WindowsDuplicateString",2},
-	{"WindowsGetStringLen",1},{"WindowsGetStringRawBuffer",2},{"WindowsIsStringEmpty",1},
+	{"CLSIDFromString",2},{"CoCreateFreeThreadedMarshaler",2},{"CoCreateGuid",1},{"CoCreateInstance",5},{"CoDecrementMTAUsage",1},{"CoGetApartmentType",2},
+	{"CoGetMalloc",2},{"CoIncrementMTAUsage",1},{"CoInitializeEx",2},{"CoTaskMemAlloc",1},{"CoTaskMemFree",1},{"CoTaskMemRealloc",2},
+	{"CoUninitialize",0},{"GetErrorInfo",2},{"RoActivateInstance",2},{"RoGetActivationFactory",3},{"RoGetParameterizedTypeInstanceIID",5},{"RoInitialize",1},
+	{"RoOriginateError",2},{"RoOriginateErrorW",3},{"RoOriginateLanguageException",3},{"RoParseTypeName",3},{"RoResolveNamespace",8},{"RoUninitialize",0},
+	{"SetErrorInfo",2},{"StringFromGUID2",3},{"WindowsCompareStringOrdinal",3},{"WindowsCreateString",3},{"WindowsCreateStringReference",4},{"WindowsDeleteString",1},
+	{"WindowsDuplicateString",2},{"WindowsGetStringLen",1},{"WindowsGetStringRawBuffer",2},{"WindowsIsStringEmpty",1},
 };
 static constexpr std::pair<std::string_view, uint8_t> wer_words[]{
 	{"WerAddExcludedApplication",2},{"WerFreeString",1},{"WerRemoveExcludedApplication",2},{"WerReportAddDump",7},{"WerReportAddFile",4},{"WerReportCloseHandle",1},
@@ -2601,6 +2601,107 @@ static constexpr std::pair<std::string_view, uint8_t> rstrtmgr_words[]{
 	{"RmAddFilter",5},{"RmCancelCurrentTask",1},{"RmEndSession",1},{"RmGetFilterList",4},{"RmGetList",5},{"RmJoinSession",2},
 	{"RmRegisterResources",7},{"RmRemoveFilter",4},{"RmReserveHeap",1},{"RmRestart",3},{"RmShutdown",3},{"RmStartSession",3},
 };
+static constexpr std::pair<std::string_view, uint8_t> wintypes_words[]{
+	{"RoGetMetaDataFile",5},{"RoIsApiContractMajorVersionPresent",3},{"RoIsApiContractPresent",4},{"RoParseTypeName",3},{"RoResolveNamespace",8},
+};
+static constexpr std::pair<std::string_view, uint8_t> security_words[]{
+	{"AcceptSecurityContext",9},{"AcquireCredentialsHandleA",9},{"AcquireCredentialsHandleW",9},{"AddSecurityPackageA",2},{"AddSecurityPackageW",2},{"ApplyControlToken",2},
+	{"CompleteAuthToken",2},{"DecryptMessage",4},{"DeleteSecurityContext",1},{"DeleteSecurityPackageA",1},{"DeleteSecurityPackageW",1},{"EncryptMessage",4},
+	{"EnumerateSecurityPackagesA",2},{"EnumerateSecurityPackagesW",2},{"ExportSecurityContext",4},{"FreeContextBuffer",1},{"FreeCredentialsHandle",1},{"ImpersonateSecurityContext",1},
+	{"ImportSecurityContextA",4},{"ImportSecurityContextW",4},{"InitSecurityInterfaceA",0},{"InitSecurityInterfaceW",0},{"InitializeSecurityContextA",12},{"InitializeSecurityContextW",12},
+	{"MakeSignature",4},{"QueryContextAttributesA",3},{"QueryContextAttributesW",3},{"QueryCredentialsAttributesA",3},{"QueryCredentialsAttributesW",3},{"QuerySecurityContextToken",2},
+	{"QuerySecurityPackageInfoA",2},{"QuerySecurityPackageInfoW",2},{"RevertSecurityContext",1},{"SealMessage",4},{"UnsealMessage",4},{"VerifySignature",4},
+};
+static constexpr std::pair<std::string_view, uint8_t> sspicli_words[]{
+	{"AcceptSecurityContext",9},{"AcquireCredentialsHandleA",9},{"AcquireCredentialsHandleW",9},{"AddCredentialsA",8},{"AddCredentialsW",8},{"AddSecurityPackageA",2},
+	{"AddSecurityPackageW",2},{"ApplyControlToken",2},{"ChangeAccountPasswordA",8},{"ChangeAccountPasswordW",8},{"CompleteAuthToken",2},{"CredMarshalTargetInfo",3},
+	{"CredUnmarshalTargetInfo",4},{"DecryptMessage",4},{"DeleteSecurityContext",1},{"DeleteSecurityPackageA",1},{"DeleteSecurityPackageW",1},{"EncryptMessage",4},
+	{"EnumerateSecurityPackagesA",2},{"EnumerateSecurityPackagesW",2},{"ExportSecurityContext",4},{"FreeContextBuffer",1},{"FreeCredentialsHandle",1},{"GetSecurityUserInfo",3},
+	{"GetUserNameExA",3},{"GetUserNameExW",3},{"ImpersonateSecurityContext",1},{"ImportSecurityContextA",4},{"ImportSecurityContextW",4},{"InitSecurityInterfaceA",0},
+	{"InitSecurityInterfaceW",0},{"InitializeSecurityContextA",12},{"InitializeSecurityContextW",12},{"LogonUserExExW",11},{"LsaCallAuthenticationPackage",7},{"LsaConnectUntrusted",1},
+	{"LsaDeregisterLogonProcess",1},{"LsaEnumerateLogonSessions",2},{"LsaFreeReturnBuffer",1},{"LsaGetLogonSessionData",2},{"LsaLogonUser",14},{"LsaLookupAuthenticationPackage",3},
+	{"LsaRegisterLogonProcess",3},{"LsaRegisterPolicyChangeNotification",2},{"LsaUnregisterPolicyChangeNotification",2},{"MakeSignature",4},{"QueryContextAttributesA",3},{"QueryContextAttributesW",3},
+	{"QueryCredentialsAttributesA",3},{"QueryCredentialsAttributesW",3},{"QuerySecurityContextToken",2},{"QuerySecurityPackageInfoA",2},{"QuerySecurityPackageInfoW",2},{"RevertSecurityContext",1},
+	{"SaslAcceptSecurityContext",9},{"SaslEnumerateProfilesA",2},{"SaslEnumerateProfilesW",2},{"SaslGetContextOption",5},{"SaslGetProfilePackageA",2},{"SaslGetProfilePackageW",2},
+	{"SaslIdentifyPackageA",2},{"SaslIdentifyPackageW",2},{"SaslInitializeSecurityContextA",12},{"SaslInitializeSecurityContextW",12},{"SaslSetContextOption",4},{"SealMessage",4},
+	{"SecCacheSspiPackages",0},{"SecDeleteUserModeContext",1},{"SecInitUserModeContext",2},{"SeciAllocateAndSetCallFlags",2},{"SeciAllocateAndSetIPAddress",3},{"SeciFreeCallContext",0},
+	{"SetContextAttributesA",4},{"SetContextAttributesW",4},{"SetCredentialsAttributesA",4},{"SetCredentialsAttributesW",4},{"SspiCompareAuthIdentities",4},{"SspiCopyAuthIdentity",2},
+	{"SspiDecryptAuthIdentity",1},{"SspiEncodeAuthIdentityAsStrings",4},{"SspiEncodeStringsAsAuthIdentity",4},{"SspiEncryptAuthIdentity",1},{"SspiExcludePackage",3},{"SspiFreeAuthIdentity",1},
+	{"SspiGetComputerNameForSPN",2},{"SspiGetTargetHostName",2},{"SspiIsAuthIdentityEncrypted",1},{"SspiLocalFree",1},{"SspiMarshalAuthIdentity",3},{"SspiPrepareForCredRead",4},
+	{"SspiPrepareForCredWrite",7},{"SspiUnmarshalAuthIdentity",3},{"SspiUnmarshalAuthIdentityInternal",4},{"SspiValidateAuthIdentity",1},{"SspiZeroAuthIdentity",1},{"UnsealMessage",4},
+	{"VerifySignature",4},
+};
+static constexpr std::pair<std::string_view, uint8_t> ntdsapi_words[]{
+	{"DsAddSidHistoryA",8},{"DsAddSidHistoryW",8},{"DsBindA",3},{"DsBindByInstanceA",8},{"DsBindByInstanceW",8},{"DsBindToISTGA",2},
+	{"DsBindToISTGW",2},{"DsBindW",3},{"DsBindWithCredA",4},{"DsBindWithCredW",4},{"DsBindWithSpnA",5},{"DsBindWithSpnExA",6},
+	{"DsBindWithSpnExW",6},{"DsBindWithSpnW",5},{"DsBindingSetTimeout",2},{"DsClientMakeSpnForTargetServerA",4},{"DsClientMakeSpnForTargetServerW",4},{"DsCrackNamesA",7},
+	{"DsCrackNamesW",7},{"DsCrackSpn2A",9},{"DsCrackSpn2W",9},{"DsCrackSpn3W",11},{"DsCrackSpnA",8},{"DsCrackSpnW",8},
+	{"DsCrackUnquotedMangledRdnA",4},{"DsCrackUnquotedMangledRdnW",4},{"DsFinishDemotionW",5},{"DsFreeDomainControllerInfoA",3},{"DsFreeDomainControllerInfoW",3},{"DsFreeNameResultA",1},
+	{"DsFreeNameResultW",1},{"DsFreePasswordCredentials",1},{"DsFreeSchemaGuidMapA",1},{"DsFreeSchemaGuidMapW",1},{"DsFreeSpnArrayA",2},{"DsFreeSpnArrayW",2},
+	{"DsGetBindAddrW",1},{"DsGetBindAnnotW",1},{"DsGetBindInstGuid",1},{"DsGetDomainControllerInfoA",5},{"DsGetDomainControllerInfoW",5},{"DsGetRdnW",6},
+	{"DsGetSpnA",9},{"DsGetSpnW",9},{"DsInheritSecurityIdentityA",4},{"DsInheritSecurityIdentityW",4},{"DsInitDemotionW",1},{"DsIsMangledDnA",2},
+	{"DsIsMangledDnW",2},{"DsIsMangledRdnValueA",3},{"DsIsMangledRdnValueW",3},{"DsListDomainsInSiteA",3},{"DsListDomainsInSiteW",3},{"DsListInfoForServerA",3},
+	{"DsListInfoForServerW",3},{"DsListRolesA",2},{"DsListRolesW",2},{"DsListServersForDomainInSiteA",4},{"DsListServersForDomainInSiteW",4},{"DsListServersInSiteA",3},
+	{"DsListServersInSiteW",3},{"DsListSitesA",2},{"DsListSitesW",2},{"DsLogEntry",0},{"DsMakePasswordCredentialsA",4},{"DsMakePasswordCredentialsW",4},
+	{"DsMakeSpnA",7},{"DsMakeSpnW",7},{"DsMapSchemaGuidsA",4},{"DsMapSchemaGuidsW",4},{"DsQuerySitesByCostA",6},{"DsQuerySitesByCostW",6},
+	{"DsQuerySitesFree",1},{"DsQuoteRdnValueA",4},{"DsQuoteRdnValueW",4},{"DsRemoveDsDomainA",2},{"DsRemoveDsDomainW",2},{"DsRemoveDsServerA",5},
+	{"DsRemoveDsServerW",5},{"DsReplicaAddA",7},{"DsReplicaAddW",7},{"DsReplicaConsistencyCheck",3},{"DsReplicaDelA",4},{"DsReplicaDelW",4},
+	{"DsReplicaDemotionW",4},{"DsReplicaFreeInfo",2},{"DsReplicaGetInfo2W",9},{"DsReplicaGetInfoW",5},{"DsReplicaModifyA",9},{"DsReplicaModifyW",9},
+	{"DsReplicaSyncA",4},{"DsReplicaSyncAllA",6},{"DsReplicaSyncAllW",6},{"DsReplicaSyncW",4},{"DsReplicaUpdateRefsA",5},{"DsReplicaUpdateRefsW",5},
+	{"DsReplicaVerifyObjectsA",4},{"DsReplicaVerifyObjectsW",4},{"DsServerRegisterSpnA",3},{"DsServerRegisterSpnW",3},{"DsUnBindA",1},{"DsUnBindW",1},
+	{"DsUnquoteRdnValueA",4},{"DsUnquoteRdnValueW",4},{"DsWriteAccountSpnA",5},{"DsWriteAccountSpnW",5},{"DsaopBind",5},{"DsaopBindWithCred",6},
+	{"DsaopBindWithSpn",7},{"DsaopExecuteScript",6},{"DsaopPrepareScript",4},{"DsaopUnBind",1},
+};
+static constexpr std::pair<std::string_view, uint8_t> activeds_words[]{
+	{"ADsBuildEnumerator",2},{"ADsBuildVarArrayInt",3},{"ADsBuildVarArrayStr",3},{"ADsDecodeBinaryData",3},{"ADsEncodeBinaryData",3},{"ADsEnumerateNext",4},
+	{"ADsFreeEnumerator",1},{"ADsGetLastError",5},{"ADsGetObject",3},{"ADsOpenObject",6},{"ADsSetLastError",3},{"AdsFreeAdsValues",2},
+	{"AdsTypeToPropVariant",3},{"AdsTypeToPropVariant2",7},{"AllocADsMem",1},{"AllocADsStr",1},{"BinarySDToSecurityDescriptor",6},{"ConvertSecDescriptorToVariant",6},
+	{"ConvertSecurityDescriptorToSecDes",7},{"ConvertTrusteeToSid",7},{"DllCanUnloadNow",0},{"DllGetClassObject",3},{"FreeADsMem",1},{"FreeADsStr",1},
+	{"PropVariantToAdsType",4},{"PropVariantToAdsType2",8},{"ReallocADsMem",3},{"ReallocADsStr",2},{"SecurityDescriptorToBinarySD",10},
+};
+static constexpr std::pair<std::string_view, uint8_t> httpapi_words[]{
+	{"HttpAddFragmentToCache",5},{"HttpAddUrl",3},{"HttpAddUrlToUrlGroup",6},{"HttpCancelHttpRequest",4},{"HttpCloseRequestQueue",1},{"HttpCloseServerSession",2},
+	{"HttpCloseUrlGroup",2},{"HttpControlService",5},{"HttpCreateHttpHandle",2},{"HttpCreateRequestQueue",5},{"HttpCreateServerSession",3},{"HttpCreateUrlGroup",4},
+	{"HttpDeleteServiceConfiguration",5},{"HttpFlushResponseCache",4},{"HttpGetCounters",6},{"HttpInitialize",3},{"HttpQueryRequestQueueProperty",7},{"HttpQueryServerSessionProperty",6},
+	{"HttpQueryServiceConfiguration",8},{"HttpQueryUrlGroupProperty",6},{"HttpReadFragmentFromCache",7},{"HttpReceiveClientCertificate",8},{"HttpReceiveHttpRequest",8},{"HttpReceiveRequestEntityBody",8},
+	{"HttpRemoveUrl",2},{"HttpRemoveUrlFromUrlGroup",4},{"HttpSendHttpResponse",11},{"HttpSendResponseEntityBody",11},{"HttpSetRequestQueueProperty",6},{"HttpSetServerSessionProperty",5},
+	{"HttpSetServiceConfiguration",5},{"HttpSetUrlGroupProperty",5},{"HttpShutdownRequestQueue",1},{"HttpTerminate",2},{"HttpWaitForDemandStart",2},{"HttpWaitForDisconnect",4},
+	{"HttpWaitForDisconnectEx",5},
+};
+static constexpr std::pair<std::string_view, uint8_t> msacm32_words[]{
+	{"XRegThunkEntry",9},{"acmDriverAddA",5},{"acmDriverAddW",5},{"acmDriverClose",2},{"acmDriverDetailsA",3},{"acmDriverDetailsW",3},
+	{"acmDriverEnum",3},{"acmDriverID",3},{"acmDriverMessage",4},{"acmDriverOpen",3},{"acmDriverPriority",3},{"acmDriverRemove",2},
+	{"acmFilterChooseA",1},{"acmFilterChooseW",1},{"acmFilterDetailsA",3},{"acmFilterDetailsW",3},{"acmFilterEnumA",5},{"acmFilterEnumW",5},
+	{"acmFilterTagDetailsA",3},{"acmFilterTagDetailsW",3},{"acmFilterTagEnumA",5},{"acmFilterTagEnumW",5},{"acmFormatChooseA",1},{"acmFormatChooseW",1},
+	{"acmFormatDetailsA",3},{"acmFormatDetailsW",3},{"acmFormatEnumA",5},{"acmFormatEnumW",5},{"acmFormatSuggest",5},{"acmFormatTagDetailsA",3},
+	{"acmFormatTagDetailsW",3},{"acmFormatTagEnumA",5},{"acmFormatTagEnumW",5},{"acmGetVersion",0},{"acmMessage32",6},{"acmMetrics",3},
+	{"acmStreamClose",2},{"acmStreamConvert",3},{"acmStreamMessage",4},{"acmStreamOpen",8},{"acmStreamPrepareHeader",3},{"acmStreamReset",2},
+	{"acmStreamSize",4},{"acmStreamUnprepareHeader",3},
+};
+static constexpr std::pair<std::string_view, uint8_t> mscms_words[]{
+	{"AssociateColorProfileWithDeviceA",3},{"AssociateColorProfileWithDeviceW",3},{"CheckBitmapBits",9},{"CheckColors",5},{"CloseColorProfile",1},{"CloseDisplay",1},
+	{"ColorAdapterGetCurrentProfileCalibration",6},{"ColorAdapterGetDisplayCurrentStateID",4},{"ColorAdapterGetDisplayProfile",6},{"ColorAdapterGetDisplayTargetWhitePoint",6},{"ColorAdapterGetDisplayTransformData",5},{"ColorAdapterGetSystemModifyWhitePointCaps",2},
+	{"ColorAdapterRegisterOEMColorService",1},{"ColorAdapterUnregisterOEMColorService",1},{"ColorAdapterUpdateDeviceProfile",4},{"ColorAdapterUpdateDisplayGamma",5},{"ColorCplGetDefaultProfileScope",4},{"ColorCplGetDefaultRenderingIntentScope",1},
+	{"ColorCplGetProfileProperties",2},{"ColorCplHasSystemWideAssociationListChanged",3},{"ColorCplInitialize",0},{"ColorCplLoadAssociationList",5},{"ColorCplMergeAssociationLists",2},{"ColorCplOverwritePerUserAssociationList",2},
+	{"ColorCplReleaseProfileProperties",1},{"ColorCplResetSystemWideAssociationListChangedWarning",2},{"ColorCplSaveAssociationList",5},{"ColorCplSetUsePerUserProfiles",3},{"ColorCplUninitialize",0},{"ColorProfileAddDisplayAssociation",7},
+	{"ColorProfileGetDisplayDefault",7},{"ColorProfileGetDisplayList",6},{"ColorProfileGetDisplayUserScope",4},{"ColorProfileRemoveDisplayAssociation",6},{"ColorProfileSetDisplayDefaultAssociation",7},{"ConvertColorNameToIndex",4},
+	{"ConvertIndexToColorName",4},{"CreateColorTransformA",4},{"CreateColorTransformW",4},{"CreateDeviceLinkProfile",7},{"CreateMultiProfileTransform",6},{"CreateProfileFromLogColorSpaceA",2},
+	{"CreateProfileFromLogColorSpaceW",2},{"DccwCreateDisplayProfileAssociationList",1},{"DccwGetDisplayProfileAssociationList",3},{"DccwGetGamutSize",2},{"DccwReleaseDisplayProfileAssociationList",1},{"DccwSetDisplayProfileAssociationList",3},
+	{"DeleteColorTransform",1},{"DeviceRenameEvent",3},{"DisassociateColorProfileFromDeviceA",3},{"DisassociateColorProfileFromDeviceW",3},{"EnumColorProfilesA",5},{"EnumColorProfilesW",5},
+	{"GenerateCopyFilePaths",9},{"GetCMMInfo",2},{"GetColorDirectoryA",3},{"GetColorDirectoryW",3},{"GetColorProfileElement",6},{"GetColorProfileElementTag",3},
+	{"GetColorProfileFromHandle",3},{"GetColorProfileHeader",2},{"GetCountColorProfileElements",2},{"GetNamedProfileInfo",2},{"GetPS2ColorRenderingDictionary",5},{"GetPS2ColorRenderingIntent",4},
+	{"GetPS2ColorSpaceArray",6},{"GetStandardColorSpaceProfileA",4},{"GetStandardColorSpaceProfileW",4},{"InstallColorProfileA",2},{"InstallColorProfileW",2},{"InternalGetAppliedGDIGammaRamp",2},
+	{"InternalGetAppliedGammaRamp",2},{"InternalGetDeviceConfig",6},{"InternalGetDeviceGammaCapability",1},{"InternalGetPS2CSAFromLCS",4},{"InternalGetPS2ColorRenderingDictionary",5},{"InternalGetPS2ColorRenderingDictionary2",6},
+	{"InternalGetPS2ColorSpaceArray",6},{"InternalGetPS2ColorSpaceArray2",7},{"InternalGetPS2PreviewCRD",6},{"InternalGetPS2PreviewCRD2",8},{"InternalRefreshCalibration",2},{"InternalSetDeviceConfig",6},
+	{"InternalSetDeviceGDIGammaRamp",3},{"InternalSetDeviceGammaRamp",3},{"InternalSetDeviceTemperature",4},{"InternalWcsAssociateColorProfileWithDevice",5},{"InternalWcsDisassociateColorProfileWithDevice",4},{"IsColorProfileTagPresent",3},
+	{"IsColorProfileValid",2},{"OpenColorProfileA",4},{"OpenColorProfileW",4},{"OpenDisplay",4},{"RegisterCMMA",3},{"RegisterCMMW",3},
+	{"SelectCMM",1},{"SetColorProfileElement",5},{"SetColorProfileElementReference",3},{"SetColorProfileElementSize",3},{"SetColorProfileHeader",2},{"SetStandardColorSpaceProfileA",3},
+	{"SetStandardColorSpaceProfileW",3},{"SpoolerCopyFileEvent",3},{"TranslateBitmapBits",11},{"TranslateColors",6},{"UninstallColorProfileA",3},{"UninstallColorProfileW",3},
+	{"UnregisterCMMA",2},{"UnregisterCMMW",2},{"WcsAssociateColorProfileWithDevice",3},{"WcsCheckColors",7},{"WcsCreateIccProfile",2},{"WcsDisassociateColorProfileFromDevice",3},
+	{"WcsEnumColorProfiles",5},{"WcsEnumColorProfilesSize",3},{"WcsGetCalibrationManagementState",1},{"WcsGetDefaultColorProfile",7},{"WcsGetDefaultColorProfileSize",6},{"WcsGetDefaultRenderingIntent",2},
+	{"WcsGetUsePerUserProfiles",3},{"WcsGpCanInstallOrUninstallProfiles",1},{"WcsGpCanModifyDeviceAssociationList",3},{"WcsOpenColorProfileA",7},{"WcsOpenColorProfileW",7},{"WcsSetCalibrationManagementState",1},
+	{"WcsSetDefaultColorProfile",6},{"WcsSetDefaultRenderingIntent",2},{"WcsSetUsePerUserProfiles",3},{"WcsTranslateColors",10},
+};
 static constexpr std::pair<std::string_view, std::span<const std::pair<std::string_view, uint8_t>>> argument_tables[]{
 	{"advapi32.dll", advapi32_words},
 	{"bcrypt.dll", bcrypt_words},
@@ -2671,4 +2772,12 @@ static constexpr std::pair<std::string_view, std::span<const std::pair<std::stri
 	{"slc.dll", slc_words},
 	{"sppc.dll", sppc_words},
 	{"rstrtmgr.dll", rstrtmgr_words},
+	{"wintypes.dll", wintypes_words},
+	{"security.dll", security_words},
+	{"sspicli.dll", sspicli_words},
+	{"ntdsapi.dll", ntdsapi_words},
+	{"activeds.dll", activeds_words},
+	{"httpapi.dll", httpapi_words},
+	{"msacm32.dll", msacm32_words},
+	{"mscms.dll", mscms_words},
 };

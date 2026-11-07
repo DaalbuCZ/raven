@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -39,6 +40,11 @@ struct CryptState {
 		uint32_t exponent;
 		size_t length;
 		std::vector<uint8_t> blob;
+		// The private exponent of a key pair that came in as a PRIVATEKEYBLOB, which also keeps that blob.
+		std::vector<uint32_t> secret_exponent;
+		std::vector<uint8_t> private_blob;
+		// The ALG_ID an RSA key's blob names: CALG_RSA_SIGN or CALG_RSA_KEYX.
+		uint32_t pair_algorithm = 0xa400;
 		// A session key: its ALG_ID and secret, the IV and mode CryptSetKeyParam set (CBC with a zero IV and PKCS #5 padding until
 		// then), and the IV a message reached between calls that are not final. A stream cipher keeps its state between calls.
 		uint32_t algorithm = 0;
@@ -50,7 +56,13 @@ struct CryptState {
 	};
 	std::map<uint64_t, bool> providers;
 	std::map<uint64_t, std::unique_ptr<Digest>> hashes;
+	// The values CryptSetHashParam gave hashes in place of what their data computes.
+	std::map<uint64_t, std::vector<uint8_t>> hash_values;
 	std::map<uint64_t, Key> keys;
+	// The provider each hash was made from, and the key pair a provider holds for signing (2) and for exchange (1); the pair stays
+	// with the provider after the handle the import gave is destroyed.
+	std::map<uint64_t, uint64_t> hash_provider;
+	std::map<std::pair<uint64_t, uint32_t>, Key> user_keys;
 	// Where each provider's enumeration of algorithms has got to.
 	std::map<uint64_t, size_t> enumeration;
 	uint64_t next = 0x1000;
@@ -150,8 +162,8 @@ std::optional<std::vector<uint8_t>> session_crypt(CryptState::Key &key, std::spa
 #endif
 }
 
-// RSA public keys and signature checks for CryptImportKey and CryptVerifySignature. Numbers are little-endian 32-bit words; the only
-// operation needed is s^e mod n with the public exponent, so multiplication and a shift-and-subtract remainder are enough.
+// RSA for CryptImportKey, CryptVerifySignature and CryptSignHash. Numbers are little-endian 32-bit words; s^e mod n with the public
+// exponent or the private one needs only multiplication and a shift-and-subtract remainder.
 using Words = std::vector<uint32_t>;
 
 Words words_from_bytes(std::span<const uint8_t> little_endian)
@@ -225,6 +237,23 @@ Words power_mod(const Words &base, uint32_t exponent, const Words &modulus)
 	return result;
 }
 
+Words power_mod(const Words &base, const Words &exponent, const Words &modulus)
+{
+	Words result(modulus.size());
+	result[0] = 1;
+	result = remainder(result, modulus);
+	const Words reduced = remainder(base, modulus);
+	size_t bits = exponent.size() * 32;
+	while (bits && !(exponent[(bits - 1) / 32] >> ((bits - 1) % 32) & 1))
+		--bits;
+	for (size_t bit = bits; bit-- > 0;) {
+		result = multiply_mod(result, result, modulus);
+		if (exponent[bit / 32] >> (bit % 32) & 1)
+			result = multiply_mod(result, reduced, modulus);
+	}
+	return result;
+}
+
 // The DER prefix of a PKCS #1 DigestInfo for a digest of each length: MD5, SHA-1, SHA-256, SHA-384 and SHA-512.
 std::vector<uint8_t> digest_info(size_t size)
 {
@@ -248,6 +277,14 @@ struct ComState {
 	std::map<uint64_t, Thread> threads;
 	uint64_t main_sta = 0;
 	int mta_threads = 0;
+	// The IInitializeSpy objects each thread registered, in order, with their cookies. A registration outlives the thread's
+	// initialization, so it is kept apart from it.
+	struct Spy {
+		uint64_t cookie;
+		uint64_t object;
+	};
+	std::map<uint64_t, std::vector<Spy>> spies;
+	uint64_t last_cookie = 0;
 };
 
 // The error a language projection reported for the calling thread through RoOriginateLanguageException: the code it will raise, its
@@ -262,6 +299,39 @@ struct OriginatedErrors {
 	std::map<uint64_t, Error> threads;
 };
 
+}
+
+// A list of strings a Windows Runtime function hands out: an array of string handles from CoTaskMemAlloc, each string a copy the caller
+// deletes, and their count.
+static bool hand_out_strings(ApiCall &call, KernelContext &context, const std::vector<std::u16string> &texts, uint64_t count, uint64_t out)
+{
+	const size_t width = call.pointer_width();
+	if (!out)
+		return true;
+	call.store<uint32_t>(count, uint32_t(texts.size()));
+	call.store_pointer(out, 0);
+	if (texts.empty())
+		return true;
+	const auto array = context.allocator.allocate(texts.size() * width, false);
+	if (!array)
+		return false;
+	for (size_t index = 0; index < texts.size(); ++index) {
+		const auto &value = texts[index];
+		const size_t head = 16 + width;
+		const auto block = context.allocator.allocate(head + (value.size() + 1) * 2, true);
+		if (!block)
+			return false;
+		std::vector<uint8_t> image(head + (value.size() + 1) * 2);
+		const uint32_t length = uint32_t(value.size());
+		const uint64_t characters = block + head;
+		std::memcpy(image.data() + 4, &length, 4);
+		std::memcpy(image.data() + 16, &characters, width);
+		std::memcpy(image.data() + head, value.data(), value.size() * 2);
+		call.write(block, image);
+		call.store_pointer(array + index * width, block);
+	}
+	call.store_pointer(out, array);
+	return true;
 }
 
 void register_platform_api(ApiRegistry &registry, KernelContext &context)
@@ -565,6 +635,40 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		const auto offset = call.load<uint32_t>(call[0] + 0x3c);
 		call.ret(call[0] + offset);
 	});
+	// CheckSumMappedFile(base, length, header sum, check sum): the PE checksum of a mapped file, the sum of its 16-bit words with the
+	// carries folded back, the CheckSum field left out, plus the file's length; and the value the header holds. The answer is the NT
+	// headers, or null when the file is not an image.
+	registry.add("CheckSumMappedFile", 4, [](ApiCall &call) {
+		const uint32_t length = call.u32(1);
+		const auto bytes = call.read(call[0], length);
+		uint64_t headers = 0;
+		size_t field = SIZE_MAX;
+		if (length >= 0x40 && bytes[0] == 'M' && bytes[1] == 'Z') {
+			uint32_t offset = 0;
+			std::memcpy(&offset, bytes.data() + 0x3c, 4);
+			// The signature, the file header (20 bytes) and the optional header, whose CheckSum is 64 bytes in for both widths.
+			if (size_t(offset) + 24 + 68 <= length && !std::memcmp(bytes.data() + offset, "PE\0\0", 4)) {
+				headers = call[0] + offset;
+				field = size_t(offset) + 24 + 64;
+			}
+		}
+		uint32_t stored = 0;
+		if (field != SIZE_MAX)
+			std::memcpy(&stored, bytes.data() + field, 4);
+		uint32_t sum = 0;
+		for (size_t at = 0; at < length; at += 2) {
+			if (at >= field && at < field + 4)
+				continue;
+			sum += bytes[at] | (at + 1 < length ? uint32_t(bytes[at + 1]) << 8 : 0);
+			sum = (sum & 0xffff) + (sum >> 16);
+		}
+		sum = (sum & 0xffff) + (sum >> 16);
+		if (call[2])
+			call.store<uint32_t>(call[2], stored);
+		if (call[3])
+			call.store<uint32_t>(call[3], (sum & 0xffff) + length);
+		call.ret(headers);
+	});
 
 #ifndef RAVEN_OPENSSL
 	// wininet: URL cracking is pure text processing; with the HTTP client the WinINet layer cracks URLs in both character sets.
@@ -641,13 +745,44 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.store<uint32_t>(data + 2 * width + 4, flags);
 	};
-	const auto initialize = [com, &context, ole_flags](ApiCall &call, bool multithreaded, bool no_dde) {
+	// Calls method `index` of a guest COM object's interface with the object and the arguments that follow it; the answer is its HRESULT.
+	const auto object_method = [&context](ApiCall &call, uint64_t object, size_t index, std::initializer_list<uint64_t> rest) {
+		const auto table = call.load_pointer(object);
+		std::vector<uint64_t> arguments{object};
+		arguments.insert(arguments.end(), rest);
+		const auto result = context.call(call.load_pointer(table + index * call.pointer_width()), arguments);
+		if (result.stop != NativeStop::returned)
+			throw result;
+		return uint32_t(result.value);
+	};
+	// The thread's spies hear of every CoInitializeEx and CoUninitialize it makes, in the order they were registered. A spy may
+	// register or revoke spies while it is told; one revoked meanwhile is not told after that.
+	const auto each_spy = [com, &context](const std::function<void(uint64_t)> &tell) {
+		const uint64_t thread = context.environment.teb();
+		const auto registered = com->spies.find(thread);
+		if (registered == com->spies.end())
+			return;
+		std::vector<uint64_t> cookies;
+		for (const auto &spy : registered->second)
+			cookies.push_back(spy.cookie);
+		for (const auto cookie : cookies) {
+			const auto now = com->spies.find(thread);
+			if (now == com->spies.end())
+				return;
+			const auto found = std::find_if(now->second.begin(), now->second.end(), [cookie](const auto &spy) { return spy.cookie == cookie; });
+			if (found != now->second.end())
+				tell(found->object);
+		}
+	};
+	const auto thread_count = [com, &context] {
+		const auto found = com->threads.find(context.environment.teb());
+		return found == com->threads.end() ? 0U : uint32_t(found->second.count);
+	};
+	const auto join = [com, &context, ole_flags](ApiCall &call, bool multithreaded, bool no_dde) {
 		const uint64_t thread = context.environment.teb();
 		auto &state = com->threads[thread];
-		if (state.count && state.multithreaded != multithreaded) {
-			call.ret(0x80010106U);
-			return;
-		}
+		if (state.count && state.multithreaded != multithreaded)
+			return 0x80010106U;
 		if (!state.count++) {
 			state.multithreaded = multithreaded;
 			if (multithreaded)
@@ -655,20 +790,33 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			else if (!com->main_sta)
 				com->main_sta = thread;
 			ole_flags(call, multithreaded ? 0x140U : no_dde ? 0xc0U : 0x80U);
-			call.ret(s_ok);
-			return;
+			return s_ok;
 		}
-		call.ret(s_false);
+		return s_false;
 	};
-	registry.add("CoInitialize", 1, [initialize](ApiCall &call) { initialize(call, false, false); });
-	registry.add("CoInitializeEx", 2, [initialize](ApiCall &call) { initialize(call, !(call.u32(1) & 2), call.u32(1) & 4); });
-	registry.add("OleInitialize", 1, [initialize](ApiCall &call) { initialize(call, false, false); });
+	// IInitializeSpy: PreInitialize(COINIT, references) is method 3, PostInitialize(HRESULT, COINIT, references) method 4. Each
+	// PostInitialize gets the HRESULT the one before it returned, and the last one's is CoInitializeEx's.
+	const auto initialize = [join, each_spy, object_method, thread_count](ApiCall &call, uint32_t co_init) {
+		const uint32_t before = thread_count();
+		each_spy([&](uint64_t spy) { object_method(call, spy, 3, {co_init, before}); });
+		uint32_t result = join(call, !(co_init & 2), co_init & 4);
+		const uint32_t after = thread_count();
+		each_spy([&](uint64_t spy) { result = object_method(call, spy, 4, {result, co_init, after}); });
+		call.ret(result);
+	};
+	registry.add("CoInitialize", 1, [initialize](ApiCall &call) { initialize(call, 2); });
+	registry.add("CoInitializeEx", 2, [initialize](ApiCall &call) { initialize(call, call.u32(1)); });
+	registry.add("OleInitialize", 1, [initialize](ApiCall &call) { initialize(call, 2); });
 	// CoInitializeSecurity sets the process's COM security once: the first call succeeds and any later one is too late, as on Windows.
 	registry.add("CoInitializeSecurity", 9, [](ApiCall &call) {
 		static std::atomic<bool> done{false};
 		call.ret(done.exchange(true) ? 0x80010119U : s_ok);
 	});
-	const auto uninitialize = [com, &context, ole_flags](ApiCall &call) {
+	// Interfaces are marshalled by the objects themselves within one process, so a proxy class for an interface and the
+	// authentication of a proxy have nothing to change.
+	registry.add("CoRegisterPSClsid", 2, [](ApiCall &call) { call.ret(call[0] && call[1] ? s_ok : 0x80070057U); });
+	registry.add("CoSetProxyBlanket", 8, [](ApiCall &call) { call.ret(call[0] ? s_ok : 0x80070057U); });
+	const auto leave = [com, &context, ole_flags](ApiCall &call) {
 		const uint64_t thread = context.environment.teb();
 		auto found = com->threads.find(thread);
 		if (found == com->threads.end() || !found->second.count)
@@ -682,6 +830,62 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			ole_flags(call, 0);
 		}
 	};
+	// IInitializeSpy: PreUninitialize(references) is method 5, PostUninitialize(references) method 6.
+	const auto uninitialize = [leave, each_spy, object_method, thread_count](ApiCall &call) {
+		const uint32_t before = thread_count();
+		each_spy([&](uint64_t spy) { object_method(call, spy, 5, {before}); });
+		leave(call);
+		const uint32_t after = thread_count();
+		each_spy([&](uint64_t spy) { object_method(call, spy, 6, {after}); });
+	};
+	// A spy is registered through its IInitializeSpy interface, {00000034-0000-0000-C000-000000000046}: QueryInterface (method 0)
+	// gives the registration its own reference, which revoking it releases (method 2). Cookies name one registration on one thread.
+	registry.add("CoRegisterInitializeSpy", 2, [com, &context, object_method](ApiCall &call) {
+		if (!call[0] || !call[1]) {
+			call.ret(e_invalidarg);
+			return;
+		}
+		const uint64_t scratch = context.allocator.allocate(16 + 8, true);
+		if (!scratch) {
+			call.ret(0x8007000eU);
+			return;
+		}
+		static constexpr uint8_t iid_initialize_spy[] = {0x34, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46};
+		call.write(scratch, iid_initialize_spy);
+		const uint32_t result = object_method(call, call[0], 0, {scratch, scratch + 16});
+		const uint64_t spy = call.load_pointer(scratch + 16);
+		context.allocator.release(scratch);
+		if ((result & 0x80000000U) || !spy) {
+			call.ret((result & 0x80000000U) ? result : 0x80004002U);
+			return;
+		}
+		const uint64_t cookie = ++com->last_cookie;
+		com->spies[context.environment.teb()].push_back({cookie, spy});
+		call.store<uint64_t>(call[1], cookie);
+		call.ret(s_ok);
+	});
+	// The cookie is a ULARGE_INTEGER passed by value: one register from a 64-bit caller, two stack words from a 32-bit one. A cookie
+	// another thread registered, or one already revoked, is not this thread's.
+	registry.add("CoRevokeInitializeSpy", 2, [com, &context, object_method](ApiCall &call) {
+		const uint64_t cookie = call.pointer_width() == 4 ? call.u32(0) | uint64_t(call.u32(1)) << 32 : call[0];
+		const auto registered = com->spies.find(context.environment.teb());
+		if (registered == com->spies.end()) {
+			call.ret(e_invalidarg);
+			return;
+		}
+		auto &spies = registered->second;
+		const auto found = std::find_if(spies.begin(), spies.end(), [cookie](const auto &spy) { return spy.cookie == cookie; });
+		if (found == spies.end()) {
+			call.ret(e_invalidarg);
+			return;
+		}
+		const uint64_t spy = found->object;
+		spies.erase(found);
+		if (spies.empty())
+			com->spies.erase(registered);
+		object_method(call, spy, 2, {});
+		call.ret(s_ok);
+	});
 	// Message filters belong to single-threaded apartments; there is no filter before the first one, so the previous one is null.
 	registry.add("CoRegisterMessageFilter", 2, [com, &context](ApiCall &call) {
 		const auto found = com->threads.find(context.environment.teb());
@@ -1225,18 +1429,15 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 								std::fprintf(stderr, " %llx", static_cast<unsigned long long>(word));
 							}
 							std::fprintf(stderr, "\n");
-						} catch (const std::exception &) {
+						} catch (const ApiFault &) {
 						}
 					}
-				} catch (const std::exception &) {
+				} catch (const ApiFault &) {
 				}
 			}
 		}
 		call.ret(1);
 	});
-	registry.add("RoParseTypeName", 3, [](ApiCall &call) { call.ret(0x80004001U); });
-	registry.add("RoResolveNamespace", 7, [](ApiCall &call) { call.ret(0x80004001U); });
-	registry.add("RoGetParameterizedTypeInstanceIID", 5, [](ApiCall &call) { call.ret(0x80004001U); });
 	// No restricted error information is kept: a query reports that the thread has none (S_FALSE with a null interface), and storing
 	// one is accepted, as a runtime that inspects a failed call expects.
 	registry.add("GetRestrictedErrorInfo", 1, [](ApiCall &call) {
@@ -1257,9 +1458,162 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			call.store_pointer(call[10], 0);
 		call.ret(0x80004001U);
 	});
-	// No Windows Runtime class exists here: initialization joins the thread to a COM apartment like CoInitializeEx (RO_INIT_MULTITHREADED
-	// is 1), and every activation reports that the class is not registered.
-	registry.add("RoInitialize", 1, [initialize](ApiCall &call) { initialize(call, call.u32(0) == 1, true); });
+	// A type name split into the names it is made of, in the order they are written: "A`2<B, C`1<D>>" is A`2, B, C`1 and D. A generic name
+	// takes as many arguments as its arity says, and the name must be whole, or the result is RO_E_METADATA_INVALID_TYPE_FORMAT.
+	registry.add("RoParseTypeName", 3, [&context](ApiCall &call) {
+		if (!call[0] || !call[1] || !call[2]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		const auto length = call.load<uint32_t>(call[0] + 4);
+		const auto bytes = call.read(call.load_pointer(call[0] + 16), size_t(length) * 2);
+		const std::u16string name(reinterpret_cast<const char16_t *>(bytes.data()), length);
+		std::vector<std::u16string> parts;
+		size_t at = 0;
+		const auto skip = [&] {
+			while (at < name.size() && name[at] == u' ')
+				++at;
+		};
+		// One name and its arguments; false when the text is not a type name.
+		std::function<bool()> parse = [&]() -> bool {
+			skip();
+			const size_t start = at;
+			while (at < name.size() && name[at] != u'<' && name[at] != u'>' && name[at] != u',' && name[at] != u' ')
+				++at;
+			if (at == start)
+				return false;
+			const auto part = name.substr(start, at - start);
+			parts.push_back(part);
+			const auto tick = part.find(u'`');
+			unsigned arity = 0;
+			if (tick != std::u16string::npos) {
+				for (size_t index = tick + 1; index < part.size(); ++index) {
+					if (part[index] < u'0' || part[index] > u'9')
+						return false;
+					arity = arity * 10 + unsigned(part[index] - u'0');
+				}
+				if (!arity)
+					return false;
+			}
+			skip();
+			if (!arity)
+				return at == name.size() || name[at] != u'<';
+			if (at == name.size() || name[at] != u'<')
+				return false;
+			++at;
+			for (unsigned index = 0; index < arity; ++index) {
+				if (index) {
+					skip();
+					if (at == name.size() || name[at] != u',')
+						return false;
+					++at;
+				}
+				if (!parse())
+					return false;
+			}
+			skip();
+			if (at == name.size() || name[at] != u'>')
+				return false;
+			++at;
+			skip();
+			return true;
+		};
+		if (!parse() || at != name.size()) {
+			call.ret(0x80000010U); // RO_E_METADATA_INVALID_TYPE_FORMAT
+			return;
+		}
+		call.ret(hand_out_strings(call, context, parts, call[1], call[2]) ? 0 : 0x8007000eU);
+	});
+	// No API contract is installed: Raven describes Windows Runtime types one by one, not whole contracts.
+	registry.add("RoIsApiContractPresent", 4, [](ApiCall &call) {
+		if (call[3])
+			call.store<uint8_t>(call[3], 0);
+		call.ret(call[0] && call[3] ? 0 : 0x80070057U);
+	});
+	registry.add("RoIsApiContractMajorVersionPresent", 3, [](ApiCall &call) {
+		if (call[2])
+			call.store<uint8_t>(call[2], 0);
+		call.ret(call[0] && call[2] ? 0 : 0x80070057U);
+	});
+	// Finding a type's metadata through the metadata dispenser is not served; the .NET runtime resolves namespaces instead.
+	registry.add("RoGetMetaDataFile", 5, [](ApiCall &call) { call.ret(0x8000000FU); });
+	// The metadata files that may describe a namespace: those of the Windows metadata folder (System32\WinMetadata unless the caller names
+	// another) and of the package folders whose names are the namespace or one that encloses it, the most specific first, and the next
+	// parts of the namespaces their names extend it by. The runtime's own Windows.winmd describes every Windows namespace it knows.
+	registry.add("RoResolveNamespace", 8, [&context](ApiCall &call) {
+		const size_t width = call.pointer_width();
+		const auto text_of = [&](uint64_t handle) {
+			if (!handle)
+				return std::u16string();
+			const auto length = call.load<uint32_t>(handle + 4);
+			const auto bytes = call.read(call.load_pointer(handle + 16), size_t(length) * 2);
+			return std::u16string(reinterpret_cast<const char16_t *>(bytes.data()), length);
+		};
+		const auto fold = [](std::u16string text) {
+			for (auto &character : text)
+				if (character >= u'A' && character <= u'Z')
+					character = char16_t(character + 32);
+			return text;
+		};
+		const auto name = text_of(call[0]);
+		if (name.empty() || (!call[4] && !call[6])) {
+			call.ret(0x80070057U);
+			return;
+		}
+		std::vector<std::u16string> folders{call[1] ? text_of(call[1]) : u"C:\\Windows\\System32\\WinMetadata"};
+		for (uint32_t index = 0; index < call.u32(2) && call[3]; ++index)
+			folders.push_back(text_of(call.load_pointer(call[3] + index * width)));
+		std::vector<std::pair<size_t, std::u16string>> files;
+		std::vector<std::u16string> below;
+		const auto key = fold(name);
+		for (const auto &folder : folders) {
+			const auto resolved = context.paths.resolve(folder);
+			std::error_code error;
+			if (!resolved || !resolved->exists || !std::filesystem::is_directory(resolved->host, error))
+				continue;
+			for (const auto &entry : std::filesystem::directory_iterator(resolved->host, error)) {
+				const auto file = from_utf8(entry.path().filename().string());
+				if (file.size() <= 6 || fold(file.substr(file.size() - 6)) != u".winmd")
+					continue;
+				const auto stem = fold(file.substr(0, file.size() - 6));
+				if (key == stem || (key.size() > stem.size() && key.starts_with(stem) && key[stem.size()] == u'.'))
+					files.emplace_back(stem.size(), folder + u"\\" + file);
+				else if (stem.size() > key.size() && stem.starts_with(key) && stem[key.size()] == u'.') {
+					const auto rest = file.substr(key.size() + 1, file.size() - 6 - key.size() - 1);
+					const auto part = rest.substr(0, rest.find(u'.'));
+					if (std::none_of(below.begin(), below.end(), [&](const auto &known) { return fold(known) == fold(part); }))
+						below.push_back(part);
+				}
+			}
+		}
+		if (files.empty() && below.empty()) {
+			// The traced failure says which namespace was asked for.
+			if (std::getenv("RAVEN_TRACE_FAIL"))
+				std::fprintf(stderr, "raven: no Windows Runtime metadata for %s\n", to_utf8(name).c_str());
+			call.ret(0x8000000FU); // RO_E_METADATA_NAME_NOT_FOUND
+			return;
+		}
+		std::stable_sort(files.begin(), files.end(), [](const auto &left, const auto &right) { return left.first > right.first; });
+		const auto hand_out = [&](const std::vector<std::u16string> &texts, uint64_t count, uint64_t out) {
+			return hand_out_strings(call, context, texts, count, out);
+		};
+		std::vector<std::u16string> paths;
+		for (const auto &[_, path] : files)
+			paths.push_back(path);
+		if (call[4] && call[5] ? !hand_out(paths, call[4], call[5]) : false) {
+			call.ret(0x8007000eU);
+			return;
+		}
+		if (call[6] && call[7] ? !hand_out(below, call[6], call[7]) : false) {
+			call.ret(0x8007000eU);
+			return;
+		}
+		call.ret(0);
+	});
+	registry.add("RoGetParameterizedTypeInstanceIID", 5, [](ApiCall &call) { call.ret(0x80004001U); });
+	// No Windows Runtime class exists here: initialization joins the thread to a COM apartment like CoInitializeEx without OLE 1.0 DDE
+	// (RO_INIT_MULTITHREADED is 1), and every activation reports that the class is not registered.
+	registry.add("RoInitialize", 1, [initialize](ApiCall &call) { initialize(call, call.u32(0) == 1 ? 4 : 6); });
 	registry.add("RoUninitialize", 0, uninitialize);
 	registry.add("RoGetActivationFactory", 3, [](ApiCall &call) {
 		// The traced failure says which class was asked for.
@@ -1417,6 +1771,24 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			call.store<uint32_t>(call[0], 0);
 		call.ret(1);
 	});
+	// Node 0 for every processor the machine has in group 0; any other processor has no node.
+	const auto processors = [] { return uint32_t(std::max(1L, std::min(64L, ::sysconf(_SC_NPROCESSORS_ONLN)))); };
+	registry.add("GetNumaProcessorNode", 2, [processors](ApiCall &call) {
+		const bool known = (call[0] & 0xff) < processors();
+		call.store<uint8_t>(call[1], known ? 0 : 0xff);
+		if (known)
+			call.ret(1);
+		else
+			call.fail(87);
+	});
+	registry.add("GetNumaProcessorNodeEx", 2, [processors](ApiCall &call) {
+		const bool known = call[0] && call.load<uint16_t>(call[0]) == 0 && call.load<uint8_t>(call[0] + 2) < processors();
+		call.store<uint16_t>(call[1], known ? 0 : 0xffff);
+		if (known)
+			call.ret(1);
+		else
+			call.fail(87);
+	});
 	// Private namespaces: a boundary describes who shares one, and the objects a program names inside it behave as named objects do.
 	struct PrivateNamespace : KernelObject {};
 	registry.add("CreateBoundaryDescriptorW", 2, [&context](ApiCall &call) { call.ret(context.allocator.allocate(64, true)); });
@@ -1471,6 +1843,24 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		}
 		// WINHTTP_CURRENT_USER_IE_PROXY_CONFIG: auto-detect flag and three string pointers, all empty.
 		call.write(call[0], std::vector<uint8_t>(call.pointer_width() == 4 ? 16 : 32));
+		call.ret(1);
+	});
+	// The default WinHTTP proxy is none, as on a machine where netsh never set one; setting one is accepted and not used.
+	registry.add("WinHttpGetDefaultProxyConfiguration", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint8_t> info(call.pointer_width() == 4 ? 12 : 24);
+		info[0] = 1;
+		call.write(call[0], info);
+		call.ret(1);
+	});
+	registry.add("WinHttpSetDefaultProxyConfiguration", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
 		call.ret(1);
 	});
 	registry.add("WinHttpDetectAutoProxyConfigUrl", 2, [](ApiCall &call) { call.fail(12180); });
@@ -1604,6 +1994,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("CryptReleaseContext", 2, [crypt](ApiCall &call) {
 		crypt->providers.erase(call[0]);
+		std::erase_if(crypt->user_keys, [&](const auto &entry) { return entry.first.first == call[0]; });
 		call.ret(1);
 	});
 	// advapi32's MD5 keeps its state in the caller's MD5_CTX: the bit count (two words), the four state words, the pending bytes and
@@ -1659,6 +2050,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		}
 		const auto handle = crypt->next++;
 		crypt->hashes[handle] = std::move(digest);
+		crypt->hash_provider[handle] = call[0];
 		call.store_pointer(call[4], handle);
 		call.ret(1);
 	});
@@ -1688,7 +2080,8 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(0x80090008U);
 			return;
 		}
-		auto value = found->second->clone()->finish();
+		const auto fixed = crypt->hash_values.find(call[0]);
+		auto value = fixed != crypt->hash_values.end() ? fixed->second : found->second->clone()->finish();
 		const uint32_t capacity = call.load<uint32_t>(call[3]);
 		call.store<uint32_t>(call[3], uint32_t(value.size()));
 		if (!call[2]) {
@@ -1703,7 +2096,8 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	// PUBLICKEYBLOB of an RSA key: BLOBHEADER (type 6, version, algorithm), RSAPUBKEY ("RSA1", bit length, exponent), then the modulus,
-	// least significant byte first. Private and session keys are not imported.
+	// least significant byte first. A PRIVATEKEYBLOB (type 7, "RSA2") goes on with the two primes, their exponents and coefficient,
+	// and the private exponent; the provider keeps that pair as its signature or exchange key, after the algorithm.
 	registry.add("CryptImportKey", 6, [crypt](ApiCall &call) {
 		if (!crypt->providers.contains(call[0])) {
 			call.fail(6);
@@ -1735,16 +2129,30 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			std::memcpy(&bits, blob.data() + 12, 4);
 			std::memcpy(&exponent, blob.data() + 16, 4);
 		}
-		if (blob.size() < 20 || blob[0] != 6 || magic != 0x31415352U || !bits || bits % 8 || blob.size() < 20 + bits / 8 || !exponent) {
+		const bool pair = blob.size() >= 20 && blob[0] == 7 && magic == 0x32415352U;
+		const size_t length = bits / 8, half = bits / 16;
+		if (blob.size() < 20 || !(pair || (blob[0] == 6 && magic == 0x31415352U)) || !bits || bits % 16 || blob.size() < 20 + length + (pair ? 5 * half + length : 0) ||
+			!exponent) {
 			call.fail(0x8009000aU);
 			return;
 		}
 		const auto handle = crypt->next++;
 		CryptState::Key key{};
-		key.modulus = words_from_bytes(std::span(blob).subspan(20, bits / 8));
+		key.modulus = words_from_bytes(std::span(blob).subspan(20, length));
 		key.exponent = exponent;
-		key.length = bits / 8;
-		key.blob.assign(blob.begin(), blob.begin() + 20 + bits / 8);
+		key.length = length;
+		key.blob.assign(blob.begin(), blob.begin() + 20 + length);
+		std::memcpy(&key.pair_algorithm, blob.data() + 4, 4);
+		if (key.pair_algorithm != 0x2400)
+			key.pair_algorithm = 0xa400;
+		if (pair) {
+			key.blob[0] = 6;
+			key.blob[11] = '1';
+			key.secret_exponent = words_from_bytes(std::span(blob).subspan(20 + length + 5 * half, length));
+			key.private_blob.assign(blob.begin(), blob.begin() + 20 + length + 5 * half + length);
+		}
+		if (pair)
+			crypt->user_keys[{call[0], key.pair_algorithm == 0x2400 ? 2U : 1U}] = key;
 		crypt->keys[handle] = std::move(key);
 		call.store_pointer(call[5], handle);
 		call.ret(1);
@@ -1802,6 +2210,8 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 			std::memcpy(blob.data() + 8, &sealing, 4);
 			for (size_t at = 0; at < length; ++at)
 				blob[12 + at] = uint8_t(sealed[at / 4] >> (at % 4 * 8));
+		} else if (!key->second.algorithm && call.u32(2) == 7 && !call[1] && !key->second.private_blob.empty()) {
+			blob = key->second.private_blob;
 		} else if (key->second.algorithm || call.u32(2) != 6 || call[1]) {
 			call.fail(0x8009000aU);
 			return;
@@ -1986,7 +2396,7 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		case 4: dword(state.mode); break;
 		case 5: dword(state.mode_bits); break;
 		case 6: dword(0x3f); break;
-		case 7: dword(state.algorithm ? state.algorithm : 0xa400); break;
+		case 7: dword(state.algorithm ? state.algorithm : state.pair_algorithm); break;
 		case 8: dword(uint32_t(block * 8)); break;
 		case 9: dword(uint32_t(state.algorithm ? state.secret.size() * 8 : state.length * 8)); break;
 		default:
@@ -2033,7 +2443,8 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		std::vector<uint8_t> encoded(key->second.length);
 		for (size_t at = 0; at < encoded.size(); ++at)
 			encoded[encoded.size() - 1 - at] = uint8_t(message[at / 4] >> (at % 4 * 8));
-		const auto digest = hash->second->clone()->finish();
+		const auto fixed = crypt->hash_values.find(call[0]);
+		const auto digest = fixed != crypt->hash_values.end() ? fixed->second : hash->second->clone()->finish();
 		auto expected = (call.u32(5) & 1) ? std::vector<uint8_t>() : digest_info(digest.size());
 		expected.insert(expected.end(), digest.begin(), digest.end());
 		bool valid = encoded.size() >= expected.size() + 11 && encoded[0] == 0 && encoded[1] == 1;
@@ -2049,6 +2460,154 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("CryptVerifySignatureW", 6, verify_signature);
 	registry.add("CryptVerifySignatureA", 6, verify_signature);
+	// CryptGetUserKey(provider, key spec, key): the key pair the provider holds for that use.
+	registry.add("CryptGetUserKey", 3, [crypt](ApiCall &call) {
+		const auto found = crypt->user_keys.find({call[0], call.u32(1)});
+		if (!crypt->providers.contains(call[0]) || found == crypt->user_keys.end()) {
+			call.fail(crypt->providers.contains(call[0]) ? 0x8009000dU : 6);
+			return;
+		}
+		// The handle is a copy of the pair the program may destroy on its own.
+		const auto handle = crypt->next++;
+		crypt->keys[handle] = found->second;
+		call.store_pointer(call[2], handle);
+		call.ret(1);
+	});
+	// CryptSignHash(hash, key spec, description, flags, signature, length): the PKCS #1 v1.5 signature with the private key of the
+	// provider the hash came from, least significant byte first; a null buffer asks for the length.
+	const auto sign_hash = [crypt](ApiCall &call) {
+		const auto hash = crypt->hashes.find(call[0]);
+		const auto provider = crypt->hash_provider.find(call[0]);
+		if (hash == crypt->hashes.end() || provider == crypt->hash_provider.end()) {
+			call.fail(6);
+			return;
+		}
+		const auto key = crypt->user_keys.find({provider->second, call.u32(1)});
+		if (key == crypt->user_keys.end() || key->second.secret_exponent.empty()) {
+			call.fail(0x8009000dU);
+			return;
+		}
+		const size_t length = key->second.length;
+		const uint32_t capacity = call.load<uint32_t>(call[5]);
+		call.store<uint32_t>(call[5], uint32_t(length));
+		if (!call[4]) {
+			call.ret(1);
+			return;
+		}
+		if (capacity < length) {
+			call.fail(234);
+			return;
+		}
+		const auto fixed = crypt->hash_values.find(call[0]);
+		const auto digest = fixed != crypt->hash_values.end() ? fixed->second : hash->second->clone()->finish();
+		auto message = (call.u32(3) & 1) ? std::vector<uint8_t>() : digest_info(digest.size());
+		message.insert(message.end(), digest.begin(), digest.end());
+		if (message.size() + 11 > length) {
+			call.fail(0x80090004U);
+			return;
+		}
+		// 00 01, ff bytes, 00, the message, most significant byte first; reversed into the order the arithmetic reads.
+		std::vector<uint8_t> encoded(length, 0xff);
+		encoded[0] = 0;
+		encoded[1] = 1;
+		encoded[length - message.size() - 1] = 0;
+		std::copy(message.begin(), message.end(), encoded.end() - std::ptrdiff_t(message.size()));
+		std::reverse(encoded.begin(), encoded.end());
+		const auto signature = power_mod(words_from_bytes(encoded), key->second.secret_exponent, key->second.modulus);
+		std::vector<uint8_t> bytes(length);
+		for (size_t at = 0; at < length; ++at)
+			bytes[at] = uint8_t(signature[at / 4] >> (at % 4 * 8));
+		call.write(call[4], bytes);
+		call.ret(1);
+	};
+	registry.add("CryptSignHashW", 6, sign_hash);
+	registry.add("CryptSignHashA", 6, sign_hash);
+	// The object identifiers of the algorithms above, as CryptFindOIDInfo describes them: CRYPT_OID_INFO with the OID, its name, its
+	// group (1 hashes, 3 public keys, 4 signatures), its ALG_ID, extra information (a signature's public key algorithm) and the CNG
+	// names. The table is written once into the program's memory and stays there, as the system's does.
+	struct OidEntry {
+		const char *oid;
+		std::u16string_view name;
+		uint32_t group, algorithm, extra;
+		std::u16string_view cng, cng_extra;
+	};
+	static constexpr OidEntry oid_entries[] = {
+		{"1.2.840.113549.2.5", u"md5", 1, 0x8003, 0, u"MD5", u""},
+		{"1.3.14.3.2.26", u"sha1", 1, 0x8004, 0, u"SHA1", u""},
+		{"2.16.840.1.101.3.4.2.1", u"sha256", 1, 0x800c, 0, u"SHA256", u""},
+		{"2.16.840.1.101.3.4.2.2", u"sha384", 1, 0x800d, 0, u"SHA384", u""},
+		{"2.16.840.1.101.3.4.2.3", u"sha512", 1, 0x800e, 0, u"SHA512", u""},
+		{"1.2.840.113549.1.1.1", u"RSA", 3, 0xa400, 0, u"RSA", u""},
+		{"1.2.840.113549.1.1.4", u"md5RSA", 4, 0x8003, 0x2400, u"MD5", u"RSA"},
+		{"1.2.840.113549.1.1.5", u"sha1RSA", 4, 0x8004, 0x2400, u"SHA1", u"RSA"},
+		{"1.2.840.113549.1.1.11", u"sha256RSA", 4, 0x800c, 0x2400, u"SHA256", u"RSA"},
+		{"1.2.840.113549.1.1.12", u"sha384RSA", 4, 0x800d, 0x2400, u"SHA384", u"RSA"},
+		{"1.2.840.113549.1.1.13", u"sha512RSA", 4, 0x800e, 0x2400, u"SHA512", u"RSA"},
+	};
+	auto oid_table = std::make_shared<uint64_t>(0);
+	registry.add("CryptFindOIDInfo", 3, [oid_table, &context](ApiCall &call) {
+		const size_t width = call.pointer_width();
+		// cbSize, pszOID, pwszName, dwGroupId, Algid, ExtraInfo (cbData, pbData), pwszCNGAlgid, pwszCNGExtraAlgid.
+		const size_t oid_at = width, name_at = 2 * width, group_at = 3 * width, algorithm_at = group_at + 4, extra_size_at = group_at + 8,
+			extra_at = width == 8 ? 40 : 24, cng_at = extra_at + width, cng_extra_at = cng_at + width, entry_size = cng_extra_at + width;
+		constexpr size_t text_room = 64;
+		const size_t count = std::size(oid_entries), strings_at = count * entry_size;
+		if (!*oid_table) {
+			const uint64_t base = context.allocator.allocate(strings_at + count * (text_room * 7), true);
+			if (!base) {
+				call.ret(0);
+				return;
+			}
+			for (size_t index = 0; index < count; ++index) {
+				const auto &item = oid_entries[index];
+				const uint64_t entry = base + index * entry_size, text = base + strings_at + index * text_room * 7;
+				call.store<uint32_t>(entry, uint32_t(entry_size));
+				call.put_narrow(text, item.oid, text_room);
+				call.store_pointer(entry + oid_at, text);
+				call.put_wide(text + text_room, item.name, text_room);
+				call.store_pointer(entry + name_at, text + text_room);
+				call.store<uint32_t>(entry + group_at, item.group);
+				call.store<uint32_t>(entry + algorithm_at, item.algorithm);
+				if (item.extra) {
+					call.store<uint32_t>(text + text_room * 3, item.extra);
+					call.store<uint32_t>(entry + extra_size_at, 4);
+					call.store_pointer(entry + extra_at, text + text_room * 3);
+				}
+				call.put_wide(text + text_room * 4, item.cng, text_room);
+				call.store_pointer(entry + cng_at, text + text_room * 4);
+				call.put_wide(text + text_room * 5 + text_room / 2, item.cng_extra, text_room);
+				call.store_pointer(entry + cng_extra_at, text + text_room * 5 + text_room / 2);
+			}
+			*oid_table = base;
+		}
+		const uint32_t key_type = call.u32(0), group = call.u32(2) & 0xffff;
+		const auto fold = [](std::u16string text) {
+			for (auto &character : text)
+				if (character >= u'a' && character <= u'z')
+					character = char16_t(character - 32);
+			return text;
+		};
+		for (size_t index = 0; index < count; ++index) {
+			const auto &item = oid_entries[index];
+			if (group && group != item.group)
+				continue;
+			bool found = false;
+			// CRYPT_OID_INFO_OID_KEY, _NAME_KEY, _ALGID_KEY and _SIGN_KEY (the hash and the public key ALG_IDs).
+			if (key_type == 1 && call[1])
+				found = call.narrow(call[1], 64) == item.oid;
+			else if (key_type == 2 && call[1])
+				found = fold(call.wide(call[1], 64)) == fold(std::u16string(item.name));
+			else if (key_type == 3 && call[1])
+				found = call.load<uint32_t>(call[1]) == item.algorithm && item.group != 4;
+			else if (key_type == 4 && call[1])
+				found = item.group == 4 && call.load<uint32_t>(call[1]) == item.algorithm && call.load<uint32_t>(call[1] + 4) == item.extra;
+			if (found) {
+				call.ret(*oid_table + index * entry_size);
+				return;
+			}
+		}
+		call.ret(0);
+	});
 	// The providers CryptAcquireContext opens for each type when it is given no name: the base RSA provider and the AES one.
 	registry.add("CryptGetDefaultProviderW", 5, [](ApiCall &call) {
 		const uint32_t type = call.u32(0);
@@ -2155,7 +2714,27 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	registry.add("CryptDestroyHash", 1, [crypt](ApiCall &call) {
+		crypt->hash_values.erase(call[0]);
+		crypt->hash_provider.erase(call[0]);
 		call.ret(crypt->hashes.erase(call[0]) ? 1 : 0);
+	});
+	// HP_HASHVAL gives a hash the value a program computed itself, as long as the algorithm's; other parameters are not supported.
+	registry.add("CryptSetHashParam", 4, [crypt](ApiCall &call) {
+		const auto found = crypt->hashes.find(call[0]);
+		if (found == crypt->hashes.end()) {
+			call.fail(6);
+			return;
+		}
+		if (call.u32(1) != 2) {
+			call.fail(0x80090008U);
+			return;
+		}
+		if (!call[2]) {
+			call.fail(87);
+			return;
+		}
+		crypt->hash_values[call[0]] = call.read(call[2], found->second->size());
+		call.ret(1);
 	});
 }
 

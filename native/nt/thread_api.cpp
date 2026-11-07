@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <map>
+#include <mutex>
 
 namespace raven {
 
@@ -323,7 +324,7 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			return std::nullopt;
 		return std::chrono::steady_clock::now() + std::chrono::nanoseconds(from_now * 100);
 	};
-	const auto multiple = [wait, handle_at](ApiCall &call, bool alertable) {
+	const auto multiple = [wait, handle_at, &objects, &threads](ApiCall &call, bool alertable) {
 		const uint32_t count = call.u32(0);
 		if (count > 64 || !call[1]) {
 			call.fail(87, wait_failed);
@@ -332,6 +333,17 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		std::vector<uint64_t> handles(count);
 		for (uint32_t index = 0; index < count; ++index)
 			handles[index] = handle_at(call, call[1], index);
+		// RAVEN_TRACE_WAITS also names what a wait for several objects is given: each handle, its type and whether it is signaled.
+		static const bool traced = std::getenv("RAVEN_TRACE_WAITS") != nullptr;
+		if (traced && call.u32(3)) {
+			std::fprintf(stderr, "raven: thread %u waits for %s of", threads.current_id(), call.u32(2) ? "all" : "any");
+			for (const auto handle : handles) {
+				const auto object = objects.object(handle);
+				std::fprintf(stderr, " %llx %s %d", (unsigned long long)handle, object ? to_utf8(std::u16string(object->type_name())).c_str() : "?",
+					objects.signaled(handle, threads.current_id()));
+			}
+			std::fprintf(stderr, "\n");
+		}
 		call.ret(wait(call, handles, call.u32(2), call.u32(3), alertable));
 	};
 	registry.add("WaitForMultipleObjects", 4, [multiple](ApiCall &call) { multiple(call, false); });
@@ -575,6 +587,51 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		objects.close(inner.result);
 		call.ret(1);
 	});
+	// BindIoCompletionCallback: every bound file posts to one completion port of the process, with its callback as the key, and the guest
+	// RTL's worker threads hand each finished operation to its callback. The threads start with the first binding.
+	struct IoBinding {
+		uint64_t port = 0;
+		std::mutex lock;
+	};
+	auto io_binding = std::make_shared<IoBinding>();
+	registry.add("BindIoCompletionCallback", 3, [&registry, &context, io_binding](ApiCall &call) {
+		const auto associate = registry.find("CreateIoCompletionPort");
+		const auto create = registry.find("CreateThread");
+		if (!call[1] || !associate || !create) {
+			call.fail(87);
+			return;
+		}
+		const std::lock_guard guard(io_binding->lock);
+		if (!io_binding->port) {
+			uint64_t worker, dequeue;
+			try {
+				worker = context.modules.resolve({"raven-rtl.dll", "RavenIoCompletionWorker", 0, false, 0});
+				dequeue = context.modules.resolve({"kernel32.dll", "GetQueuedCompletionStatus", 0, false, 0});
+			} catch (const std::exception &) {
+				call.fail(50);
+				return;
+			}
+			ApiCall made(call.process, call.environment, {UINT64_MAX, 0, 0, 0});
+			associate->second(made);
+			if (!made.result) {
+				call.ret(0);
+				return;
+			}
+			const auto binding = context.allocator.allocate(16);
+			call.store_pointer(binding, dequeue);
+			call.store_pointer(binding + 8, made.result);
+			for (int index = 0; index < 2; ++index) {
+				ApiCall thread(call.process, call.environment, {0, 0, worker, binding, 0, 0});
+				create->second(thread);
+				if (thread.result)
+					context.objects.close(thread.result);
+			}
+			io_binding->port = made.result;
+		}
+		ApiCall bound(call.process, call.environment, {call[0], io_binding->port, call[1], 0});
+		associate->second(bound);
+		call.ret(bound.result ? 1 : 0);
+	});
 	registry.add("GetExitCodeThread", 2, [thread_from, &objects](ApiCall &call) {
 		if (const auto remote = objects.object_as<RemoteThreadObject>(call[0])) {
 			call.store<uint32_t>(call[1], remote->code().value_or(259));
@@ -789,6 +846,17 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		token->set_type(2);
 		token->set_impersonation_level(call.u32(0));
 		threads.current().impersonation = std::move(token);
+		call.ret(1);
+	});
+	// The anonymous logon has no identity of its own here: tokens carry the one user of the prefix, so the thread impersonates a copy of
+	// the process token at the impersonation level, which RevertToSelf drops again.
+	registry.add("ImpersonateAnonymousToken", 1, [&context, thread_from](ApiCall &call) {
+		const auto thread = thread_from(call[0]);
+		if (!thread) { call.fail(6); return; }
+		auto token = std::make_shared<AccessToken>(*context.process_token);
+		token->set_type(2);
+		token->set_impersonation_level(2);
+		thread->impersonation = std::move(token);
 		call.ret(1);
 	});
 	registry.add("ImpersonateLoggedOnUser", 1, [&objects, &threads](ApiCall &call) {

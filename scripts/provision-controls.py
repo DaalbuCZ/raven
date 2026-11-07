@@ -71,8 +71,8 @@ def main():
     objects = output / "objects"
     shutil.rmtree(objects, ignore_errors=True)
     objects.mkdir()
-    own_comctl32 = repo / "native/upstream/raven-comctl32"
-    own_user32 = repo / "native/upstream/raven-user32"
+    own_comctl32 = repo / "native/guest/raven-comctl32"
+    own_user32 = repo / "native/guest/raven-user32"
     sources = sorted(own_comctl32.glob("*.c"))
 
     def compile(path):
@@ -131,9 +131,10 @@ def main():
         print(output / "raven-user32.dll")
         return
     # The shell component is Raven code on the public headers: the file dialogs and the class registries of COM and the Windows Runtime.
-    shell_support = repo / "native/upstream/raven-shell"
+    shell_support = repo / "native/guest/raven-shell"
     shell_objects = [objects / "shell.o", objects / "shell_link.o", objects / "shell_com.o", objects / "shell_crt.o", objects / "shell_stream.o", objects / "shell_dialog.o",
-                     objects / "shell_netaddress.o", objects / "shell_winrt.o", objects / "shell_knownfolder.o", objects / "shell_rot.o", objects / "shell_folder.o"]
+                     objects / "shell_netaddress.o", objects / "shell_winrt.o", objects / "shell_knownfolder.o", objects / "shell_rot.o", objects / "shell_folder.o", objects / "shell_errorinfo.o",
+                     objects / "shell_clipboard.o"]
     shell_flags = ["-O2", "-w", "-ffreestanding", f"-ffile-prefix-map={repo}=raven"]
     run([triple + "-gcc", "-c", *shell_flags, shell_support / "shell.c", "-o", shell_objects[0]])
     run([triple + "-gcc", "-c", *shell_flags, shell_support / "link.c", "-o", shell_objects[1]])
@@ -146,24 +147,27 @@ def main():
     run([triple + "-gcc", "-c", *shell_flags, shell_support / "knownfolder.c", "-o", shell_objects[8]])
     run([triple + "-gcc", "-c", *shell_flags, shell_support / "rot.c", "-o", shell_objects[9]])
     run([triple + "-gcc", "-c", *shell_flags, shell_support / "folder.c", "-o", shell_objects[10]])
+    run([triple + "-gcc", "-c", *shell_flags, shell_support / "errorinfo.c", "-o", shell_objects[11]])
+    run([triple + "-gcc", "-c", *shell_flags, shell_support / "clipboard.c", "-o", shell_objects[12]])
     shell_defined = decorated(shell_objects)
     shell_names = ("GetRunningObjectTable", "CreateItemMoniker", "CoCreateInstance", "CoCreateInstanceEx", "CoGetClassObject", "CoGetTreatAsClass", "CoGetMalloc", "SHCreateItemFromParsingName", "SHGetPropertyStoreForWindow", "PropVariantClear", "SHAppBarMessage", "GetOpenFileNameW", "GetSaveFileNameW", "CommDlgExtendedError", "GetFileTitleW", "IUnknown_QueryService", "QISearch", "CLSIDFromProgID",
                    "SHCreateStreamOnFileA", "SHCreateStreamOnFileW", "SHCreateStreamOnFileEx", "SHCreateMemStream", "PropVariantCopy", "CoGetContextToken", "CoGetObjectContext", "ExtractIconExW", "ExtractIconW", "UiaGetReservedNotSupportedValue", "UiaGetReservedMixedAttributeValue", "SHGetMalloc",
                    "OpenRegStream", "SHOpenRegStreamW", "SHOpenRegStreamA", "SHOpenRegStream2W", "SHOpenRegStream2A", "InitNetworkAddressControl",
                    "RoGetActivationFactory", "RoActivateInstance", "CoCreateFreeThreadedMarshaler",
-                   "SHGetDesktopFolder", "SHCreateItemFromIDList", "CreateFileMoniker", "SHLoadIndirectString", "SHGetPropertyStoreFromParsingName", "ILGetSize", "ILGetNext", "ILFindLastID", "ILClone", "ILCloneFirst", "ILCombine", "ILFree", "ILCreateFromPathW", "ILIsEqual")
+                   "SHGetDesktopFolder", "SHCreateItemFromIDList", "CreateFileMoniker", "SHLoadIndirectString", "SHGetPropertyStoreFromParsingName", "ILGetSize", "ILGetNext", "ILFindLastID", "ILClone", "ILCloneFirst", "ILCombine", "ILFree", "ILCreateFromPathW", "ILIsEqual",
+                   "CreateErrorInfo", "SetErrorInfo", "GetErrorInfo", "CoWaitForMultipleHandles", "OleGetClipboard")
     (output / "raven-shell.def").write_text("NAME raven-shell.dll\nEXPORTS\n" + "".join(definition_line(name, shell_defined.get(name)) for name in shell_names))
     run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{bases['shell']:#x},--no-insert-timestamp", *link_extra,
-         "-o", output / "raven-shell.dll", *shell_objects, output / "raven-shell.def", "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lole32", "-luuid", "-lruntimeobject", "-lgcc"])
+         "-o", output / "raven-shell.dll", *shell_objects, output / "raven-shell.def", "-luser32", "-lgdi32", "-ladvapi32", "-lkernel32", "-lole32", "-loleaut32", "-luuid", "-lruntimeobject", "-lgcc"])
     # control.exe: the control panel, a program on the public headers that asks for the common controls 6 in its manifest.
-    control_support = repo / "native/upstream/raven-control"
+    control_support = repo / "native/guest/raven-control"
     control_objects = [objects / "control.o", objects / "control_res.o"]
     run([triple + "-gcc", "-c", "-O2", "-Wall", "-fno-builtin", f"-ffile-prefix-map={repo}=raven", control_support / "control.c", "-o", control_objects[0]])
     run([triple + "-windres", "-O", "coff", "-I" + str(control_support), "-i", control_support / "control.rc", "-o", control_objects[1]])
     run([triple + "-gcc", "-nostdlib", "-mwindows", f"-Wl,--entry,{'_raven_program_entry@0' if x86 else 'raven_program_entry'},--no-insert-timestamp", *link_extra,
          "-o", output / "control.exe", *control_objects, shell_objects[3], "-luser32", "-lgdi32", "-ladvapi32", "-lcomctl32", "-lkernel32", "-lgcc"])
     # dism.exe: the feature servicing tool, as far as turning on the .NET Framework 3.5 from a local package; a console program.
-    dism_support = repo / "native/upstream/raven-dism"
+    dism_support = repo / "native/guest/raven-dism"
     run([triple + "-gcc", "-c", "-O2", "-Wall", "-fno-builtin", f"-ffile-prefix-map={repo}=raven", dism_support / "dism.c", "-o", objects / "dism.o"])
     # As on Windows, the tool asks to run as an administrator, and so do the installers it starts.
     run([triple + "-windres", "-O", "coff", "-I" + str(dism_support), "-i", dism_support / "dism.rc", "-o", objects / "dism_res.o"])
@@ -180,13 +184,13 @@ def main():
     if wanted & {"dwrite", "d2d1", "uianimation"}:
         # The host services the DirectWrite and Direct2D components call: fonts measured and rasterized with FreeType, surfaces drawn with Skia.
         host_names = ["RavenFontClose", "RavenFontGlyphs", "RavenFontInfo", "RavenFontMetrics", "RavenFontName", "RavenFontOpen", "RavenFontOutline",
-                      "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace", "RavenCanvasCreate", "RavenCanvasDestroy", "RavenCanvasDraw",
+                      "RavenFontRender", "RavenFontScan", "RavenFontTable", "RavenTrace", "RavenCanvasBatch", "RavenCanvasCreate", "RavenCanvasDestroy", "RavenCanvasDraw",
                       "RavenCanvasPixels", "RavenCanvasSize", "RavenPathCombine", "RavenPathWiden"]
         (output / "ravenhost.def").write_text("LIBRARY ravenhost.dll\nEXPORTS\n" + "".join(name + "\n" for name in host_names))
         run([triple + "-dlltool", "-d", output / "ravenhost.def", "-l", output / "libravenhost.a"])
     if "dwrite" in wanted:
         # The DirectWrite component: Raven code on the public headers, whose fonts come from the host through ravenhost.dll.
-        dwrite_support = repo / "native/upstream/raven-dwrite"
+        dwrite_support = repo / "native/guest/raven-dwrite"
         dwrite_objects = [objects / "dwrite.o", objects / "dwrite_crt.o"]
         dwrite_flags = ["-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-ffreestanding", "-fno-builtin", f"-ffile-prefix-map={repo}=raven"]
         run([triple + "-gcc", "-c", *dwrite_flags, "-I" + str(dwrite_support), dwrite_support / "dwrite.c", "-o", dwrite_objects[0]])
@@ -197,12 +201,12 @@ def main():
     if "d2d1" in wanted:
         # The Direct2D component: Raven code on the public headers; surfaces live with the host and are drawn with Skia through ravenhost.dll,
         # text comes from the DirectWrite component and pictures from the imaging component.
-        d2d1_support = repo / "native/upstream/raven-d2d1"
+        d2d1_support = repo / "native/guest/raven-d2d1"
         d2d1_objects = [objects / "d2d1.o", objects / "d2d1_crt.o"]
         d2d1_flags = ["-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-ffreestanding", "-fno-builtin", "-fno-math-errno",
                       f"-ffile-prefix-map={repo}=raven"]
         run([triple + "-gcc", "-c", *d2d1_flags, "-I" + str(d2d1_support), d2d1_support / "d2d1.c", "-o", d2d1_objects[0]])
-        run([triple + "-gcc", "-c", *d2d1_flags, repo / "native/upstream/raven-dwrite/crt.c", "-o", d2d1_objects[1]])
+        run([triple + "-gcc", "-c", *d2d1_flags, repo / "native/guest/raven-dwrite/crt.c", "-o", d2d1_objects[1]])
         # Office binds D2D1CreateFactory by number, as ordinal 1 of the system library.
         (output / "raven-d2d1.def").write_text("NAME raven-d2d1.dll\nEXPORTS\nD2D1CreateFactory @1\n" + "".join(name + "\n" for name in (
             "D2D1ComputeMaximumScaleFactor", "D2D1ConvertColorSpace", "D2D1CreateDevice", "D2D1CreateDeviceContext",
@@ -212,12 +216,12 @@ def main():
              "-lwindowscodecs", "-luser32", "-lgdi32", "-lkernel32", "-lgcc"])
     if "uianimation" in wanted:
         # The Windows Animation component: Raven code on the public headers, the classes UIAnimation.dll registers.
-        animation_support = repo / "native/upstream/raven-uianimation"
+        animation_support = repo / "native/guest/raven-uianimation"
         animation_objects = [objects / "uianimation.o", objects / "uianimation_crt.o"]
         animation_flags = ["-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-ffreestanding", "-fno-builtin", "-fno-math-errno",
                            f"-ffile-prefix-map={repo}=raven"]
         run([triple + "-gcc", "-c", *animation_flags, "-I" + str(animation_support), animation_support / "uianimation.c", "-o", animation_objects[0]])
-        run([triple + "-gcc", "-c", *animation_flags, repo / "native/upstream/raven-dwrite/crt.c", "-o", animation_objects[1]])
+        run([triple + "-gcc", "-c", *animation_flags, repo / "native/guest/raven-dwrite/crt.c", "-o", animation_objects[1]])
         (output / "raven-uianimation.def").write_text("NAME raven-uianimation.dll\nEXPORTS\nDllCanUnloadNow PRIVATE\nDllGetClassObject PRIVATE\n")
         run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,0x1f9000000,--no-insert-timestamp", *link_extra,
              "-o", output / "raven-uianimation.dll", *animation_objects, output / "raven-uianimation.def", "-L" + str(output), "-lravenhost",
@@ -226,7 +230,7 @@ def main():
         # The C runtime component: the Universal CRT entry points programs import from ucrtbase.dll.
         crt_object = objects / "ucrtbase.o"
         run([triple + "-gcc", "-c", "-O2", "-w", "-ffreestanding", "-fno-builtin", f"-ffile-prefix-map={repo}=raven",
-             repo / "native/upstream/raven-crt/ucrtbase.c", "-o", crt_object])
+             repo / "native/guest/raven-crt/ucrtbase.c", "-o", crt_object])
         run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,{bases['crt']:#x},--no-insert-timestamp", *link_extra,
              "-o", output / "ucrtbase.dll", crt_object, "-lkernel32", "-lgcc"])
     result = dict(commands=records,

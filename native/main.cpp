@@ -312,7 +312,8 @@ int main(int argc, char **argv)
 						for (const auto &[from, folder] : {std::pair{runtime, "system32"}, std::pair{runtime / "x86", "syswow64"}})
 							for (const char *program : {"cmd.exe", "msiexec.exe", "regsvr32.exe", "control.exe", "dism.exe", "fondue.exe", "regedit.exe", "mscoree.dll", "riched20.dll",
 									"msftedit.dll", "l_intl.nls", "find.exe", "findstr.exe", "more.com", "sort.exe", "where.exe", "xcopy.exe", "attrib.exe",
-									"timeout.exe", "choice.exe", "whoami.exe", "hostname.exe", "tasklist.exe", "taskkill.exe", "reg.exe", "rundll32.exe"}) {
+									"timeout.exe", "choice.exe", "whoami.exe", "hostname.exe", "tasklist.exe", "taskkill.exe", "reg.exe", "rundll32.exe", "cscript.exe",
+									"wscript.exe"}) {
 								std::error_code error;
 								// The 64-bit Registry Editor lives in the Windows folder itself.
 								const bool windows_folder = std::string_view(program) == "regedit.exe" && std::string_view(folder) == "system32";
@@ -454,6 +455,10 @@ int main(int argc, char **argv)
 							if (std::filesystem::exists(component))
 								return read_module(component.c_str());
 						}
+						// The common controls component stands in for comctl32.dll however late the program loads it.
+						if (!selected && name=="comctl32.dll")
+							if (const auto component = component_directory / "comctl32.dll"; std::filesystem::exists(component))
+								return read_module(component.c_str());
 						if (!selected && name=="ucrtbase.dll") {
 							// A 32-bit program gets the 32-bit build of the component.
 							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / (entry->image.is_64 ? "ucrtbase.dll" : "ucrtbase32.dll");
@@ -537,16 +542,45 @@ int main(int argc, char **argv)
 							for (const auto &descriptor : item.second->image.delay_imports())
 								visit(descriptor.imports);
 						}
+						// A small launcher that loads its own libraries by name later, as an updater loads the one that does its work,
+						// needs what they import as much as what it imports itself. A program that uses the window manager already gets
+						// every component, so only one that does not looks at the libraries beside it; so does a .NET program, whose
+						// assemblies fill its folder.
+						const bool assembly = entry->image.directories[14].address && entry->image.directories[14].size;
+						if (!names.contains("user32.dll") && !assembly) {
+							std::error_code error;
+							size_t seen = 0;
+							for (const auto &item : std::filesystem::directory_iterator(std::filesystem::absolute(argv[first_file]).parent_path(), error)) {
+								if (++seen > 256)
+									break;
+								const auto file = lower(item.path().filename().string());
+								if (!file.ends_with(".dll") || !item.is_regular_file(error) || item.file_size(error) > 32 * 1024 * 1024)
+									continue;
+								try {
+									if (const auto bytes = source(file)) {
+										const raven::PEImage image(*bytes);
+										visit(image.imports());
+										for (const auto &descriptor : image.delay_imports())
+											visit(descriptor.imports);
+									}
+								} catch (const std::exception &) {
+								}
+							}
+						}
+						// A file under an imported name that is not an image adds no names here; the loader reports it if the program
+						// loads it.
 						while (!pending.empty()) {
 							const auto name = pending.back();
 							pending.pop_back();
-							if (const auto bytes = source(name))
-							{
-								const raven::PEImage image(*bytes);
-								visit(image.imports());
-								// A library the program loads lazily still needs its components in place.
-								for (const auto &descriptor : image.delay_imports())
-									visit(descriptor.imports);
+							try {
+								if (const auto bytes = source(name)) {
+									const raven::PEImage image(*bytes);
+									visit(image.imports());
+									// A library the program loads lazily still needs its components in place.
+									for (const auto &descriptor : image.delay_imports())
+										visit(descriptor.imports);
+								}
+							} catch (const std::runtime_error &) {
 							}
 						}
 						return names;

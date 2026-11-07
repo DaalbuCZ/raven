@@ -1,4 +1,5 @@
 #include "access_token.h"
+#include "actctx.h"
 #include "interfaces.h"
 #include "kernel_context.h"
 #include "text.h"
@@ -499,7 +500,14 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	});
 	// Network accounts: the one account of the prefix, a member of Administrators, on a machine in a workgroup. Buffers come from the
 	// guest allocator and go back through NetApiBufferFree.
-	registry.add("NetUserGetInfo", 4, [&context](ApiCall &call) {
+	static constexpr std::u16string_view workgroup = u"WORKGROUP";
+	const auto fold = [](std::u16string text) {
+		for (auto &character : text)
+			if (character >= u'a' && character <= u'z')
+				character = char16_t(character - 32);
+		return text;
+	};
+	registry.add("NetUserGetInfo", 4, [&context, fold](ApiCall &call) {
 		const auto user = context.paths.user_name();
 		if (!call[3]) {
 			call.ret(87);
@@ -507,12 +515,6 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		}
 		call.store_pointer(call[3], 0);
 		const auto asked = call[1] ? call.wide(call[1], 256) : std::u16string();
-		const auto fold = [](std::u16string text) {
-			for (auto &character : text)
-				if (character >= u'a' && character <= u'z')
-					character = char16_t(character - 32);
-			return text;
-		};
 		if (fold(asked) != fold(user)) {
 			call.ret(2221);
 			return;
@@ -552,7 +554,6 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(87);
 			return;
 		}
-		const std::u16string workgroup = u"WORKGROUP";
 		const uint64_t block = context.allocator.allocate((workgroup.size() + 1) * 2);
 		if (!block) {
 			call.ret(8);
@@ -561,6 +562,53 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(block, workgroup, workgroup.size() + 1);
 		call.store_pointer(call[1], block);
 		call.store<uint32_t>(call[2], 2);
+		call.ret(0);
+	});
+	// The workstation: this computer, by its NetBIOS name or its host name, an NT platform (PLATFORM_ID_NT) at the real Windows version,
+	// with the prefix's one user logged on. Levels 100, 101 and 102 extend the same record; this machine has no LAN Manager directory.
+	registry.add("NetWkstaGetInfo", 3, [&context, computer_name, fold](ApiCall &call) {
+		if (!call[2]) {
+			call.ret(87);
+			return;
+		}
+		call.store_pointer(call[2], 0);
+		if (call[0]) {
+			auto server = fold(call.wide(call[0], 256));
+			if (server.starts_with(u"\\\\"))
+				server.erase(0, 2);
+			if (!server.empty() && server != fold(*computer_name(0)) && server != fold(*computer_name(1)) && server != fold(*computer_name(3))) {
+				call.ret(53);
+				return;
+			}
+		}
+		const uint32_t level = call.u32(1);
+		if (level != 100 && level != 101 && level != 102) {
+			call.ret(124);
+			return;
+		}
+		const auto name = *computer_name(0);
+		const size_t width = call.pointer_width();
+		const size_t record = level == 100 ? width == 4 ? 20 : 32 : level == 101 ? width == 4 ? 24 : 40 : width == 4 ? 28 : 48;
+		const uint64_t block = context.allocator.allocate(record + (name.size() + 1) * 2 + (workgroup.size() + 1) * 2 + 2);
+		if (!block) {
+			call.ret(8);
+			return;
+		}
+		const uint64_t computer = block + record, group = computer + (name.size() + 1) * 2, empty = group + (workgroup.size() + 1) * 2;
+		call.put_wide(computer, name, name.size() + 1);
+		call.put_wide(group, workgroup, workgroup.size() + 1);
+		call.store<uint16_t>(empty, 0);
+		const auto version = activation_contexts().system_version();
+		call.store<uint32_t>(block, 500);
+		call.store_pointer(block + width, computer);
+		call.store_pointer(block + 2 * width, group);
+		call.store<uint32_t>(block + 3 * width, version.major);
+		call.store<uint32_t>(block + 3 * width + 4, version.minor);
+		if (level >= 101)
+			call.store_pointer(block + 3 * width + 8, empty);
+		if (level == 102)
+			call.store<uint32_t>(block + 4 * width + 8, 1);
+		call.store_pointer(call[2], block);
 		call.ret(0);
 	});
 	registry.add("NetApiBufferFree", 1, [&context](ApiCall &call) {
@@ -855,15 +903,22 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("GetQueueStatus", 1, [&context](ApiCall &call) {
 		const uint32_t kinds = call.u32(0);
 		if (kinds & ~0x1dffU) { call.fail(87, 0); return; }
-		call.ret(context.queue_status ? context.queue_status(context.threads.current_id(), kinds, true) : 0);
+		const uint32_t status = context.queue_status ? context.queue_status(context.threads.current_id(), kinds, true) : 0;
+		if (!status && context.queue_quiet) context.queue_quiet(context.threads.current_id());
+		call.ret(status);
 	});
 	// Only keyboard and mouse-button input counts here, not posted messages, motion, timers or paint.
 	registry.add("GetInputState", 0, [&context](ApiCall &call) {
-		call.ret(context.queue_status && (context.queue_status(context.threads.current_id(), 5, false) >> 16) ? 1 : 0);
+		const bool input = context.queue_status && (context.queue_status(context.threads.current_id(), 5, false) >> 16);
+		if (!input && context.queue_quiet) context.queue_quiet(context.threads.current_id());
+		call.ret(input ? 1 : 0);
 	});
 	// Whether the message being handled was sent from another thread that waits for the reply: the window procedures of a program run
 	// on the thread that sent to them, so the answer is no (ISMEX_NOSEND).
 	registry.add("InSendMessage", 0, [](ApiCall &call) { call.ret(0); });
+	// Every thread already has the message queue and window state a GUI thread needs, so each one is a GUI thread and the conversion
+	// IsGUIThread(TRUE) asks for has nothing to do.
+	registry.add("IsGUIThread", 1, [](ApiCall &call) { call.ret(1); });
 	// The message filter that keeps lower integrity processes out: the prefix has no integrity levels, so every change is accepted
 	// (the per-window form is with the window functions).
 	registry.add("ChangeWindowMessageFilter", 2, [](ApiCall &call) { call.ret(1); });
@@ -1417,6 +1472,20 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	// Host memory is the kernel's to manage: the limits a program asks for are advice, which Windows may ignore as well.
 	registry.add("SetProcessWorkingSetSize", 3, [](ApiCall &call) { call.ret(1); });
 	registry.add("SetProcessWorkingSetSizeEx", 4, [](ApiCall &call) { call.ret(1); });
+	// The documented default limits, 50 and 345 pages, neither of them enforced: the host decides what stays resident.
+	const auto working_set = [](ApiCall &call, bool extended) {
+		if (!call[1] || !call[2] || (extended && !call[3])) {
+			call.fail(87);
+			return;
+		}
+		call.store_pointer(call[1], 50 * 4096);
+		call.store_pointer(call[2], 345 * 4096);
+		if (extended)
+			call.store<uint32_t>(call[3], 0x2 | 0x8);
+		call.ret(1);
+	};
+	registry.add("GetProcessWorkingSetSize", 3, [working_set](ApiCall &call) { working_set(call, false); });
+	registry.add("GetProcessWorkingSetSizeEx", 4, [working_set](ApiCall &call) { working_set(call, true); });
 	registry.add("SetPriorityClass", 2, [priority_class](ApiCall &call) {
 		const uint32_t value = call.u32(1);
 		if (value != 0x20 && value != 0x40 && value != 0x80 && value != 0x100 && value != 0x4000 && value != 0x8000 && value != 0x00100000 && value != 0x00200000) {

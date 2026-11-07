@@ -2700,3 +2700,5 @@ remain passing after the trial implementation was removed.
   route. The fixture set passes (16/16); the app state directories were moved to /tmp/shapr_state_backup
   before the experiments and the runs' rewritten LocalState/LocalSettings were deleted after each run;
   no Shapr3D window has been verified.
+
+- Upstream merge continuation (2026-11-07): merged upstream main through 74e3e3e, retaining the XAML startup surfaces and upstream's metadata, memory and runtime additions. A launch using the merged runtime, a copied prefix and the freshly built XAML component again reaches the missing interop marshalling error `80131500` for `EETypeRva:0x0001B1C0`; no window was verified. The earlier application-view `E_ILLEGAL_METHOD_CALL` entry is superseded by the later interop-wall entries above. The exception diagnostic now catches guest memory faults when inspecting pointer-like fields, so an unreadable diagnostic pointer does not change the API result. Probe log: `/tmp/raven-merge-probe/launch.log`.

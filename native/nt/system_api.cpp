@@ -2,6 +2,7 @@
 #include "kernel_context.h"
 #include "actctx.h"
 #include "text.h"
+#include "x86_compat_api.h"
 
 #include <algorithm>
 #include <array>
@@ -292,6 +293,18 @@ uint64_t counter_ticks()
 	timespec now{};
 	::clock_gettime(CLOCK_MONOTONIC, &now);
 	return uint64_t(now.tv_sec) * 10000000ULL + uint64_t(now.tv_nsec) / 100;
+}
+
+// The local time at the start of the current second and the performance counter span of that second, for a GetLocalTime the
+// guest answers itself: the counter where the second starts and ends, then the SYSTEMTIME with no milliseconds.
+std::array<uint64_t, 4> local_second()
+{
+	const uint64_t counter = counter_ticks(), utc = now_ticks();
+	const auto zone = zone_at(time_t((utc - filetime_epoch_offset) / 10000000ULL));
+	const uint64_t local = utc + int64_t(zone.offset_minutes) * 600000000LL, into = local % 10000000ULL;
+	std::array<uint64_t, 4> second{counter - into, counter - into + 10000000ULL, 0, 0};
+	std::memcpy(&second[2], system_time(local - into).data(), 16);
+	return second;
 }
 
 // The service pack of a version block: its name after the five numbers, and its number in the extended block.
@@ -682,6 +695,18 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[3], form, form_size / 2);
 		call.ret(0);
 	});
+	// The same as numbers: the version packed as major, minor, build and revision words, DEVICEFAMILYINFOENUM_DESKTOP and
+	// DEVICEFAMILYDEVICEFORM_UNKNOWN. Each pointer may be null.
+	registry.add("RtlGetDeviceFamilyInfoEnum", 3, [](ApiCall &call) {
+		const auto version = activation_contexts().system_version();
+		if (call[0])
+			call.store<uint64_t>(call[0], uint64_t(version.major) << 48 | uint64_t(version.minor) << 32 | uint64_t(version.build & 0xffff) << 16);
+		if (call[1])
+			call.store<uint32_t>(call[1], 3);
+		if (call[2])
+			call.store<uint32_t>(call[2], 0);
+		call.ret(0);
+	});
 	// The licensing policy store holds no values: every query answers SL_E_VALUE_NOT_FOUND.
 	const auto policy_value = [](ApiCall &call) { call.ret(call[0] ? 0xc004f012U : 0x80070057U); };
 	registry.add("SLGetWindowsInformation", 4, policy_value);
@@ -1060,6 +1085,16 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	// Affinity is not enforced: the call reports the mask the thread had, which is every processor.
 	registry.add("SetProcessAffinityMask", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("SetProcessShutdownParameters", 2, [](ApiCall &call) { call.ret(1); });
+	// The level a process starts with (0x280) and no flags, as nothing changes them here.
+	registry.add("GetProcessShutdownParameters", 2, [](ApiCall &call) {
+		if (!call[0] || !call[1]) {
+			call.fail(998);
+			return;
+		}
+		call.store<uint32_t>(call[0], 0x280);
+		call.store<uint32_t>(call[1], 0);
+		call.ret(1);
+	});
 	// Processor topology: one package, one core per logical processor, no cache or NUMA records beyond the single node.
 	registry.add("GetLogicalProcessorInformationEx", 3, [processor_mask](ApiCall &call) {
 		constexpr uint32_t core = 0, node = 1, package = 3, group = 4, all = 0xffff;
@@ -1444,6 +1479,8 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(head);
 	});
 	registry.add("QueryDepthSList", 1, [count](ApiCall &call) { call.ret(count(call) & 0xffff); });
+	// The entry at the head, left on the list.
+	registry.add("RtlFirstEntrySList", 1, [](ApiCall &call) { call.ret(call.load_pointer(call[0])); });
 	// ntdll's names for the same lists.
 	for (const auto &[native, win32] : {std::pair{"RtlInitializeSListHead", "InitializeSListHead"},
 			{"RtlInterlockedPushEntrySList", "InterlockedPushEntrySList"}, {"RtlInterlockedPopEntrySList", "InterlockedPopEntrySList"},
@@ -1674,8 +1711,11 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			character = upper_case(character);
 		const auto folder = context.launch.image_path.substr(0, slash + 1);
 		const auto resolved = paths.resolve(folder + u"netfx_Patch_x64.msp");
-		if (name.starts_with(u"NDP48") || (name == u"SETUP.EXE" && resolved && resolved->exists))
+		if (name.starts_with(u"NDP48") || (name == u"SETUP.EXE" && resolved && resolved->exists)) {
 			activation_contexts().set_compatibility_layer(u"WIN7SP1");
+			// The setup is a 32-bit program that reads its package catalog with about a million heap calls.
+			want_guest_heap();
+		}
 	}
 	paths.set_search_path([variables] {
 		const auto found = variables->values.find(u"PATH");

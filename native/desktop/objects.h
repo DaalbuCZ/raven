@@ -106,7 +106,7 @@ struct DesktopDCState {
 	int32_t origin_x=0,origin_y=0,position_x=0,position_y=0;
 	std::optional<DesktopRect> bounds{};
 	int32_t brush_org_x=0,brush_org_y=0,window_org_x=0,window_org_y=0,viewport_org_x=0,viewport_org_y=0;
-	uint32_t graphics_mode=1;
+	uint32_t graphics_mode=1,stretch_mode=1;
 	std::array<float,6> world{1,0,0,1,0,0};
 };
 
@@ -138,6 +138,8 @@ struct DesktopDC {
 	// GM_COMPATIBLE until SetGraphicsMode; the world transform (XFORM order) is kept for programs that read it back, and drawing
 	// does not apply it.
 	uint32_t graphics_mode=1;
+	// BLACKONWHITE until SetStretchBltMode; StretchBlt resamples the same way whatever the mode.
+	uint32_t stretch_mode=1;
 	std::array<float,6> world{1,0,0,1,0,0};
 	// The path a BeginPath bracket records: its figures as logical points, each closed when it becomes a region. Open while the
 	// bracket lasts; EndPath closes it for PathToRegion.
@@ -347,10 +349,12 @@ public:
 	TouchedHandles &touched_bitmaps() { return bitmaps_touched; }
 	TouchedHandles &touched_dcs() { return dcs_touched; }
 	TouchedHandles &touched_icons() { return icons_touched; }
+	TouchedHandles &touched_regions() { return regions_touched; }
 	std::vector<uint64_t> menu_handles() const;
 	std::vector<uint64_t> bitmap_handles() const;
 	std::vector<uint64_t> dc_handles() const;
 	std::vector<uint64_t> icon_handles() const;
+	std::vector<uint64_t> region_handles() const;
 	uint64_t window_root(uint64_t handle) const;
 	// Children of a window in z-order, bottom to top. Top-level windows are the children of window zero.
 	std::vector<uint64_t> child_windows(uint64_t parent) const;
@@ -366,6 +370,8 @@ public:
 	bool validate(uint64_t window,DesktopRect rect);
 	bool start_paint(uint64_t window);
 	void finish_paint(uint64_t window);
+	// A paint whose surface went away while it ran, as a window resized inside its own paint: the window is no longer painting.
+	void abandon_paint(uint64_t window);
 	uint16_t register_class(DesktopClass definition);
 	uint32_t unregister_class(uint16_t atom);
 	uint16_t find_class(uint64_t instance, std::string_view name) const;
@@ -387,7 +393,7 @@ public:
 	bool set_screen_size(int32_t width,int32_t height);
 
 private:
-	TouchedHandles windows_touched{}, menus_touched{}, bitmaps_touched{}, dcs_touched{}, icons_touched{};
+	TouchedHandles windows_touched{}, menus_touched{}, bitmaps_touched{}, dcs_touched{}, icons_touched{}, regions_touched{};
 	// How many contexts each bitmap is selected into.
 	std::map<uint64_t,uint32_t> selections;
 	// The windows among the objects, in handle order.

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <utility>
 
 namespace raven {
 
@@ -17,7 +18,7 @@ NativeWindows::FrameLayout NativeWindows::frame_layout(const DesktopWindow &wind
 	const uint32_t style = window.style & ~0x10000000U;
 	FrameLayout layout{};
 	const int32_t width = window.outer.right - window.outer.left, height = window.outer.bottom - window.outer.top;
-	// AdjustWindowRect already encodes ReactOS' border and caption rules; its deltas are the frame thickness.
+	// AdjustWindowRect already encodes the border and caption rules; its deltas are the frame thickness.
 	const auto adjusted = adjust_window_rect(metrics, {0, 0, 0, 0}, style, false, window.ex_style);
 	layout.border = -adjusted.left;
 	layout.caption_height = (style & 0xc00000U) == 0xc00000U ? metrics.caption : 0;
@@ -105,7 +106,7 @@ void NativeWindows::hover_frame(uint64_t handle,uint64_t hit)
 
 void NativeWindows::nonclient_pointer(uint64_t handle,uint64_t hit,uint32_t message,int32_t x,int32_t y)
 {
-	const auto *window=objects.window(handle);
+	const auto *window=std::as_const(objects).window(handle);
 	if (!window) return;
 	constexpr uint64_t caption_hit=2,system_menu_hit=3,menu_hit=5,minimize_hit=8,maximize_hit=9,close_hit=20;
 	// The window menu opens where the secondary button is released over the caption, or under the icon when the icon is pressed.
@@ -145,7 +146,8 @@ void NativeWindows::nonclient_pointer(uint64_t handle,uint64_t hit,uint32_t mess
 		pressed_frame_hit=0; pressed_frame_window=0;
 		if (hit==close_hit) send(handle,0x112,0xf060,0);
 		else if (hit==minimize_hit && (window->style & 0x20000U)) send(handle,0x112,0xf020,0);
-		else if (hit==maximize_hit && (window->style & 0x10000U)) send(handle,0x112,0xf030,0);
+		// The maximize button of a maximized window is its restore button.
+		else if (hit==maximize_hit && (window->style & 0x10000U)) send(handle,0x112,(window->style & 0x01000000U) ? 0xf120 : 0xf030,0);
 	}
 }
 
@@ -182,7 +184,7 @@ std::vector<DesktopRect> NativeWindows::menu_bar_items(const DesktopWindow &wind
 
 void NativeWindows::paint_nonclient(uint64_t handle)
 {
-	auto *window = objects.window(handle);
+	const auto *window = std::as_const(objects).window(handle);
 	if (!window || window->parent || !window->bitmap)
 		return;
 	const auto layout = frame_layout(*window);
