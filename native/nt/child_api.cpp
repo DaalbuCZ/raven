@@ -433,6 +433,20 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("RaiseFailFastException", 3, [&context](ApiCall &call) {
 		const uint32_t code = call[0] ? call.load<uint32_t>(call[0]) : 0xc0000602U;
 		std::fprintf(stderr, "raven: fail fast exception %x\n", code);
+		if (std::getenv("RAVEN_DUMP_SHAPR_EETYPE")) {
+			try {
+				const auto bytes = call.process.read_memory(0x18001b1c0ULL, 0x100);
+				std::fprintf(stderr, "raven: Shapr3D reported EEType RVA 1b1c0:");
+				for (size_t i = 0; i + 8 <= bytes.size(); i += 8) {
+					uint64_t value = 0;
+					std::memcpy(&value, bytes.data() + i, 8);
+					std::fprintf(stderr, "\n  +%02zx %016llx", i, static_cast<unsigned long long>(value));
+				}
+				std::fprintf(stderr, "\n");
+			} catch (const std::exception &error) {
+				std::fprintf(stderr, "raven: candidate EEType unreadable: %s\n", error.what());
+			}
+		}
 		if (call[0] && std::getenv("RAVEN_TRACE_EXCEPTIONS")) try {
 			const bool wide = call.pointer_width() == 8;
 			const uint32_t count = std::min(call.load<uint32_t>(call[0] + (wide ? 0x18 : 0x10)), 15U);
