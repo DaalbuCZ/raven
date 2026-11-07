@@ -442,10 +442,10 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 					const auto bytes = call.process.read_memory(found->second->loaded.base() + rva, 0x100);
 					std::fprintf(stderr, "raven: Shapr3D+%llx @%llx:", static_cast<unsigned long long>(rva),
 						static_cast<unsigned long long>(found->second->loaded.base() + rva));
-					for (size_t i = 0; i + 8 <= bytes.size(); i += 8) {
-						uint64_t value = 0;
-						std::memcpy(&value, bytes.data() + i, 8);
-						std::fprintf(stderr, "\n  +%02zx %016llx", i, static_cast<unsigned long long>(value));
+					for (size_t i = 0; i + 4 <= bytes.size(); i += 4) {
+						uint32_t value = 0;
+						std::memcpy(&value, bytes.data() + i, 4);
+						std::fprintf(stderr, "\n  +%02zx %08x", i, value);
 					}
 					std::fprintf(stderr, "\n");
 				} catch (const std::exception &error) {
