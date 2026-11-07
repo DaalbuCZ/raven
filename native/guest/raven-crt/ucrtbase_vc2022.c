@@ -52,20 +52,6 @@ void raven_std_type_info_destroy_list(PSLIST_HEADER root)
 }
 
 /* The thread's own invalid parameter handler, which takes the place of the process's while it is set. */
-static DWORD invalid_parameter_slot = TLS_OUT_OF_INDEXES;
-
-CRT invalid_parameter_handler _set_thread_local_invalid_parameter_handler(invalid_parameter_handler handler)
-{
-	if (invalid_parameter_slot == TLS_OUT_OF_INDEXES) {
-		DWORD slot = TlsAlloc();
-		if (InterlockedCompareExchange((LONG *)&invalid_parameter_slot, (LONG)slot, (LONG)TLS_OUT_OF_INDEXES) != (LONG)TLS_OUT_OF_INDEXES)
-			TlsFree(slot);
-	}
-	const invalid_parameter_handler previous = (invalid_parameter_handler)TlsGetValue(invalid_parameter_slot);
-	TlsSetValue(invalid_parameter_slot, (void *)handler);
-	return previous;
-}
-
 /* ---- conversions under a locale: the runtime has the C locale only, so each is the plain function ---- */
 
 long long raven_strtoi64_l(const char *text, char **end, int base, _locale_t locale) { return _strtoi64(text, end, base); }
@@ -253,28 +239,9 @@ CRT void _splitpath(const char *path, char *drive, char *folder, char *name, cha
 		}
 }
 
-CRT char *_strrev(char *text)
-{
-	for (size_t a = 0, b = strlen(text); b-- > a; ++a) {
-		const char swap = text[a];
-		text[a] = text[b];
-		text[b] = swap;
-	}
-	return text;
-}
-
 CRT unsigned long long _byteswap_uint64(unsigned long long value) { return __builtin_bswap64(value); }
 
 /* ---- math ---- */
-
-CRT double remainder(double x, double y)
-{
-	if (x != x || y != y || y == 0.0 || x - x != 0.0)
-		return (x * y) / (x * y);
-	if (y - y != 0.0)
-		return x;
-	return x - rint(x / y) * y;
-}
 
 /* erf and erfc by W. J. Cody's published rational approximations (Math. Comp. 23, 1969), which hold to about the last digit of a double. */
 static double erfc_large(double magnitude)
@@ -325,17 +292,6 @@ static double erf_small(double x)
 		denominator = (denominator + b[at]) * z;
 	}
 	return x * (numerator + a[3]) / (denominator + b[3]);
-}
-
-CRT double erf(double x)
-{
-	if (x != x)
-		return x;
-	const double magnitude = x < 0.0 ? -x : x;
-	if (magnitude <= 0.46875)
-		return erf_small(x);
-	const double complement = magnitude <= 4.0 ? erfc_middle(magnitude) : magnitude < 26.0 ? erfc_large(magnitude) : 0.0;
-	return x < 0.0 ? complement - 1.0 : 1.0 - complement;
 }
 
 CRT double erfc(double x)
