@@ -5,15 +5,105 @@
 /* One request through WinINet: the request's method, URI, headers and body go out; the status, reason, version and headers of the
  * response come back, with the body left to read. Redirections are followed by WinINet unless the filter says not to, and the request
  * message is pointed at the URI they ended at, as Windows does. A failure is WinINet's error as an HRESULT (WININET_E_*). */
-#include "web.h"
+#include "web.h" /* exchange dump + refuse-host diagnostics below (env-gated; kept for future protocol work). */
 
 struct exchange {
 	HINTERNET session, connection, request;
 	BOOL has_length;
 	UINT64 length;
+	/* Env-gated diagnostic: exchange dump paths, filled from RAVEN_WEB_EXCHANGE_DUMP=<dir>; empty when
+	 * the variable is not set. The request body is appended at send time, each response chunk as it is
+	 * read, so an exchange's content can be inspected without a network sniffer and without disturbing
+	 * the read the classes make. */
+	char dump_request[280], dump_response[280];
 };
 
-struct exchange *exchange_open(void) { return WINRT_ALLOC(sizeof(struct exchange)); }
+/* Env-gated diagnostic: RAVEN_WEB_REFUSE_HOST=<substring> makes every request whose host contains the
+ * substring fail with WININET_E_CANNOT_CONNECT before any network touch — standing in for the offline
+ * machine. Off unless the variable is set. */
+static BOOL refuse_host(const WCHAR *host)
+{
+	char refuse[256];
+	if (!GetEnvironmentVariableA("RAVEN_WEB_REFUSE_HOST", refuse, sizeof(refuse)))
+		return FALSE;
+	const UINT32 length = lstrlenW(host);
+	for (UINT32 at = 0; at + 1 <= length; ++at) {
+		UINT32 match = 0;
+		while (refuse[match] && host[at + match] && (char)host[at + match] == refuse[match])
+			++match;
+		if (!refuse[match])
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/* Env-gated diagnostic: the dump paths of a new exchange, or two empty strings when RAVEN_WEB_EXCHANGE_DUMP
+ * is not set. */
+static void dump_paths(char *request, char *response)
+{
+	static LONG index;
+	*request = *response = 0;
+	char dir[240];
+	if (!GetEnvironmentVariableA("RAVEN_WEB_EXCHANGE_DUMP", dir, sizeof(dir)) || !*dir)
+		return;
+	const LONG slot = InterlockedIncrement(&index);
+	/* lstrcpyn-style hand assembly of the two paths (no CRT on this link): "<dir>\request-<n>.bin". */
+	const char *leaf[2] = {"\\request-", "\\response-"};
+	char *out[2] = {request, response};
+	for (int at = 0; at < 2; ++at) {
+		char *into = out[at], *end = into + 280;
+		const char *text = dir;
+		while (*text && into < end)
+			*into++ = *text++;
+		text = leaf[at];
+		while (*text && into < end)
+			*into++ = *text++;
+		char number[12], *digit = number + sizeof(number);
+		long value = (long)slot;
+		do {
+			*--digit = (char)('0' + value % 10);
+			value /= 10;
+		} while (value);
+		while (digit < number + sizeof(number) && into < end)
+			*into++ = *digit++;
+		if (into < end)
+			*into++ = '.';
+		if (into < end)
+			*into++ = 'b';
+		if (into < end)
+			*into++ = 'i';
+		if (into < end)
+			*into++ = 'n';
+		if (into < end)
+			*into = 0;
+		else
+			out[at][279] = 0;
+	}
+	OutputDebugStringA("raven-web: exchange dump ");
+	OutputDebugStringA(request);
+	OutputDebugStringA("\n");
+}
+
+/* Env-gated diagnostic: appends bytes to a dump file. */
+static void dump_append(const char *path, const BYTE *bytes, UINT32 length)
+{
+	if (!*path || !length)
+		return;
+	HANDLE file = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE)
+		return;
+	DWORD written;
+	WriteFile(file, bytes, length, &written, NULL);
+	CloseHandle(file);
+}
+
+struct exchange *exchange_open(void)
+{
+	struct exchange *exchange = WINRT_ALLOC(sizeof(struct exchange));
+	if (exchange)
+		dump_paths(exchange->dump_request, exchange->dump_response);
+	return exchange;
+}
 
 void exchange_close(struct exchange *exchange)
 {
@@ -42,6 +132,7 @@ HRESULT exchange_read(struct exchange *exchange, BYTE *into, UINT32 capacity, UI
 		return S_OK;
 	if (!InternetReadFile(exchange->request, into, capacity, &got))
 		return web_error(GetLastError());
+	dump_append(exchange->dump_response, into, got);
 	*read = got;
 	return S_OK;
 }
@@ -241,6 +332,11 @@ HRESULT exchange_send(struct exchange *exchange, const struct transport_settings
 		BOOL decode = TRUE;
 		InternetSetOptionW(exchange->session, INTERNET_OPTION_HTTP_DECODING, &decode, sizeof(decode));
 	}
+	/* Env-gated diagnostic: the refused-host stand-in for an offline machine. */
+	if (SUCCEEDED(result) && refuse_host(host)) {
+		OutputDebugStringA("raven-web: refusing host per RAVEN_WEB_REFUSE_HOST\n");
+		result = web_error(12029 /* WININET_E_CANNOT_CONNECT */);
+	}
 	if (SUCCEEDED(result) && !(exchange->connection = InternetConnectW(exchange->session, host, parts.nPort,
 		parts.dwUserNameLength ? user : NULL, parts.dwPasswordLength ? password : NULL, INTERNET_SERVICE_HTTP, 0, 0)))
 		result = web_error(GetLastError());
@@ -257,6 +353,7 @@ HRESULT exchange_send(struct exchange *exchange, const struct transport_settings
 	}
 	if (SUCCEEDED(result) && head.used && !HttpAddRequestHeadersW(exchange->request, head.text, head.used, HTTP_ADDREQ_FLAG_ADD))
 		result = web_error(GetLastError());
+	dump_append(exchange->dump_request, body, body_length); /* exchange dump (env-gated). */
 	if (SUCCEEDED(result) && !HttpSendRequestW(exchange->request, NULL, 0, body, body_length))
 		result = web_error(GetLastError());
 

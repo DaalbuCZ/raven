@@ -63,6 +63,12 @@ typedef struct {
 	float leading_spacing, trailing_spacing, minimum_advance;
 	InlineSpan *spans;
 	UINT32 span_count;
+	/* IDWriteTextLayout3 and IDWriteTextFormat2/3: the line spacing as its struct names it, and the font axes a format carries. */
+	float spacing_leading_before;
+	UINT32 spacing_gap_usage;
+	UINT32 axis_count;
+	DWRITE_FONT_AXIS_VALUE axis_values[32];
+	DWRITE_AUTOMATIC_FONT_AXES automatic_axes;
 } TextLayout;
 
 #define LAYOUT_OF(self) ((TextLayout *)(self))
@@ -88,10 +94,23 @@ static void free_lines(TextLayout *layout)
 
 static HRESULT STDMETHODCALLTYPE tl_query(IDWriteTextLayout *self, REFIID iid, void **out)
 {
+	/* A layout is a text format, so every interface under both names answers; the derived ones answer only for their own kind,
+	   every one of them through the same combined table the object carries. */
 	if (!out)
 		return E_POINTER;
-	if (same_guid(iid, &IID_IUnknown) || same_guid(iid, &IID_IDWriteTextFormat) || (LAYOUT_OF(self)->is_layout && (same_guid(iid, &IID_IDWriteTextLayout) || same_guid(iid, &IID_IDWriteTextLayout1))) ||
-		(!LAYOUT_OF(self)->is_layout && same_guid(iid, &IID_IDWriteTextFormat1))) {
+	if (same_guid(iid, &IID_IUnknown) || same_guid(iid, &IID_IDWriteTextFormat)) {
+		InterlockedIncrement(&LAYOUT_OF(self)->refs);
+		*out = self;
+		return S_OK;
+	}
+	if (LAYOUT_OF(self)->is_layout && (same_guid(iid, &IID_IDWriteTextLayout) || same_guid(iid, &IID_IDWriteTextLayout1) ||
+		same_guid(iid, &IID_IDWriteTextLayout2) || same_guid(iid, &IID_IDWriteTextLayout3))) {
+		InterlockedIncrement(&LAYOUT_OF(self)->refs);
+		*out = self;
+		return S_OK;
+	}
+	if (!LAYOUT_OF(self)->is_layout && (same_guid(iid, &IID_IDWriteTextFormat1) || same_guid(iid, &IID_IDWriteTextFormat2) ||
+		same_guid(iid, &IID_IDWriteTextFormat3))) {
 		InterlockedIncrement(&LAYOUT_OF(self)->refs);
 		*out = self;
 		return S_OK;
@@ -1079,8 +1098,106 @@ static HRESULT STDMETHODCALLTYPE l1_get_spacing(IDWriteTextLayout *self, UINT32 
 	return S_OK;
 }
 
-static void *Layout_table_[IDWriteTextLayout_methods + 4];
-static void *Format_table_[IDWriteTextFormat_methods + 8];
+/* IDWriteTextLayout2::GetMetrics carries the height the trailing whitespace of the last line adds. */
+static HRESULT STDMETHODCALLTYPE l2_get_metrics(IDWriteTextLayout *self, DWRITE_TEXT_METRICS1 *metrics)
+{
+	HRESULT hr = tl_metrics(self, (DWRITE_TEXT_METRICS *)metrics);
+	if (SUCCEEDED(hr) && metrics)
+		metrics->heightIncludingTrailingWhitespace = metrics->height;
+	return hr;
+}
+
+/* IDWriteTextLayout3 and IDWriteTextFormat2 carry the line spacing as one struct; IDWriteTextFormat3 adds the font axes a
+   format overrides and the automatic axes it lets the library choose. The layout and the format are one object, so the same
+   functions fill both roles. */
+static HRESULT STDMETHODCALLTYPE l3_invalidate(IDWriteTextLayout *self)
+{
+	LAYOUT_OF(self)->dirty = TRUE;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE l3_set_spacing(IDWriteTextLayout *self, const DWRITE_LINE_SPACING *spacing)
+{
+	TextLayout *layout = LAYOUT_OF(self);
+	if (!spacing)
+		return E_POINTER;
+	layout->spacing_method = spacing->method;
+	layout->line_spacing = spacing->height;
+	layout->line_baseline = spacing->baseline;
+	layout->spacing_leading_before = spacing->leadingBefore;
+	layout->spacing_gap_usage = spacing->fontLineGapUsage;
+	layout->dirty = TRUE;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE l3_get_spacing(IDWriteTextLayout *self, DWRITE_LINE_SPACING *spacing)
+{
+	TextLayout *layout = LAYOUT_OF(self);
+	if (!spacing)
+		return E_POINTER;
+	spacing->method = layout->spacing_method;
+	spacing->height = layout->line_spacing;
+	spacing->baseline = layout->line_baseline;
+	spacing->leadingBefore = layout->spacing_leading_before;
+	spacing->fontLineGapUsage = layout->spacing_gap_usage;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE l3_line_metrics(IDWriteTextLayout *self, DWRITE_LINE_METRICS1 *metrics, UINT32 max, UINT32 *count)
+{
+	/* The base metrics fill the struct's head; the leading a uniform line spacing distributes around each line is not tracked
+	   by the layout and answers as none. */
+	HRESULT hr = tl_line_metrics(self, (DWRITE_LINE_METRICS *)metrics, max, count);
+	if (SUCCEEDED(hr) && metrics)
+		for (UINT32 index = 0; index < *count; ++index) {
+			metrics[index].leadingBefore = 0;
+			metrics[index].leadingAfter = 0;
+		}
+	return hr;
+}
+
+/* The font axes a format overrides, up to the registry the projection allows. */
+static HRESULT STDMETHODCALLTYPE f3_set_axis_values(IDWriteTextLayout *self, const DWRITE_FONT_AXIS_VALUE *values, UINT32 count)
+{
+	TextLayout *layout = LAYOUT_OF(self);
+	if (count && !values)
+		return E_POINTER;
+	if (count > 32)
+		return E_INVALIDARG;
+	memcpy(layout->axis_values, values, count * sizeof(DWRITE_FONT_AXIS_VALUE));
+	layout->axis_count = count;
+	return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE f3_get_axis_value_count(IDWriteTextLayout *self)
+{
+	return LAYOUT_OF(self)->axis_count;
+}
+
+static HRESULT STDMETHODCALLTYPE f3_get_axis_values(IDWriteTextLayout *self, DWRITE_FONT_AXIS_VALUE *values, UINT32 count)
+{
+	TextLayout *layout = LAYOUT_OF(self);
+	if (count < layout->axis_count)
+		return E_NOT_SUFFICIENT_BUFFER;
+	if (layout->axis_count && !values)
+		return E_POINTER;
+	memcpy(values, layout->axis_values, layout->axis_count * sizeof(DWRITE_FONT_AXIS_VALUE));
+	return S_OK;
+}
+
+static DWRITE_AUTOMATIC_FONT_AXES STDMETHODCALLTYPE f3_get_automatic(IDWriteTextLayout *self)
+{
+	return LAYOUT_OF(self)->automatic_axes;
+}
+
+static HRESULT STDMETHODCALLTYPE f3_set_automatic(IDWriteTextLayout *self, DWRITE_AUTOMATIC_FONT_AXES axes)
+{
+	LAYOUT_OF(self)->automatic_axes = axes;
+	return S_OK;
+}
+
+static void *Layout_table_[IDWriteTextLayout_methods + 17]; /* + IDWriteTextLayout1's 4, IDWriteTextLayout2's 9, IDWriteTextLayout3's 4. */
+static void *Format_table_[IDWriteTextFormat_methods + 15]; /* + IDWriteTextFormat1's 8, IDWriteTextFormat2's 2, IDWriteTextFormat3's 5. */
 static BOOL text_tables_ready;
 
 static HRESULT STDMETHODCALLTYPE tl_set_inline(IDWriteTextLayout *self, IDWriteInlineObject *object, DWRITE_TEXT_RANGE range)
@@ -1167,8 +1284,20 @@ static void init_text_tables(void)
 		void *const layout1[] = {(void *)l1_set_kerning, (void *)l1_get_kerning, (void *)l1_set_spacing, (void *)l1_get_spacing};
 		void *const format1[] = {(void *)f1_set_vertical, (void *)f1_get_vertical, (void *)f1_set_last_line, (void *)f1_get_last_line,
 			(void *)f1_set_optical, (void *)f1_get_optical, (void *)f1_set_fallback, (void *)f1_get_fallback};
-		memcpy(Layout_table_ + IDWriteTextLayout_methods, layout1, sizeof(layout1));
-		memcpy(Format_table_ + IDWriteTextFormat_methods, format1, sizeof(format1));
+	memcpy(Layout_table_ + IDWriteTextLayout_methods, layout1, sizeof(layout1));
+	memcpy(Format_table_ + IDWriteTextFormat_methods, format1, sizeof(format1));
+	{
+		void *const layout2[] = {(void *)l2_get_metrics, (void *)f1_set_vertical, (void *)f1_get_vertical, (void *)f1_set_last_line,
+			(void *)f1_get_last_line, (void *)f1_set_optical, (void *)f1_get_optical, (void *)f1_set_fallback, (void *)f1_get_fallback};
+		void *const layout3[] = {(void *)l3_invalidate, (void *)l3_set_spacing, (void *)l3_get_spacing, (void *)l3_line_metrics};
+		void *const format2[] = {(void *)l3_set_spacing, (void *)l3_get_spacing};
+		void *const format3[] = {(void *)f3_set_axis_values, (void *)f3_get_axis_value_count, (void *)f3_get_axis_values,
+			(void *)f3_get_automatic, (void *)f3_set_automatic};
+		memcpy(Layout_table_ + IDWriteTextLayout_methods + 4, layout2, sizeof(layout2));
+		memcpy(Layout_table_ + IDWriteTextLayout_methods + 13, layout3, sizeof(layout3));
+		memcpy(Format_table_ + IDWriteTextFormat_methods + 8, format2, sizeof(format2));
+		memcpy(Format_table_ + IDWriteTextFormat_methods + 10, format3, sizeof(format3));
+	}
 	}
 	text_tables_ready = TRUE;
 }

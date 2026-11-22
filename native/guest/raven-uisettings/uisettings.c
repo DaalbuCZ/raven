@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <winstring.h>
 #include <activation.h>
+#include <weakreference.h>
 #include <windows.ui.viewmanagement.h>
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
@@ -31,17 +32,30 @@ typedef __x_ABI_CWindows_CUI_CColor color;
 typedef __x_ABI_CWindows_CFoundation_CSize size;
 typedef EventRegistrationToken token;
 
+static const WCHAR accessibility_class[] = L"Windows.UI.ViewManagement.AccessibilitySettings";
 static const WCHAR class_name[] = L"Windows.UI.ViewManagement.UISettings";
 static LONG objects, tokens;
 
+struct settings;
+struct weak_target { LONG refs, lock; struct settings *owner; };
+struct settings_weak_source { IWeakReferenceSource iface; struct settings *owner; };
+struct settings_weak_ref { IWeakReference iface; LONG refs; struct weak_target *target; };
+static void weak_lock(struct weak_target *target) { while (InterlockedCompareExchange(&target->lock, 1, 0)) Sleep(0); }
+static void weak_unlock(struct weak_target *target) { InterlockedExchange(&target->lock, 0); }
+static void weak_target_release(struct weak_target *target) { if (!InterlockedDecrement(&target->refs)) FREE(target); }
+
 /* One object answers all six interfaces, each through its own table at its own place in the object. */
 struct settings {
+	__x_ABI_CWindows_CUI_CViewManagement_CIAccessibilitySettings accessibility;
+	BOOL is_accessibility;
 	settings1 one;
 	settings2 two;
 	settings3 three;
 	settings4 four;
 	settings5 five;
 	settings6 six;
+	struct settings_weak_source weak;
+	struct weak_target *target;
 	LONG refs;
 };
 
@@ -51,9 +65,18 @@ static HRESULT settings_query(struct settings *self, REFIID iid, void **out)
 {
 	if (!out)
 		return E_POINTER;
+	if (self->is_accessibility) {
+		if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject) ||
+			IsEqualIID(iid, &IID___x_ABI_CWindows_CUI_CViewManagement_CIAccessibilitySettings)) *out = &self->accessibility;
+		else if (IsEqualIID(iid, &IID_IWeakReferenceSource)) *out = &self->weak.iface;
+		else { *out = NULL; return E_NOINTERFACE; }
+		InterlockedIncrement(&self->refs); return S_OK;
+	}
 	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject) ||
 		IsEqualIID(iid, &IID___x_ABI_CWindows_CUI_CViewManagement_CIUISettings))
 		*out = &self->one;
+	else if (IsEqualIID(iid, &IID_IWeakReferenceSource))
+		*out = &self->weak.iface;
 	else if (IsEqualIID(iid, &IID___x_ABI_CWindows_CUI_CViewManagement_CIUISettings2))
 		*out = &self->two;
 	else if (IsEqualIID(iid, &IID___x_ABI_CWindows_CUI_CViewManagement_CIUISettings3))
@@ -74,13 +97,57 @@ static HRESULT settings_query(struct settings *self, REFIID iid, void **out)
 
 static ULONG settings_release(struct settings *self)
 {
-	const LONG refs = InterlockedDecrement(&self->refs);
-	if (!refs) {
-		FREE(self);
-		InterlockedDecrement(&objects);
-	}
-	return (ULONG)refs;
+ struct weak_target *target = self->target;
+ weak_lock(target);
+ LONG refs = InterlockedDecrement(&self->refs);
+ if (!refs) target->owner = NULL;
+ weak_unlock(target);
+ if (!refs) { FREE(self); weak_target_release(target); InterlockedDecrement(&objects); }
+ return (ULONG)refs;
 }
+
+static HRESULT WINAPI weak_source_query(IWeakReferenceSource *iface, REFIID iid, void **out)
+{ return settings_query(((struct settings_weak_source *)iface)->owner, iid, out); }
+static ULONG WINAPI weak_source_addref(IWeakReferenceSource *iface)
+{ return InterlockedIncrement(&((struct settings_weak_source *)iface)->owner->refs); }
+static ULONG WINAPI weak_source_release(IWeakReferenceSource *iface)
+{ return settings_release(((struct settings_weak_source *)iface)->owner); }
+static HRESULT WINAPI weak_ref_query(IWeakReference *iface, REFIID iid, void **out)
+{
+ if (!out) return E_POINTER;
+ *out = NULL;
+ if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IWeakReference)) return E_NOINTERFACE;
+ *out = iface; InterlockedIncrement(&((struct settings_weak_ref *)iface)->refs); return S_OK;
+}
+static ULONG WINAPI weak_ref_addref(IWeakReference *iface)
+{ return InterlockedIncrement(&((struct settings_weak_ref *)iface)->refs); }
+static ULONG WINAPI weak_ref_release(IWeakReference *iface)
+{
+ struct settings_weak_ref *ref = (struct settings_weak_ref *)iface;
+ LONG refs = InterlockedDecrement(&ref->refs);
+ if (!refs) { weak_target_release(ref->target); FREE(ref); } return refs;
+}
+static HRESULT WINAPI weak_ref_resolve(IWeakReference *iface, REFIID iid, IInspectable **out)
+{
+ struct weak_target *target = ((struct settings_weak_ref *)iface)->target;
+ if (!out) return E_POINTER;
+ *out = NULL;
+ weak_lock(target);
+ HRESULT hr = target->owner ? settings_query(target->owner, iid, (void **)out) : S_OK;
+ weak_unlock(target); return hr;
+}
+static const IWeakReferenceVtbl weak_ref_table = {weak_ref_query, weak_ref_addref, weak_ref_release, weak_ref_resolve};
+static HRESULT WINAPI weak_source_get(IWeakReferenceSource *iface, IWeakReference **out)
+{
+ if (!out) return E_POINTER;
+ *out = NULL;
+ struct settings_weak_ref *ref = ALLOC(sizeof *ref);
+ if (!ref) return E_OUTOFMEMORY;
+ ref->iface.lpVtbl = (IWeakReferenceVtbl *)&weak_ref_table; ref->refs = 1;
+ ref->target = ((struct settings_weak_source *)iface)->owner->target;
+ InterlockedIncrement(&ref->target->refs); *out = &ref->iface; return S_OK;
+}
+static const IWeakReferenceSourceVtbl weak_source_table = {weak_source_query, weak_source_addref, weak_source_release, weak_source_get};
 
 static HRESULT inspectable_iids(ULONG *count, IID **iids)
 {
@@ -267,6 +334,22 @@ static const __x_ABI_CWindows_CUI_CViewManagement_CIUISettings5Vtbl five_table =
 static const __x_ABI_CWindows_CUI_CViewManagement_CIUISettings6Vtbl six_table = {six_query, six_reference, six_release, six_iids, six_name,
 	six_trust, (void *)six_add, (void *)remove_handler, (void *)six_add, (void *)remove_handler};
 
+typedef __x_ABI_CWindows_CUI_CViewManagement_CIAccessibilitySettings access_iface;
+static HRESULT WINAPI access_query(access_iface *iface, REFIID iid, void **out) { return settings_query(SETTINGS(iface, accessibility), iid, out); }
+static ULONG WINAPI access_addref(access_iface *iface) { return InterlockedIncrement(&SETTINGS(iface, accessibility)->refs); }
+static ULONG WINAPI access_release(access_iface *iface) { return settings_release(SETTINGS(iface, accessibility)); }
+static HRESULT WINAPI access_iids(access_iface *iface, ULONG *count, IID **iids) { return inspectable_iids(count, iids); }
+static HRESULT WINAPI access_name(access_iface *iface, HSTRING *name) { return WindowsCreateString(accessibility_class, ARRAYSIZE(accessibility_class)-1, name); }
+static HRESULT WINAPI access_trust(access_iface *iface, TrustLevel *level) { return inspectable_trust(level); }
+/* shortcut: high contrast follows the fixed light desktop until system theme observation is implemented. */
+static HRESULT WINAPI access_contrast(access_iface *iface, boolean *out) { return answer_flag(out, FALSE); }
+static HRESULT WINAPI access_scheme(access_iface *iface, HSTRING *out) { if (!out) return E_POINTER; *out = NULL; return S_OK; }
+static HRESULT WINAPI access_add(access_iface *iface, void *handler, token *out) { return add_handler(handler, out); }
+static const __x_ABI_CWindows_CUI_CViewManagement_CIAccessibilitySettingsVtbl access_table = {
+ access_query, access_addref, access_release, access_iids, access_name, access_trust,
+ access_contrast, access_scheme, (void *)access_add, (void *)remove_handler
+};
+
 /* The activation factory of the class: each activation makes a new settings object. */
 static HRESULT WINAPI factory_query(IActivationFactory *iface, REFIID iid, void **out)
 {
@@ -287,7 +370,7 @@ static HRESULT WINAPI factory_iids(IActivationFactory *iface, ULONG *count, IID 
 static HRESULT WINAPI factory_name(IActivationFactory *iface, HSTRING *name) { return inspectable_name(name); }
 static HRESULT WINAPI factory_trust(IActivationFactory *iface, TrustLevel *level) { return inspectable_trust(level); }
 
-static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable **out)
+static HRESULT settings_activate(BOOL accessibility, IInspectable **out)
 {
 	struct settings *self;
 	if (!out)
@@ -295,7 +378,13 @@ static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable *
 	*out = NULL;
 	if (!(self = ALLOC(sizeof *self)))
 		return E_OUTOFMEMORY;
-	self->one.lpVtbl = (__x_ABI_CWindows_CUI_CViewManagement_CIUISettingsVtbl *)&one_table;
+	self->target = ALLOC(sizeof *self->target);
+ if (!self->target) { FREE(self); return E_OUTOFMEMORY; }
+ self->target->refs = 1; self->target->owner = self;
+ self->weak.iface.lpVtbl = (IWeakReferenceSourceVtbl *)&weak_source_table; self->weak.owner = self;
+ self->is_accessibility = accessibility;
+ self->accessibility.lpVtbl = (__x_ABI_CWindows_CUI_CViewManagement_CIAccessibilitySettingsVtbl *)&access_table;
+ self->one.lpVtbl = (__x_ABI_CWindows_CUI_CViewManagement_CIUISettingsVtbl *)&one_table;
 	self->two.lpVtbl = (__x_ABI_CWindows_CUI_CViewManagement_CIUISettings2Vtbl *)&two_table;
 	self->three.lpVtbl = (__x_ABI_CWindows_CUI_CViewManagement_CIUISettings3Vtbl *)&three_table;
 	self->four.lpVtbl = (__x_ABI_CWindows_CUI_CViewManagement_CIUISettings4Vtbl *)&four_table;
@@ -303,13 +392,19 @@ static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable *
 	self->six.lpVtbl = (__x_ABI_CWindows_CUI_CViewManagement_CIUISettings6Vtbl *)&six_table;
 	self->refs = 1;
 	InterlockedIncrement(&objects);
-	*out = (IInspectable *)&self->one;
+	*out = accessibility ? (IInspectable *)&self->accessibility : (IInspectable *)&self->one;
 	return S_OK;
 }
+static HRESULT WINAPI factory_activate(IActivationFactory *iface, IInspectable **out) { return settings_activate(FALSE, out); }
+static HRESULT WINAPI access_factory_activate(IActivationFactory *iface, IInspectable **out) { return settings_activate(TRUE, out); }
 
 static IActivationFactoryVtbl factory_table = {factory_query, factory_reference, factory_release, factory_iids, factory_name, factory_trust,
 	factory_activate};
 static IActivationFactory factory = {&factory_table};
+static HRESULT WINAPI access_factory_name(IActivationFactory *iface, HSTRING *name)
+{ return name ? WindowsCreateString(accessibility_class, ARRAYSIZE(accessibility_class)-1, name) : E_POINTER; }
+static IActivationFactoryVtbl access_factory_table = {factory_query, factory_reference, factory_release, factory_iids, access_factory_name, factory_trust, access_factory_activate};
+static IActivationFactory access_factory = {&access_factory_table};
 
 __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActivationFactory **out)
 {
@@ -318,9 +413,11 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 		return E_POINTER;
 	*out = NULL;
 	const WCHAR *text = WindowsGetStringRawBuffer(name, &length);
-	if (length != ARRAYSIZE(class_name) - 1 || CompareStringOrdinal(text, (int)length, class_name, -1, FALSE) != CSTR_EQUAL)
-		return CLASS_E_CLASSNOTAVAILABLE;
-	*out = &factory;
+	if (length == ARRAYSIZE(class_name) - 1 && CompareStringOrdinal(text, (int)length, class_name, -1, FALSE) == CSTR_EQUAL)
+		*out = &factory;
+	else if (length == ARRAYSIZE(accessibility_class) - 1 && CompareStringOrdinal(text, (int)length, accessibility_class, -1, FALSE) == CSTR_EQUAL)
+		*out = &access_factory;
+	else return CLASS_E_CLASSNOTAVAILABLE;
 	return S_OK;
 }
 

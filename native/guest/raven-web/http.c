@@ -1096,6 +1096,23 @@ static const __x_ABI_CWindows_CWeb_CHttp_CIHttpRequestMessageFactoryVtbl request
 static const __x_ABI_CWindows_CWeb_CHttp_CIHttpResponseMessageFactoryVtbl response_factory_table = {WINRT_INSPECTABLE,
 	(void *)response_factory_create};
 
+/* HttpBufferContent: the content a caller builds a request body with. */
+static HRESULT STDMETHODCALLTYPE buffer_content_factory_from_buffer(void *iface, buffer_class *buffer, http_content **out)
+{
+	(void)iface;
+	return buffer_content_new(buffer, 0, ~0u, out);
+}
+
+static HRESULT STDMETHODCALLTYPE buffer_content_factory_from_slice(void *iface, buffer_class *buffer, UINT32 offset, UINT32 count,
+	http_content **out)
+{
+	(void)iface;
+	return buffer_content_new(buffer, offset, count, out);
+}
+
+static const __x_ABI_CWindows_CWeb_CHttp_CIHttpBufferContentFactoryVtbl buffer_content_factory_table = {WINRT_INSPECTABLE,
+	(void *)buffer_content_factory_from_buffer, (void *)buffer_content_factory_from_slice};
+
 static const struct winrt_entry factory_entries[] = {
 	WINRT_ENTRY(struct factory, activation, IID_IActivationFactory), WINRT_ENTRY(struct factory, first, WINRT_OWN),
 	WINRT_ENTRY(struct factory, second, WINRT_OWN_2), WINRT_END};
@@ -1113,7 +1130,9 @@ static const struct {
 	{L"Windows.Web.Http.HttpRequestMessage", activate_request, &IID___x_ABI_CWindows_CWeb_CHttp_CIHttpRequestMessageFactory, NULL,
 		&request_factory_table},
 	{L"Windows.Web.Http.HttpResponseMessage", activate_response, &IID___x_ABI_CWindows_CWeb_CHttp_CIHttpResponseMessageFactory, NULL,
-		&response_factory_table}};
+		&response_factory_table},
+	{L"Windows.Web.Http.HttpBufferContent", NULL, &IID___x_ABI_CWindows_CWeb_CHttp_CIHttpBufferContentFactory, NULL,
+		&buffer_content_factory_table}};
 
 static struct winrt_class factory_kinds[ARRAYSIZE(classes)];
 

@@ -2485,3 +2485,397 @@ static void *ID2D1GeometryRealization_table[4] = {
 	(void *)ID2D1GeometryRealization_stub_2,
 	(void *)ID2D1GeometryRealization_stub_3,
 };
+
+
+
+/* ---- the SVG document model: the interfaces behind CanvasSvgDocument (d2d1svg.h) ---- */
+
+enum {
+	ID2D1SvgDocument_QueryInterface_slot = 0,
+	ID2D1SvgDocument_AddRef_slot = 1,
+	ID2D1SvgDocument_Release_slot = 2,
+	ID2D1SvgDocument_GetFactory_slot = 3,
+	ID2D1SvgDocument_SetViewportSize_slot = 4,
+	ID2D1SvgDocument_GetViewportSize_slot = 5,
+	ID2D1SvgDocument_SetRoot_slot = 6,
+	ID2D1SvgDocument_GetRoot_slot = 7,
+	ID2D1SvgDocument_FindElementById_slot = 8,
+	ID2D1SvgDocument_Serialize_slot = 9,
+	ID2D1SvgDocument_Deserialize_slot = 10,
+	ID2D1SvgDocument_CreatePaint_slot = 11,
+	ID2D1SvgDocument_CreateStrokeDashArray_slot = 12,
+	ID2D1SvgDocument_CreatePointCollection_slot = 13,
+	ID2D1SvgDocument_CreatePathData_slot = 14,
+	ID2D1SvgDocument_methods = 15
+};
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_0(void *self) { return unimplemented("ID2D1SvgDocument", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_1(void *self) { return unimplemented("ID2D1SvgDocument", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_2(void *self) { return unimplemented("ID2D1SvgDocument", "Release"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_3(void *self) { return unimplemented("ID2D1SvgDocument", "GetFactory"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_4(void *self) { return unimplemented("ID2D1SvgDocument", "SetViewportSize"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_5(void *self) { return unimplemented("ID2D1SvgDocument", "GetViewportSize"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_6(void *self) { return unimplemented("ID2D1SvgDocument", "SetRoot"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_7(void *self) { return unimplemented("ID2D1SvgDocument", "GetRoot"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_8(void *self) { return unimplemented("ID2D1SvgDocument", "FindElementById"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_9(void *self) { return unimplemented("ID2D1SvgDocument", "Serialize"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_10(void *self) { return unimplemented("ID2D1SvgDocument", "Deserialize"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_11(void *self) { return unimplemented("ID2D1SvgDocument", "CreatePaint"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_12(void *self) { return unimplemented("ID2D1SvgDocument", "CreateStrokeDashArray"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_13(void *self) { return unimplemented("ID2D1SvgDocument", "CreatePointCollection"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgDocument_stub_14(void *self) { return unimplemented("ID2D1SvgDocument", "CreatePathData"); }
+static void *ID2D1SvgDocument_table[15] = {
+	(void *)ID2D1SvgDocument_stub_0,
+	(void *)ID2D1SvgDocument_stub_1,
+	(void *)ID2D1SvgDocument_stub_2,
+	(void *)ID2D1SvgDocument_stub_3,
+	(void *)ID2D1SvgDocument_stub_4,
+	(void *)ID2D1SvgDocument_stub_5,
+	(void *)ID2D1SvgDocument_stub_6,
+	(void *)ID2D1SvgDocument_stub_7,
+	(void *)ID2D1SvgDocument_stub_8,
+	(void *)ID2D1SvgDocument_stub_9,
+	(void *)ID2D1SvgDocument_stub_10,
+	(void *)ID2D1SvgDocument_stub_11,
+	(void *)ID2D1SvgDocument_stub_12,
+	(void *)ID2D1SvgDocument_stub_13,
+	(void *)ID2D1SvgDocument_stub_14,
+};
+
+enum {
+	ID2D1SvgElement_QueryInterface_slot = 0,
+	ID2D1SvgElement_AddRef_slot = 1,
+	ID2D1SvgElement_Release_slot = 2,
+	ID2D1SvgElement_GetFactory_slot = 3,
+	ID2D1SvgElement_GetDocument_slot = 4,
+	ID2D1SvgElement_GetTagName_slot = 5,
+	ID2D1SvgElement_GetTagNameLength_slot = 6,
+	ID2D1SvgElement_IsTextContent_slot = 7,
+	ID2D1SvgElement_GetParent_slot = 8,
+	ID2D1SvgElement_HasChildren_slot = 9,
+	ID2D1SvgElement_GetFirstChild_slot = 10,
+	ID2D1SvgElement_GetLastChild_slot = 11,
+	ID2D1SvgElement_GetPreviousChild_slot = 12,
+	ID2D1SvgElement_GetNextChild_slot = 13,
+	ID2D1SvgElement_InsertChildBefore_slot = 14,
+	ID2D1SvgElement_AppendChild_slot = 15,
+	ID2D1SvgElement_ReplaceChild_slot = 16,
+	ID2D1SvgElement_RemoveChild_slot = 17,
+	ID2D1SvgElement_CreateChild_slot = 18,
+	ID2D1SvgElement_IsAttributeSpecified_slot = 19,
+	ID2D1SvgElement_GetSpecifiedAttributeCount_slot = 20,
+	ID2D1SvgElement_GetSpecifiedAttributeName_slot = 21,
+	ID2D1SvgElement_GetSpecifiedAttributeNameLength_slot = 22,
+	ID2D1SvgElement_RemoveAttribute_slot = 23,
+	ID2D1SvgElement_SetTextValue_slot = 24,
+	ID2D1SvgElement_GetTextValue_slot = 25,
+	ID2D1SvgElement_GetTextValueLength_slot = 26,
+	ID2D1SvgElement_SetAttributeValue_slot = 27,
+	ID2D1SvgElement_GetAttributeValue_slot = 28,
+	ID2D1SvgElement_GetAttributeValueLength_slot = 29,
+	ID2D1SvgElement_SetAttributeValue_1_slot = 30,
+	ID2D1SvgElement_GetAttributeValue_1_slot = 31,
+	ID2D1SvgElement_SetAttributeValue_1_1_slot = 32,
+	ID2D1SvgElement_GetAttributeValue_1_1_slot = 33,
+	ID2D1SvgElement_methods = 34
+};
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_0(void *self) { return unimplemented("ID2D1SvgElement", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_1(void *self) { return unimplemented("ID2D1SvgElement", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_2(void *self) { return unimplemented("ID2D1SvgElement", "Release"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_3(void *self) { return unimplemented("ID2D1SvgElement", "GetFactory"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_4(void *self) { return unimplemented("ID2D1SvgElement", "GetDocument"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_5(void *self) { return unimplemented("ID2D1SvgElement", "GetTagName"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_6(void *self) { return unimplemented("ID2D1SvgElement", "GetTagNameLength"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_7(void *self) { return unimplemented("ID2D1SvgElement", "IsTextContent"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_8(void *self) { return unimplemented("ID2D1SvgElement", "GetParent"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_9(void *self) { return unimplemented("ID2D1SvgElement", "HasChildren"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_10(void *self) { return unimplemented("ID2D1SvgElement", "GetFirstChild"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_11(void *self) { return unimplemented("ID2D1SvgElement", "GetLastChild"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_12(void *self) { return unimplemented("ID2D1SvgElement", "GetPreviousChild"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_13(void *self) { return unimplemented("ID2D1SvgElement", "GetNextChild"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_14(void *self) { return unimplemented("ID2D1SvgElement", "InsertChildBefore"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_15(void *self) { return unimplemented("ID2D1SvgElement", "AppendChild"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_16(void *self) { return unimplemented("ID2D1SvgElement", "ReplaceChild"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_17(void *self) { return unimplemented("ID2D1SvgElement", "RemoveChild"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_18(void *self) { return unimplemented("ID2D1SvgElement", "CreateChild"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_19(void *self) { return unimplemented("ID2D1SvgElement", "IsAttributeSpecified"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_20(void *self) { return unimplemented("ID2D1SvgElement", "GetSpecifiedAttributeCount"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_21(void *self) { return unimplemented("ID2D1SvgElement", "GetSpecifiedAttributeName"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_22(void *self) { return unimplemented("ID2D1SvgElement", "GetSpecifiedAttributeNameLength"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_23(void *self) { return unimplemented("ID2D1SvgElement", "RemoveAttribute"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_24(void *self) { return unimplemented("ID2D1SvgElement", "SetTextValue"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_25(void *self) { return unimplemented("ID2D1SvgElement", "GetTextValue"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_26(void *self) { return unimplemented("ID2D1SvgElement", "GetTextValueLength"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_27(void *self) { return unimplemented("ID2D1SvgElement", "SetAttributeValue"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_28(void *self) { return unimplemented("ID2D1SvgElement", "GetAttributeValue"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_29(void *self) { return unimplemented("ID2D1SvgElement", "GetAttributeValueLength"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_30(void *self) { return unimplemented("ID2D1SvgElement", "SetAttributeValue_1"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_31(void *self) { return unimplemented("ID2D1SvgElement", "GetAttributeValue_1"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_32(void *self) { return unimplemented("ID2D1SvgElement", "SetAttributeValue_1_1"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgElement_stub_33(void *self) { return unimplemented("ID2D1SvgElement", "GetAttributeValue_1_1"); }
+static void *ID2D1SvgElement_table[34] = {
+	(void *)ID2D1SvgElement_stub_0,
+	(void *)ID2D1SvgElement_stub_1,
+	(void *)ID2D1SvgElement_stub_2,
+	(void *)ID2D1SvgElement_stub_3,
+	(void *)ID2D1SvgElement_stub_4,
+	(void *)ID2D1SvgElement_stub_5,
+	(void *)ID2D1SvgElement_stub_6,
+	(void *)ID2D1SvgElement_stub_7,
+	(void *)ID2D1SvgElement_stub_8,
+	(void *)ID2D1SvgElement_stub_9,
+	(void *)ID2D1SvgElement_stub_10,
+	(void *)ID2D1SvgElement_stub_11,
+	(void *)ID2D1SvgElement_stub_12,
+	(void *)ID2D1SvgElement_stub_13,
+	(void *)ID2D1SvgElement_stub_14,
+	(void *)ID2D1SvgElement_stub_15,
+	(void *)ID2D1SvgElement_stub_16,
+	(void *)ID2D1SvgElement_stub_17,
+	(void *)ID2D1SvgElement_stub_18,
+	(void *)ID2D1SvgElement_stub_19,
+	(void *)ID2D1SvgElement_stub_20,
+	(void *)ID2D1SvgElement_stub_21,
+	(void *)ID2D1SvgElement_stub_22,
+	(void *)ID2D1SvgElement_stub_23,
+	(void *)ID2D1SvgElement_stub_24,
+	(void *)ID2D1SvgElement_stub_25,
+	(void *)ID2D1SvgElement_stub_26,
+	(void *)ID2D1SvgElement_stub_27,
+	(void *)ID2D1SvgElement_stub_28,
+	(void *)ID2D1SvgElement_stub_29,
+	(void *)ID2D1SvgElement_stub_30,
+	(void *)ID2D1SvgElement_stub_31,
+	(void *)ID2D1SvgElement_stub_32,
+	(void *)ID2D1SvgElement_stub_33,
+};
+
+enum {
+	ID2D1SvgAttribute_QueryInterface_slot = 0,
+	ID2D1SvgAttribute_AddRef_slot = 1,
+	ID2D1SvgAttribute_Release_slot = 2,
+	ID2D1SvgAttribute_GetFactory_slot = 3,
+	ID2D1SvgAttribute_GetElement_slot = 4,
+	ID2D1SvgAttribute_Clone_slot = 5,
+	ID2D1SvgAttribute_methods = 6
+};
+static HRESULT STDMETHODCALLTYPE ID2D1SvgAttribute_stub_0(void *self) { return unimplemented("ID2D1SvgAttribute", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgAttribute_stub_1(void *self) { return unimplemented("ID2D1SvgAttribute", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgAttribute_stub_2(void *self) { return unimplemented("ID2D1SvgAttribute", "Release"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgAttribute_stub_3(void *self) { return unimplemented("ID2D1SvgAttribute", "GetFactory"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgAttribute_stub_4(void *self) { return unimplemented("ID2D1SvgAttribute", "GetElement"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgAttribute_stub_5(void *self) { return unimplemented("ID2D1SvgAttribute", "Clone"); }
+static void *ID2D1SvgAttribute_table[6] = {
+	(void *)ID2D1SvgAttribute_stub_0,
+	(void *)ID2D1SvgAttribute_stub_1,
+	(void *)ID2D1SvgAttribute_stub_2,
+	(void *)ID2D1SvgAttribute_stub_3,
+	(void *)ID2D1SvgAttribute_stub_4,
+	(void *)ID2D1SvgAttribute_stub_5,
+};
+
+enum {
+	ID2D1SvgPaint_QueryInterface_slot = 0,
+	ID2D1SvgPaint_AddRef_slot = 1,
+	ID2D1SvgPaint_Release_slot = 2,
+	ID2D1SvgPaint_GetFactory_slot = 3,
+	ID2D1SvgPaint_GetElement_slot = 4,
+	ID2D1SvgPaint_Clone_slot = 5,
+	ID2D1SvgPaint_SetPaintType_slot = 6,
+	ID2D1SvgPaint_GetPaintType_slot = 7,
+	ID2D1SvgPaint_SetColor_slot = 8,
+	ID2D1SvgPaint_GetColor_slot = 9,
+	ID2D1SvgPaint_SetId_slot = 10,
+	ID2D1SvgPaint_GetId_slot = 11,
+	ID2D1SvgPaint_GetIdLength_slot = 12,
+	ID2D1SvgPaint_methods = 13
+};
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_0(void *self) { return unimplemented("ID2D1SvgPaint", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_1(void *self) { return unimplemented("ID2D1SvgPaint", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_2(void *self) { return unimplemented("ID2D1SvgPaint", "Release"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_3(void *self) { return unimplemented("ID2D1SvgPaint", "GetFactory"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_4(void *self) { return unimplemented("ID2D1SvgPaint", "GetElement"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_5(void *self) { return unimplemented("ID2D1SvgPaint", "Clone"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_6(void *self) { return unimplemented("ID2D1SvgPaint", "SetPaintType"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_7(void *self) { return unimplemented("ID2D1SvgPaint", "GetPaintType"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_8(void *self) { return unimplemented("ID2D1SvgPaint", "SetColor"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_9(void *self) { return unimplemented("ID2D1SvgPaint", "GetColor"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_10(void *self) { return unimplemented("ID2D1SvgPaint", "SetId"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_11(void *self) { return unimplemented("ID2D1SvgPaint", "GetId"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPaint_stub_12(void *self) { return unimplemented("ID2D1SvgPaint", "GetIdLength"); }
+static void *ID2D1SvgPaint_table[13] = {
+	(void *)ID2D1SvgPaint_stub_0,
+	(void *)ID2D1SvgPaint_stub_1,
+	(void *)ID2D1SvgPaint_stub_2,
+	(void *)ID2D1SvgPaint_stub_3,
+	(void *)ID2D1SvgPaint_stub_4,
+	(void *)ID2D1SvgPaint_stub_5,
+	(void *)ID2D1SvgPaint_stub_6,
+	(void *)ID2D1SvgPaint_stub_7,
+	(void *)ID2D1SvgPaint_stub_8,
+	(void *)ID2D1SvgPaint_stub_9,
+	(void *)ID2D1SvgPaint_stub_10,
+	(void *)ID2D1SvgPaint_stub_11,
+	(void *)ID2D1SvgPaint_stub_12,
+};
+
+enum {
+	ID2D1SvgStrokeDashArray_QueryInterface_slot = 0,
+	ID2D1SvgStrokeDashArray_AddRef_slot = 1,
+	ID2D1SvgStrokeDashArray_Release_slot = 2,
+	ID2D1SvgStrokeDashArray_GetFactory_slot = 3,
+	ID2D1SvgStrokeDashArray_GetElement_slot = 4,
+	ID2D1SvgStrokeDashArray_Clone_slot = 5,
+	ID2D1SvgStrokeDashArray_RemoveDashesAtEnd_slot = 6,
+	ID2D1SvgStrokeDashArray_UpdateDashes_slot = 7,
+	ID2D1SvgStrokeDashArray_UpdateDashes_1_slot = 8,
+	ID2D1SvgStrokeDashArray_GetDashes_slot = 9,
+	ID2D1SvgStrokeDashArray_GetDashes_1_slot = 10,
+	ID2D1SvgStrokeDashArray_GetDashesCount_slot = 11,
+	ID2D1SvgStrokeDashArray_methods = 12
+};
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_0(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_1(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_2(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "Release"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_3(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "GetFactory"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_4(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "GetElement"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_5(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "Clone"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_6(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "RemoveDashesAtEnd"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_7(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "UpdateDashes"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_8(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "UpdateDashes_1"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_9(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "GetDashes"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_10(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "GetDashes_1"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgStrokeDashArray_stub_11(void *self) { return unimplemented("ID2D1SvgStrokeDashArray", "GetDashesCount"); }
+static void *ID2D1SvgStrokeDashArray_table[12] = {
+	(void *)ID2D1SvgStrokeDashArray_stub_0,
+	(void *)ID2D1SvgStrokeDashArray_stub_1,
+	(void *)ID2D1SvgStrokeDashArray_stub_2,
+	(void *)ID2D1SvgStrokeDashArray_stub_3,
+	(void *)ID2D1SvgStrokeDashArray_stub_4,
+	(void *)ID2D1SvgStrokeDashArray_stub_5,
+	(void *)ID2D1SvgStrokeDashArray_stub_6,
+	(void *)ID2D1SvgStrokeDashArray_stub_7,
+	(void *)ID2D1SvgStrokeDashArray_stub_8,
+	(void *)ID2D1SvgStrokeDashArray_stub_9,
+	(void *)ID2D1SvgStrokeDashArray_stub_10,
+	(void *)ID2D1SvgStrokeDashArray_stub_11,
+};
+
+enum {
+	ID2D1SvgPointCollection_QueryInterface_slot = 0,
+	ID2D1SvgPointCollection_AddRef_slot = 1,
+	ID2D1SvgPointCollection_Release_slot = 2,
+	ID2D1SvgPointCollection_GetFactory_slot = 3,
+	ID2D1SvgPointCollection_GetElement_slot = 4,
+	ID2D1SvgPointCollection_Clone_slot = 5,
+	ID2D1SvgPointCollection_RemovePointsAtEnd_slot = 6,
+	ID2D1SvgPointCollection_UpdatePoints_slot = 7,
+	ID2D1SvgPointCollection_GetPoints_slot = 8,
+	ID2D1SvgPointCollection_GetPointsCount_slot = 9,
+	ID2D1SvgPointCollection_methods = 10
+};
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_0(void *self) { return unimplemented("ID2D1SvgPointCollection", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_1(void *self) { return unimplemented("ID2D1SvgPointCollection", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_2(void *self) { return unimplemented("ID2D1SvgPointCollection", "Release"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_3(void *self) { return unimplemented("ID2D1SvgPointCollection", "GetFactory"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_4(void *self) { return unimplemented("ID2D1SvgPointCollection", "GetElement"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_5(void *self) { return unimplemented("ID2D1SvgPointCollection", "Clone"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_6(void *self) { return unimplemented("ID2D1SvgPointCollection", "RemovePointsAtEnd"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_7(void *self) { return unimplemented("ID2D1SvgPointCollection", "UpdatePoints"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_8(void *self) { return unimplemented("ID2D1SvgPointCollection", "GetPoints"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPointCollection_stub_9(void *self) { return unimplemented("ID2D1SvgPointCollection", "GetPointsCount"); }
+static void *ID2D1SvgPointCollection_table[10] = {
+	(void *)ID2D1SvgPointCollection_stub_0,
+	(void *)ID2D1SvgPointCollection_stub_1,
+	(void *)ID2D1SvgPointCollection_stub_2,
+	(void *)ID2D1SvgPointCollection_stub_3,
+	(void *)ID2D1SvgPointCollection_stub_4,
+	(void *)ID2D1SvgPointCollection_stub_5,
+	(void *)ID2D1SvgPointCollection_stub_6,
+	(void *)ID2D1SvgPointCollection_stub_7,
+	(void *)ID2D1SvgPointCollection_stub_8,
+	(void *)ID2D1SvgPointCollection_stub_9,
+};
+
+enum {
+	ID2D1SvgPathData_QueryInterface_slot = 0,
+	ID2D1SvgPathData_AddRef_slot = 1,
+	ID2D1SvgPathData_Release_slot = 2,
+	ID2D1SvgPathData_GetFactory_slot = 3,
+	ID2D1SvgPathData_GetElement_slot = 4,
+	ID2D1SvgPathData_Clone_slot = 5,
+	ID2D1SvgPathData_RemoveSegmentDataAtEnd_slot = 6,
+	ID2D1SvgPathData_UpdateSegmentData_slot = 7,
+	ID2D1SvgPathData_GetSegmentData_slot = 8,
+	ID2D1SvgPathData_GetSegmentDataCount_slot = 9,
+	ID2D1SvgPathData_RemoveCommandsAtEnd_slot = 10,
+	ID2D1SvgPathData_UpdateCommands_slot = 11,
+	ID2D1SvgPathData_GetCommands_slot = 12,
+	ID2D1SvgPathData_GetCommandsCount_slot = 13,
+	ID2D1SvgPathData_CreatePathGeometry_slot = 14,
+	ID2D1SvgPathData_methods = 15
+};
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_0(void *self) { return unimplemented("ID2D1SvgPathData", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_1(void *self) { return unimplemented("ID2D1SvgPathData", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_2(void *self) { return unimplemented("ID2D1SvgPathData", "Release"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_3(void *self) { return unimplemented("ID2D1SvgPathData", "GetFactory"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_4(void *self) { return unimplemented("ID2D1SvgPathData", "GetElement"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_5(void *self) { return unimplemented("ID2D1SvgPathData", "Clone"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_6(void *self) { return unimplemented("ID2D1SvgPathData", "RemoveSegmentDataAtEnd"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_7(void *self) { return unimplemented("ID2D1SvgPathData", "UpdateSegmentData"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_8(void *self) { return unimplemented("ID2D1SvgPathData", "GetSegmentData"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_9(void *self) { return unimplemented("ID2D1SvgPathData", "GetSegmentDataCount"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_10(void *self) { return unimplemented("ID2D1SvgPathData", "RemoveCommandsAtEnd"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_11(void *self) { return unimplemented("ID2D1SvgPathData", "UpdateCommands"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_12(void *self) { return unimplemented("ID2D1SvgPathData", "GetCommands"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_13(void *self) { return unimplemented("ID2D1SvgPathData", "GetCommandsCount"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgPathData_stub_14(void *self) { return unimplemented("ID2D1SvgPathData", "CreatePathGeometry"); }
+static void *ID2D1SvgPathData_table[15] = {
+	(void *)ID2D1SvgPathData_stub_0,
+	(void *)ID2D1SvgPathData_stub_1,
+	(void *)ID2D1SvgPathData_stub_2,
+	(void *)ID2D1SvgPathData_stub_3,
+	(void *)ID2D1SvgPathData_stub_4,
+	(void *)ID2D1SvgPathData_stub_5,
+	(void *)ID2D1SvgPathData_stub_6,
+	(void *)ID2D1SvgPathData_stub_7,
+	(void *)ID2D1SvgPathData_stub_8,
+	(void *)ID2D1SvgPathData_stub_9,
+	(void *)ID2D1SvgPathData_stub_10,
+	(void *)ID2D1SvgPathData_stub_11,
+	(void *)ID2D1SvgPathData_stub_12,
+	(void *)ID2D1SvgPathData_stub_13,
+	(void *)ID2D1SvgPathData_stub_14,
+};
+
+enum {
+	ID2D1SvgGlyphStyle_QueryInterface_slot = 0,
+	ID2D1SvgGlyphStyle_AddRef_slot = 1,
+	ID2D1SvgGlyphStyle_Release_slot = 2,
+	ID2D1SvgGlyphStyle_GetFactory_slot = 3,
+	ID2D1SvgGlyphStyle_SetFill_slot = 4,
+	ID2D1SvgGlyphStyle_GetFill_slot = 5,
+	ID2D1SvgGlyphStyle_SetStroke_slot = 6,
+	ID2D1SvgGlyphStyle_GetStrokeDashesCount_slot = 7,
+	ID2D1SvgGlyphStyle_GetStroke_slot = 8,
+	ID2D1SvgGlyphStyle_methods = 9
+};
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_0(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "QueryInterface"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_1(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "AddRef"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_2(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "Release"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_3(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "GetFactory"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_4(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "SetFill"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_5(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "GetFill"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_6(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "SetStroke"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_7(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "GetStrokeDashesCount"); }
+static HRESULT STDMETHODCALLTYPE ID2D1SvgGlyphStyle_stub_8(void *self) { return unimplemented("ID2D1SvgGlyphStyle", "GetStroke"); }
+static void *ID2D1SvgGlyphStyle_table[9] = {
+	(void *)ID2D1SvgGlyphStyle_stub_0,
+	(void *)ID2D1SvgGlyphStyle_stub_1,
+	(void *)ID2D1SvgGlyphStyle_stub_2,
+	(void *)ID2D1SvgGlyphStyle_stub_3,
+	(void *)ID2D1SvgGlyphStyle_stub_4,
+	(void *)ID2D1SvgGlyphStyle_stub_5,
+	(void *)ID2D1SvgGlyphStyle_stub_6,
+	(void *)ID2D1SvgGlyphStyle_stub_7,
+	(void *)ID2D1SvgGlyphStyle_stub_8,
+};

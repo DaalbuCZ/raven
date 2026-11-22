@@ -390,3 +390,48 @@ HRESULT content_bytes(http_content *content, BYTE **bytes, UINT32 *length)
 	winrt_put(operation);
 	return result;
 }
+
+/* Windows.Web.Http.HttpBufferContent: content the caller hands in whole, complete from creation — the same read
+ * surface as the stream content above without an exchange behind it (every read answers the bytes as they are,
+ * UTF-8/UTF-16 decoding by the Content-Type header it carries itself). A count of ~0u means to the end of the
+ * buffer; anything past the buffer's bytes is the factory contract's out-of-bounds. */
+static const struct winrt_class buffer_content_kind = {L"Windows.Web.Http.HttpBufferContent", content_entries, content_destroy};
+
+HRESULT buffer_content_new(buffer_class *buffer, UINT32 offset, UINT32 count, http_content **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!buffer)
+		return E_INVALIDARG;
+	BYTE *bytes;
+	UINT32 length;
+	const HRESULT result = winrt_buffer_bytes(buffer, &bytes, &length);
+	if (FAILED(result))
+		return result;
+	if (offset > length || (count != ~0u && count > length - offset))
+		return E_BOUNDS;
+	if (count == ~0u)
+		count = length - offset;
+	struct content *self = winrt_new(&buffer_content_kind, sizeof(*self), NULL);
+	if (!self)
+		return E_OUTOFMEMORY;
+	self->content.table = &content_table;
+	self->closable.table = &content_closable_table;
+	self->stringable.table = &content_stringable_table;
+	InitializeCriticalSection(&self->lock);
+	HRESULT outcome = S_OK;
+	if (!(self->bytes = WINRT_ALLOC(count ? count : 1)))
+		outcome = E_OUTOFMEMORY;
+	if (SUCCEEDED(outcome)) {
+		memcpy(self->bytes, bytes + offset, count);
+		self->length = self->capacity = count;
+		self->complete = TRUE;
+		outcome = headers_new(HEADERS_CONTENT, &self->headers);
+	}
+	if (FAILED(outcome))
+		winrt_release(&self->content); /* content_destroy gives the partial object's pieces back. */
+	else
+		*out = (void *)&self->content;
+	return outcome;
+}

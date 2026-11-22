@@ -57,6 +57,8 @@ struct exchange;
 HRESULT content_new(struct exchange *exchange, struct headers *headers, http_content **out);
 /* All the bytes of any IHttpContent, which the caller frees: the body of a request. */
 HRESULT content_bytes(http_content *content, BYTE **bytes, UINT32 *length);
+/* Windows.Web.Http.HttpBufferContent: content the caller hands in whole (a count of ~0u means to the buffer's end). */
+HRESULT buffer_content_new(buffer_class *buffer, UINT32 offset, UINT32 count, http_content **out);
 
 /* transport.c */
 struct transport_settings {

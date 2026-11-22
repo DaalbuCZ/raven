@@ -18,6 +18,9 @@
 #define NTDDI_VERSION NTDDI_WIN10_RS3
 #include <windows.h>
 #include <d2d1_3.h>
+/* the SVG document interfaces of d2d1svg.h, their C bindings off, their enums and GUIDs in */
+#define D2D_USE_C_DEFINITIONS
+#include <d2d1svg.h>
 #include <d3d11.h>
 #include <dwrite_3.h>
 #include <wincodec.h>
@@ -4708,6 +4711,3217 @@ static BOOL STDMETHODCALLTYPE multithread_GetMultithreadProtected(void *iface) {
 static void STDMETHODCALLTYPE multithread_Enter(void *iface) { EnterCriticalSection(&factory_of(iface)->lock); }
 static void STDMETHODCALLTYPE multithread_Leave(void *iface) { LeaveCriticalSection(&factory_of(iface)->lock); }
 
+/* ---- the SVG model ----
+ * ID2D1SvgDocument and the element and attribute objects behind Win2D's CanvasSvgDocument: the XML of
+ * a stream parsed into an element tree kept here (tags, text, attributes in document order), values
+ * stored as the program set them (text from the document, typed POD values, or attribute objects once
+ * one is set or asked for), the tree serialized back to XML for SaveAsync, and the drawing of a
+ * document dropped loudly while no SVG rasterizer is built in. The interfaces and their order are the
+ * system's d2d1svg.h, included with the C definitions; the GUIDs come with it. */
+
+struct svg_attribute {
+	WCHAR *name;
+	WCHAR *string;   /* the value as text: what the document parsed, or the text form of what was set */
+	void *pod;       /* a typed value once set as one */
+	UINT32 pod_bytes;
+	int pod_type;    /* D2D1_SVG_ATTRIBUTE_POD_TYPE */
+	IUnknown *value; /* an attribute object (a paint, dash array, point collection, path data) */
+};
+
+/* The prefix every attribute object shares, for the members of ID2D1SvgAttribute itself. */
+struct svg_attribute_base {
+	struct object base;
+	struct svg_element *element;
+};
+
+struct svg_element {
+	struct object base;
+	struct svg_document *document;
+	struct svg_element *parent;
+	WCHAR *tag;      /* empty for a text content element */
+	WCHAR *text;     /* the text of a text content element */
+	struct svg_attribute *attributes;
+	UINT32 attribute_count, attribute_capacity;
+	struct svg_element **children;
+	UINT32 child_count, child_capacity;
+};
+
+struct svg_document {
+	struct object base;
+	D2D1_SIZE_F viewport;
+	struct svg_element *root;
+	UINT32 element_count;
+};
+
+struct svg_paint {
+	struct object base;
+	struct svg_element *element;
+	D2D1_SVG_PAINT_TYPE type;
+	D2D1_COLOR_F color;
+	WCHAR *id;
+};
+
+struct svg_dash_array {
+	struct object base;
+	struct svg_element *element;
+	D2D1_SVG_LENGTH *dashes;
+	UINT32 count;
+};
+
+struct svg_points {
+	struct object base;
+	struct svg_element *element;
+	D2D1_POINT_2F *points;
+	UINT32 count;
+};
+
+struct svg_path_data {
+	struct object base;
+	struct svg_element *element;
+	FLOAT *data;
+	UINT32 data_count;
+	D2D1_SVG_PATH_COMMAND *commands;
+	UINT32 command_count;
+};
+
+struct svg_glyph_style {
+	struct object base;
+	ID2D1Brush *fill;
+	ID2D1Brush *stroke;
+	FLOAT stroke_width, dash_offset;
+	FLOAT *dashes;
+	UINT32 dash_count;
+};
+
+static void **svg_document_table, **svg_element_table, **svg_paint_table, **svg_dash_table, **svg_points_table,
+	**svg_path_table, **svg_style_table;
+
+static const GUID *const svg_document_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgDocument};
+static const GUID *const svg_element_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgElement};
+static const GUID *const svg_paint_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgAttribute, &IID_ID2D1SvgPaint};
+static const GUID *const svg_dash_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgAttribute, &IID_ID2D1SvgStrokeDashArray};
+static const GUID *const svg_points_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgAttribute, &IID_ID2D1SvgPointCollection};
+static const GUID *const svg_path_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgAttribute, &IID_ID2D1SvgPathData};
+static const GUID *const svg_style_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgGlyphStyle};
+
+/* Every member arrives by name here, so the launch trace shows what a program asks of the model. */
+static void svg_trace2(const char *interface_name, const char *method, const char *more)
+{
+	char text[200];
+	size_t at = 0;
+	const char *part[] = {"d2d1: ", interface_name, "::", method, more ? ": " : NULL, more};
+	size_t index, length;
+	for (index = 0; index < 6 && part[index]; ++index)
+		for (length = 0; part[index][length] && at < sizeof(text) - 1; ++length)
+			text[at++] = part[index][length];
+	text[at] = 0;
+	RavenTrace(text);
+}
+
+static void svg_trace(const char *interface_name, const char *method) { svg_trace2(interface_name, method, NULL); }
+
+/* ---- narrow helpers: the component runs without a C runtime ---- */
+static UINT32 svg_len(const WCHAR *s) { UINT32 n = 0; while (s && s[n]) ++n; return n; }
+static UINT32 svg_clen(const char *s) { UINT32 n = 0; while (s && s[n]) ++n; return n; }
+
+static WCHAR *svg_dup(const WCHAR *s, UINT32 count)
+{
+	WCHAR *copy = ALLOC(((size_t)count + 1) * sizeof(WCHAR));
+	if (!copy)
+		return NULL;
+	memcpy(copy, s, (size_t)count * sizeof(WCHAR));
+	copy[count] = 0;
+	return copy;
+}
+
+static BOOL svg_same(const WCHAR *a, const WCHAR *b)
+{
+	UINT32 i;
+	if (!a || !b)
+		return FALSE;
+	for (i = 0; a[i] && b[i]; ++i)
+		if (a[i] != b[i])
+			return FALSE;
+	return a[i] == b[i];
+}
+
+/* A null-ended text against a run of counted characters, as a closing tag matches its element. */
+static BOOL svg_same_count(const WCHAR *a, const WCHAR *b, UINT32 count)
+{
+	UINT32 i;
+	for (i = 0; i < count; ++i)
+		if (a[i] != b[i])
+			return FALSE;
+	return !a[count];
+}
+
+static BOOL svg_is_space(WCHAR c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+/* A growing wide-character buffer for parsed text and formatted values. */
+struct svg_text {
+	WCHAR *data;
+	UINT32 used, capacity;
+};
+
+static BOOL svg_text_add(struct svg_text *out, WCHAR c)
+{
+	if (out->used + 1 > out->capacity) {
+		UINT32 capacity = out->capacity ? out->capacity * 2 : 32;
+		WCHAR *grown = GROW(out->data, capacity * sizeof(WCHAR));
+		if (!grown)
+			return FALSE;
+		out->data = grown;
+		out->capacity = capacity;
+	}
+	out->data[out->used++] = c;
+	out->data[out->used] = 0;
+	return TRUE;
+}
+
+static BOOL svg_text_puts(struct svg_text *out, const WCHAR *text)
+{
+	UINT32 i, length = svg_len(text);
+	for (i = 0; i < length; ++i)
+		if (!svg_text_add(out, text[i]))
+			return FALSE;
+	return TRUE;
+}
+
+/* A number as text: whole part, then decimals while they differ from zero; an exponent past ten
+ * digits or under 1e-5. Good enough for a trace or a saved copy of a value that was set typed. */
+static void svg_ftoa(float value, WCHAR *out, UINT32 capacity)
+{
+	UINT32 at = 0;
+	int negative = value < 0;
+	float magnitude = negative ? -value : value;
+	int exponent = 0;
+	if (negative && at < capacity - 1) {
+		out[at++] = '-';
+		value = -value;
+	}
+	if (value != value) {
+		out[at++] = 'N';
+		out[at++] = 'a';
+		out[at++] = 'N';
+	} else if (value >= 1e10f || (value && value < 1e-5f)) {
+		int digits = 7;
+		while (magnitude >= 10) { magnitude /= 10; ++exponent; }
+		while (magnitude && magnitude < 1) { magnitude *= 10; --exponent; }
+		while (digits && at < capacity - 1) {
+			int digit = (int)magnitude;
+			out[at++] = (WCHAR)('0' + digit);
+			magnitude = (magnitude - digit) * 10;
+			--digits;
+			if ((int)magnitude == magnitude && magnitude <= 0)
+				break;
+		}
+		if (at < capacity - 1) {
+			out[at++] = 'e';
+			out[at++] = exponent < 0 ? '-' : '+';
+			exponent = exponent < 0 ? -exponent : exponent;
+			if (exponent >= 10 && at < capacity - 1)
+				out[at++] = (WCHAR)('0' + exponent / 10);
+			if (at < capacity - 1)
+				out[at++] = (WCHAR)('0' + exponent % 10);
+		}
+	} else {
+		float whole = value;
+		int whole_digits = 0, digits = 7;
+		BOOL point = FALSE;
+		if (whole < 1) {
+			if (at < capacity - 1) out[at++] = '0';
+			if (at < capacity - 1) out[at++] = '.';
+			point = TRUE;
+		}
+		while (whole >= 10) { whole /= 10; ++whole_digits; }
+		whole = value;
+		while (digits > 0 && at < capacity - 1) {
+			int digit = (int)whole;
+			out[at++] = (WCHAR)('0' + digit);
+			whole = (whole - digit) * 10;
+			--digits;
+			if (whole_digits > 0) {
+				--whole_digits;
+				if (!whole_digits && whole > 0 && at < capacity - 1) {
+					out[at++] = '.';
+					point = TRUE;
+				}
+			}
+			if (whole <= 0 || (int)whole == whole)
+				break;
+		}
+		if (point && at && out[at - 1] == '.')
+			--at;
+	}
+	out[at < capacity ? at : capacity - 1] = 0;
+}
+
+/* A decimal number as text: the mantissa, an optional fraction and exponent. */
+static float svg_wtof(const WCHAR *text, UINT32 length, BOOL *ok)
+{
+	float value = 0, fraction = 1;
+	UINT32 i = 0;
+	BOOL negative = FALSE, any = FALSE;
+	if (ok)
+		*ok = FALSE;
+	if (i < length && (text[i] == '+' || text[i] == '-'))
+		negative = text[i++] == '-';
+	for (; i < length && text[i] >= '0' && text[i] <= '9'; ++i) {
+		value = value * 10 + (text[i] - '0');
+		any = TRUE;
+	}
+	if (i < length && text[i] == '.') {
+		++i;
+		for (; i < length && text[i] >= '0' && text[i] <= '9'; ++i) {
+			fraction /= 10;
+			value += (text[i] - '0') * fraction;
+			any = TRUE;
+		}
+	}
+	if (i < length && (text[i] == 'e' || text[i] == 'E')) {
+		float exponent = 0;
+		BOOL exponent_negative = FALSE;
+		++i;
+		if (i < length && (text[i] == '+' || text[i] == '-'))
+			exponent_negative = text[i++] == '-';
+		for (; i < length && text[i] >= '0' && text[i] <= '9'; ++i) {
+			exponent = exponent * 10 + (text[i] - '0');
+			any = TRUE;
+		}
+		while (exponent > 0) {
+			if (exponent_negative)
+				value /= 10;
+			else
+				value *= 10;
+			--exponent;
+		}
+	}
+	if (ok)
+		*ok = any;
+	return negative ? -value : value;
+}
+
+/* A named color of the SVG palette (the common ones; the rest fall to the #rrggbb text form). */
+static BOOL svg_named_color(const WCHAR *name, D2D1_COLOR_F *color)
+{
+	static const struct { const char *name; BYTE red, green, blue; } palette[] = {
+		{"black", 0, 0, 0}, {"white", 255, 255, 255}, {"red", 255, 0, 0}, {"lime", 0, 255, 0},
+		{"blue", 0, 0, 255}, {"yellow", 255, 255, 0}, {"cyan", 0, 255, 255}, {"magenta", 255, 0, 255},
+		{"gray", 128, 128, 128}, {"grey", 128, 128, 128}, {"silver", 192, 192, 192}, {"maroon", 128, 0, 0},
+		{"olive", 128, 128, 0}, {"green", 0, 128, 0}, {"purple", 128, 0, 128}, {"teal", 0, 128, 128},
+		{"navy", 0, 0, 128}, {"orange", 255, 165, 0},
+	};
+	char narrow[32];
+	UINT32 i, length = svg_len(name);
+	size_t index;
+	if (!length || length > 31)
+		return FALSE;
+	for (i = 0; i < length; ++i) {
+		WCHAR c = name[i];
+		if (c < ' ' || c > 127)
+			return FALSE;
+		narrow[i] = (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
+	}
+	narrow[length] = 0;
+	for (index = 0; index < sizeof(palette) / sizeof(*palette); ++index) {
+		const char *candidate = palette[index].name;
+		UINT32 j;
+		for (j = 0; candidate[j] && candidate[j] == narrow[j]; ++j) {}
+		if (!candidate[j] && !narrow[j]) {
+			color->r = palette[index].red / 255.0f;
+			color->g = palette[index].green / 255.0f;
+			color->b = palette[index].blue / 255.0f;
+			color->a = 1;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+/* A color as text: #rgb, #rrggbb, #rrggbbaa, rgb()/rgba(), or a palette name. */
+static BOOL svg_color(const WCHAR *text, D2D1_COLOR_F *color)
+{
+	UINT32 length = svg_len(text), i;
+	color->a = 1;
+	if (!length)
+		return FALSE;
+	if (text[0] == '#') {
+		BYTE parts[8] = {0};
+		UINT32 count = 0;
+		for (i = 1; i < length && count < 8; ++i) {
+			WCHAR c = text[i];
+			int digit;
+			if (c >= '0' && c <= '9')
+				digit = c - '0';
+			else if (c >= 'a' && c <= 'f')
+				digit = c - 'a' + 10;
+			else if (c >= 'A' && c <= 'F')
+				digit = c - 'A' + 10;
+			else
+				return FALSE;
+			parts[count++] = (BYTE)digit;
+		}
+		if (count == 3 || count == 4) {
+			color->r = (parts[0] * 16 + parts[0]) / 255.0f;
+			color->g = (parts[1] * 16 + parts[1]) / 255.0f;
+			color->b = (parts[2] * 16 + parts[2]) / 255.0f;
+			if (count == 4)
+				color->a = (parts[3] * 16 + parts[3]) / 255.0f;
+			return TRUE;
+		}
+		if (count == 6 || count == 8) {
+			color->r = (parts[0] * 16 + parts[1]) / 255.0f;
+			color->g = (parts[2] * 16 + parts[3]) / 255.0f;
+			color->b = (parts[4] * 16 + parts[5]) / 255.0f;
+			if (count == 8)
+				color->a = (parts[6] * 16 + parts[7]) / 255.0f;
+			return TRUE;
+		}
+		return FALSE;
+	}
+	if (length > 4 && text[0] == 'r' && text[1] == 'g' && text[2] == 'b' && (text[3] == '(' || text[3] == 'a')) {
+		BOOL alpha = text[3] == 'a';
+		float parts[4] = {0, 0, 0, 1};
+		UINT32 part = 0, start;
+		i = alpha ? 5 : 4;
+		while (i < length && part < 4) {
+			start = i;
+			while (i < length && text[i] != ',' && text[i] != ')')
+				++i;
+			parts[part++] = svg_wtof(text + start, i - start, NULL);
+			if (i < length && text[i] == ',')
+				++i;
+			else
+				break;
+		}
+		if (part >= (alpha ? 4 : 3)) {
+			color->r = parts[0] / 255.0f;
+			color->g = parts[1] / 255.0f;
+			color->b = parts[2] / 255.0f;
+			if (alpha)
+				color->a = parts[3] > 1 ? parts[3] / 255.0f : parts[3];
+			return TRUE;
+		}
+		return FALSE;
+	}
+	return svg_named_color(text, color);
+}
+
+/* ---- destruction: the tree owns its children; elements own their attribute values ---- */
+static void svg_element_destroy(struct object *base);
+static void svg_document_destroy(struct object *base);
+
+static void svg_attribute_clear(struct svg_attribute *attribute)
+{
+	FREE(attribute->string);
+	attribute->string = NULL;
+	FREE(attribute->pod);
+	attribute->pod = NULL;
+	attribute->pod_bytes = 0;
+	if (attribute->value) {
+		object_Release(attribute->value);
+		attribute->value = NULL;
+	}
+}
+
+static void svg_element_destroy(struct object *base)
+{
+	struct svg_element *self = (struct svg_element *)base;
+	UINT32 i;
+	for (i = 0; i < self->child_count; ++i)
+		object_Release(self->children[i]);
+	FREE(self->children);
+	for (i = 0; i < self->attribute_count; ++i) {
+		svg_attribute_clear(self->attributes + i);
+		FREE(self->attributes[i].name);
+	}
+	FREE(self->attributes);
+	FREE(self->tag);
+	FREE(self->text);
+}
+
+static void svg_document_destroy(struct object *base)
+{
+	struct svg_document *self = (struct svg_document *)base;
+	if (self->root)
+		object_Release(&self->root->base);
+}
+
+/* ---- element construction and the child list ---- */
+static struct svg_element *svg_new_element(struct svg_document *document, const WCHAR *tag, UINT32 tag_length)
+{
+	struct svg_element *element = ALLOC(sizeof(*element));
+	if (!element)
+		return NULL;
+	object_init(&element->base, svg_element_table, svg_element_destroy, svg_element_iids, 2, document->base.factory);
+	element->document = document;
+	element->tag = svg_dup(tag, tag_length);
+	if (!element->tag) {
+		object_Release(&element->base);
+		return NULL;
+	}
+	document->element_count += 1;
+	return element;
+}
+
+static BOOL svg_attach_child(struct svg_element *parent, struct svg_element *child)
+{
+	if (!parent || !child || child->parent)
+		return FALSE;
+	if (parent->child_count == parent->child_capacity) {
+		UINT32 capacity = parent->child_capacity ? parent->child_capacity * 2 : 8;
+		struct svg_element **grown = GROW(parent->children, capacity * sizeof(*grown));
+		if (!grown)
+			return FALSE;
+		parent->children = grown;
+		parent->child_capacity = capacity;
+	}
+	child->parent = parent;
+	parent->children[parent->child_count++] = child;
+	object_AddRef(&child->base);
+	return TRUE;
+}
+
+/* Out of its parent's list, if it is in one; the reference the parent held goes away. */
+static void svg_detach_child(struct svg_element *child)
+{
+	struct svg_element *parent = child->parent;
+	UINT32 i;
+	if (!parent)
+		return;
+	for (i = 0; i < parent->child_count; ++i)
+		if (parent->children[i] == child)
+			break;
+	if (i < parent->child_count) {
+		memmove(parent->children + i, parent->children + i + 1, (parent->child_count - i - 1) * sizeof(*parent->children));
+		--parent->child_count;
+	}
+	child->parent = NULL;
+	object_Release(&child->base);
+}
+
+/* An element being moved between sibling documents of one resource domain: the Windows
+   resource domain is the device the documents came from (the factory), not the document,
+   so the subtree is retagged to the new document as it moves. Answers the moved count;
+   the element tallies of both documents are adjusted once, here, by the caller. */
+static UINT32 svg_retag_subtree(struct svg_element *element, struct svg_document *document)
+{
+	UINT32 count = 1, i;
+	element->document = document;
+	for (i = 0; i < element->child_count; ++i)
+		count += svg_retag_subtree(element->children[i], document);
+	return count;
+}
+
+static UINT32 svg_adopt_subtree(struct svg_element *element, struct svg_document *document)
+{
+	struct svg_document *old = element->document;
+	UINT32 count = svg_retag_subtree(element, document);
+	if (old && old != document) {
+		old->element_count -= count;
+		document->element_count += count;
+	}
+	return count;
+}
+
+/* The tag of an element, narrowed for a trace line. */
+static UINT32 svg_tag_narrow(const WCHAR *tag, char *out, UINT32 out_size)
+{
+	UINT32 at = 0;
+	if (tag)
+		for (; tag[at] && at < out_size - 1; ++at)
+			out[at] = (tag[at] >= 32 && tag[at] < 127) ? (char)tag[at] : '?';
+	out[at] = 0;
+	return at;
+}
+
+static BOOL svg_child_index(struct svg_element *parent, struct svg_element *child, UINT32 *index)
+{
+	UINT32 i;
+	for (i = 0; i < parent->child_count; ++i)
+		if (parent->children[i] == child) {
+			*index = i;
+			return TRUE;
+		}
+	return FALSE;
+}
+
+static void svg_attach_text(struct svg_element *parent, const WCHAR *text, UINT32 count)
+{
+	struct svg_element *child = svg_new_element(parent->document, L"", 0);
+	if (child) {
+		child->text = svg_dup(text, count);
+		svg_attach_child(parent, child);
+	}
+}
+
+/* ---- attributes: found, added, removed, values as text or typed or objects ---- */
+static struct svg_attribute *svg_find_attribute(struct svg_element *self, const WCHAR *name)
+{
+	UINT32 i;
+	for (i = 0; i < self->attribute_count; ++i)
+		if (svg_same(self->attributes[i].name, name))
+			return self->attributes + i;
+	return NULL;
+}
+
+/* The name is counted (it comes straight out of the document text); the copy is made here. */
+static struct svg_attribute *svg_add_attribute_counted(struct svg_element *self, const WCHAR *name, UINT32 length)
+{
+	struct svg_attribute *attribute;
+	if (self->attribute_count == self->attribute_capacity) {
+		UINT32 capacity = self->attribute_capacity ? self->attribute_capacity * 2 : 8;
+		struct svg_attribute *grown = GROW(self->attributes, capacity * sizeof(*grown));
+		if (!grown)
+			return NULL;
+		self->attributes = grown;
+		self->attribute_capacity = capacity;
+	}
+	attribute = self->attributes + self->attribute_count;
+	memset(attribute, 0, sizeof(*attribute));
+	attribute->name = svg_dup(name, length);
+	if (!attribute->name)
+		return NULL;
+	self->attribute_count += 1;
+	return attribute;
+}
+
+static struct svg_attribute *svg_add_attribute(struct svg_element *self, const WCHAR *name)
+{
+	return name ? svg_add_attribute_counted(self, name, svg_len(name)) : NULL;
+}
+
+static BOOL svg_remove_attribute(struct svg_element *self, const WCHAR *name)
+{
+	UINT32 i;
+	for (i = 0; i < self->attribute_count; ++i) {
+		if (svg_same(self->attributes[i].name, name)) {
+			svg_attribute_clear(self->attributes + i);
+			FREE(self->attributes[i].name);
+			memmove(self->attributes + i, self->attributes + i + 1, (self->attribute_count - i - 1) * sizeof(*self->attributes));
+			--self->attribute_count;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+/* The text form of a value through the buffer conventions of Direct2D: the buffer holds the text and
+ * its terminator or the call fails. */
+static HRESULT svg_text_out(const WCHAR *value, PWSTR buffer, UINT32 buffer_count)
+{
+	UINT32 length = svg_len(value);
+	if (!buffer)
+		return S_OK;
+	if (buffer_count < length + 1)
+		return E_INVALIDARG;
+	memcpy(buffer, value, ((size_t)length + 1) * sizeof(WCHAR));
+	return S_OK;
+}
+
+static UINT32 svg_pod_bytes(int pod_type)
+{
+	switch (pod_type) {
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_FLOAT:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_FILL_MODE:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_DISPLAY:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_OVERFLOW:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_CAP:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_JOIN:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_VISIBILITY:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_UNIT_TYPE:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_EXTEND_MODE:
+		return 4;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH:
+		return 8;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR:
+		return 16;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_MATRIX:
+		return 24;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_PRESERVE_ASPECT_RATIO:
+		return 12;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_VIEWBOX:
+		return 16;
+	}
+	return 0;
+}
+
+static const char *svg_enum_text(int pod_type, int value)
+{
+	switch (pod_type) {
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_FILL_MODE: return value == 1 ? "evenodd" : "nonzero";
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_DISPLAY: return value == 1 ? "none" : "inline";
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_OVERFLOW: return value == 1 ? "hidden" : "visible";
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_CAP: return value == D2D1_CAP_STYLE_ROUND ? "round" : value == D2D1_CAP_STYLE_SQUARE ? "square" : "butt";
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_JOIN: return value == D2D1_LINE_JOIN_ROUND ? "round" : value == D2D1_LINE_JOIN_BEVEL ? "bevel" : "miter";
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_VISIBILITY: return value == 1 ? "hidden" : "visible";
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_UNIT_TYPE: return value == 1 ? "objectBoundingBox" : "userSpaceOnUse";
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_EXTEND_MODE: return value == 1 ? "wrap" : value == 2 ? "mirror" : "clamp";
+	}
+	return "";
+}
+
+struct svg_name_value {
+	const char *name;
+	int value;
+};
+
+static BOOL svg_enum_value(const WCHAR *text, int pod_type, int *value)
+{
+	static const struct svg_name_value fill_modes[] = {{"nonzero", 0}, {"evenodd", 1}};
+	static const struct svg_name_value displays[] = {{"inline", 0}, {"none", 1}};
+	static const struct svg_name_value overflows[] = {{"visible", 0}, {"hidden", 1}};
+	static const struct svg_name_value caps[] = {{"butt", 0}, {"square", 1}, {"round", 2}};
+	static const struct svg_name_value joins[] = {{"miter", 0}, {"bevel", 1}, {"round", 2}};
+	static const struct svg_name_value visibilities[] = {{"visible", 0}, {"hidden", 1}};
+	static const struct svg_name_value units[] = {{"userSpaceOnUse", 0}, {"objectBoundingBox", 1}};
+	static const struct svg_name_value extends[] = {{"clamp", 0}, {"pad", 0}, {"wrap", 1}, {"repeat", 1}, {"mirror", 2}, {"reflect", 2}};
+	const struct svg_name_value *table = NULL;
+	UINT32 count = 0, i;
+	switch (pod_type) {
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_FILL_MODE: table = fill_modes; count = 2; break;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_DISPLAY: table = displays; count = 2; break;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_OVERFLOW: table = overflows; count = 2; break;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_CAP: table = caps; count = 3; break;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_JOIN: table = joins; count = 3; break;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_VISIBILITY: table = visibilities; count = 2; break;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_UNIT_TYPE: table = units; count = 2; break;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_EXTEND_MODE: table = extends; count = 6; break;
+	default: return FALSE;
+	}
+	for (i = 0; i < count; ++i) {
+		WCHAR wide[24];
+		UINT32 j, length = svg_clen(table[i].name);
+		if (length > 23)
+			continue;
+		for (j = 0; j < length; ++j)
+			wide[j] = (WCHAR)table[i].name[j];
+		wide[length] = 0;
+		if (svg_same(text, wide)) {
+			*value = table[i].value;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+/* A typed value back as text, for a program that reads as text what it set as a number. */
+static BOOL svg_format_pod(int pod_type, const void *value, struct svg_text *out)
+{
+	WCHAR number[48];
+	UINT32 i;
+	BOOL ok = TRUE;
+	if (!value)
+		return FALSE;
+	switch (pod_type) {
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_FLOAT:
+		svg_ftoa(*(const FLOAT *)value, number, 48);
+		return svg_text_puts(out, number);
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR: {
+		const D2D1_COLOR_F *color = value;
+		ok = svg_text_puts(out, L"rgb(");
+		svg_ftoa(color->r * 255, number, 48);
+		ok = ok && svg_text_puts(out, number) && svg_text_puts(out, L",");
+		svg_ftoa(color->g * 255, number, 48);
+		ok = ok && svg_text_puts(out, number) && svg_text_puts(out, L",");
+		svg_ftoa(color->b * 255, number, 48);
+		return ok && svg_text_puts(out, number) && svg_text_puts(out, L")");
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_MATRIX: {
+		const D2D1_MATRIX_3X2_F *m = value;
+		ok = svg_text_puts(out, L"matrix(");
+		for (i = 0; ok && i < 6; ++i) {
+			svg_ftoa(((const FLOAT *)m)[i], number, 48);
+			ok = svg_text_puts(out, number) && (i == 5 || svg_text_puts(out, L","));
+		}
+		return ok && svg_text_puts(out, L")");
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH: {
+		const D2D1_SVG_LENGTH *length = value;
+		svg_ftoa(length->value, number, 48);
+		if (!svg_text_puts(out, number))
+			return FALSE;
+		if (length->units == D2D1_SVG_LENGTH_UNITS_PERCENTAGE)
+			return svg_text_puts(out, L"%");
+		return TRUE;
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_VIEWBOX: {
+		const D2D1_SVG_VIEWBOX *viewbox = value;
+		for (i = 0; ok && i < 4; ++i) {
+			svg_ftoa(((const FLOAT *)viewbox)[i], number, 48);
+			ok = svg_text_puts(out, number) && (i == 3 || svg_text_puts(out, L" "));
+		}
+		return ok;
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_PRESERVE_ASPECT_RATIO: {
+		const D2D1_SVG_PRESERVE_ASPECT_RATIO *ratio = value;
+		static const char *aligns[] = {"none", "xMinYMin", "xMidYMin", "xMaxYMin", "xMinYMid", "xMidYMid", "xMaxYMid", "xMinYMax", "xMidYMax", "xMaxYMax"};
+		const char *align = ratio->align <= 9 ? aligns[ratio->align] : "";
+		if (ratio->defer)
+			ok = svg_text_puts(out, L"defer ");
+		for (i = 0; ok && align[i]; ++i)
+			ok = svg_text_add(out, (WCHAR)align[i]);
+		return ok && svg_text_puts(out, ratio->meetOrSlice == D2D1_SVG_ASPECT_SCALING_SLICE ? L" slice" : L" meet");
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_FILL_MODE:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_DISPLAY:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_OVERFLOW:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_CAP:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_JOIN:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_VISIBILITY:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_UNIT_TYPE:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_EXTEND_MODE: {
+		const char *text = svg_enum_text(pod_type, *(const int *)value);
+		for (i = 0; ok && text[i]; ++i)
+			ok = svg_text_add(out, (WCHAR)text[i]);
+		return ok;
+	}
+	}
+	return FALSE;
+}
+
+/* A text value into the typed form, for a program that reads as a number what the document parsed. */
+static BOOL svg_parse_pod(const WCHAR *text, int pod_type, void *value, UINT32 bytes)
+{
+	UINT32 length = svg_len(text);
+	switch (pod_type) {
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_FLOAT:
+		if (bytes != 4)
+			return FALSE;
+		*(FLOAT *)value = svg_wtof(text, length, NULL);
+		return TRUE;
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR:
+		if (bytes != 16)
+			return FALSE;
+		return svg_color(text, (D2D1_COLOR_F *)value);
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH: {
+		D2D1_SVG_LENGTH *length_value = value;
+		if (bytes != 8)
+			return FALSE;
+		length_value->value = svg_wtof(text, length, NULL);
+		length_value->units = length && text[length - 1] == '%' ? D2D1_SVG_LENGTH_UNITS_PERCENTAGE : D2D1_SVG_LENGTH_UNITS_NUMBER;
+		return TRUE;
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_MATRIX: {
+		D2D1_MATRIX_3X2_F *m = value;
+		UINT32 i = 0, part = 0;
+		if (bytes != 24)
+			return FALSE;
+		((FLOAT *)m)[0] = ((FLOAT *)m)[3] = 1;
+		((FLOAT *)m)[1] = ((FLOAT *)m)[2] = ((FLOAT *)m)[4] = ((FLOAT *)m)[5] = 0;
+		while (i < length && part < 6) {
+			UINT32 start;
+			while (i < length && (svg_is_space(text[i]) || text[i] == ',' || text[i] == '('))
+				++i;
+			if (i < length && (text[i] == 'm' || text[i] == 'M')) { /* the matrix( of matrix(...) */
+				while (i < length && text[i] != '(')
+					++i;
+				continue;
+			}
+			start = i;
+			while (i < length && !svg_is_space(text[i]) && text[i] != ',' && text[i] != ')')
+				++i;
+			if (i > start)
+				((FLOAT *)m)[part++] = svg_wtof(text + start, i - start, NULL);
+			else
+				++i;
+		}
+		return part == 6;
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_VIEWBOX: {
+		D2D1_SVG_VIEWBOX *viewbox = value;
+		UINT32 i = 0, part = 0;
+		if (bytes != 16)
+			return FALSE;
+		while (i < length && part < 4) {
+			UINT32 start;
+			while (i < length && (svg_is_space(text[i]) || text[i] == ','))
+				++i;
+			start = i;
+			while (i < length && !svg_is_space(text[i]) && text[i] != ',')
+				++i;
+			if (i > start)
+				((FLOAT *)viewbox)[part++] = svg_wtof(text + start, i - start, NULL);
+			else
+				++i;
+		}
+		return part == 4;
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_PRESERVE_ASPECT_RATIO: {
+		D2D1_SVG_PRESERVE_ASPECT_RATIO *ratio = value;
+		static const char *aligns[] = {"none", "xMinYMin", "xMidYMin", "xMaxYMin", "xMinYMid", "xMidYMid", "xMaxYMid", "xMinYMax", "xMidYMax", "xMaxYMax"};
+		UINT32 i = 0, a;
+		if (bytes != 12)
+			return FALSE;
+		ratio->defer = FALSE;
+		ratio->align = D2D1_SVG_ASPECT_ALIGN_X_MID_Y_MID;
+		ratio->meetOrSlice = D2D1_SVG_ASPECT_SCALING_MEET;
+		while (i < length) {
+			UINT32 start;
+			while (i < length && svg_is_space(text[i]))
+				++i;
+			start = i;
+			while (i < length && !svg_is_space(text[i]))
+				++i;
+			if (i == start)
+				break;
+			if (i - start == 5 && text[start] == 'd' && text[start + 1] == 'e' && text[start + 2] == 'f' && text[start + 3] == 'e' && text[start + 4] == 'r')
+				ratio->defer = TRUE;
+			else {
+				BOOL matched = FALSE;
+				for (a = 0; a < 10 && !matched; ++a) {
+					UINT32 name_length = svg_clen(aligns[a]), j;
+					if (name_length != i - start)
+						continue;
+					for (j = 0; j < name_length; ++j)
+						if ((WCHAR)aligns[a][j] != text[start + j])
+							break;
+					if (j == name_length) {
+						ratio->align = (D2D1_SVG_ASPECT_ALIGN)a;
+						matched = TRUE;
+					}
+				}
+				if (!matched) {
+					if (i - start == 4 && text[start] == 'm' && text[start + 1] == 'e' && text[start + 2] == 'e' && text[start + 3] == 't')
+						ratio->meetOrSlice = D2D1_SVG_ASPECT_SCALING_MEET;
+					else if (i - start == 5 && text[start] == 's' && text[start + 1] == 'l' && text[start + 2] == 'i' && text[start + 3] == 'c' && text[start + 4] == 'e')
+						ratio->meetOrSlice = D2D1_SVG_ASPECT_SCALING_SLICE;
+				}
+			}
+		}
+		return TRUE;
+	}
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_FILL_MODE:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_DISPLAY:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_OVERFLOW:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_CAP:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_LINE_JOIN:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_VISIBILITY:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_UNIT_TYPE:
+	case D2D1_SVG_ATTRIBUTE_POD_TYPE_EXTEND_MODE: {
+		int value_int = 0;
+		if (bytes != 4)
+			return FALSE;
+		if (!svg_enum_value(text, pod_type, &value_int))
+			return FALSE;
+		*(int *)value = value_int;
+		return TRUE;
+	}
+	}
+	return FALSE;
+}
+
+/* ---- the XML parser: elements, attributes, text, comments, CDATA, declarations and entities ---- */
+struct svg_parser {
+	const WCHAR *at, *end;
+	const WCHAR *start; /* the input's beginning: parse failures report their offset */
+	struct svg_element *stack[128]; /* the open elements, innermost last */
+	UINT32 depth;
+	BOOL root_seen;
+	BOOL error;
+	UINT32 fail_at; /* the offset the last failure stopped at */
+	struct svg_document *document;
+};
+
+static void svg_trace_text(const char *interface_name, const char *method, const WCHAR *wide, UINT32 count)
+{
+	/* a wide-string excerpt for the trace: ASCII as itself, everything else escaped; chunked, since one
+	 * trace line carries a bounded buffer */
+	static const char hex[] = "0123456789abcdef";
+	char text[160];
+	UINT32 at = 0, source = 0;
+	while (source < count) {
+		size_t length;
+		const char *part[] = {"d2d1: ", interface_name, method};
+		size_t index;
+		at = 0;
+		for (index = 0; index < 3; ++index)
+			for (length = 0; part[index][length] && at < sizeof(text) - 1; ++length)
+				text[at++] = part[index][length];
+		while (source < count && at < sizeof(text) - 8) {
+			WCHAR c = wide[source];
+			if (c == '\n' || c == '\r' || c == '\t') {
+				text[at++] = '\\';
+				text[at++] = c == '\n' ? 'n' : c == '\r' ? 'r' : 't';
+			} else if (c >= 32 && c < 127) {
+				text[at++] = (char)c;
+			} else {
+				const unsigned v = (unsigned)c;
+				text[at++] = '\\';
+				text[at++] = 'x';
+				text[at++] = hex[(v >> 12) & 15];
+				text[at++] = hex[(v >> 8) & 15];
+				text[at++] = hex[(v >> 4) & 15];
+				text[at++] = hex[v & 15];
+			}
+			++source;
+		}
+		text[at] = 0;
+		RavenTrace(text);
+	}
+}
+
+static void svg_fail(struct svg_parser *parser, const char *reason)
+{
+	parser->error = TRUE;
+	parser->fail_at = parser->start ? (UINT32)(parser->at - parser->start) : 0;
+	svg_trace2("svg", "parse error", reason);
+}
+
+/* One entity (&amp; and kin, or &#NN;/&#xHH;) decoded into the buffer. */
+static BOOL svg_entity(struct svg_parser *parser, struct svg_text *out)
+{
+	const WCHAR *start = ++parser->at;
+	const WCHAR *digits, *semicolon;
+	long value = 0;
+	BOOL hex;
+	if (start >= parser->end || *start != '#') {
+		UINT32 length;
+		WCHAR c = 0;
+		semicolon = start;
+		while (semicolon < parser->end && *semicolon != ';' && semicolon < start + 10)
+			++semicolon;
+		if (semicolon >= parser->end || *semicolon != ';')
+			return FALSE;
+		length = (UINT32)(semicolon - start);
+		if (length == 2 && start[0] == 'l' && start[1] == 't')
+			c = '<';
+		else if (length == 2 && start[0] == 'g' && start[1] == 't')
+			c = '>';
+		else if (length == 3 && start[0] == 'a' && start[1] == 'm' && start[2] == 'p')
+			c = '&';
+		else if (length == 4 && start[0] == 'q' && start[1] == 'u' && start[2] == 'o' && start[3] == 't')
+			c = '"';
+		else if (length == 4 && start[0] == 'a' && start[1] == 'p' && start[2] == 'o' && start[3] == 's')
+			c = '\'';
+		else
+			return FALSE;
+		if (!svg_text_add(out, c))
+			return FALSE;
+		parser->at = semicolon + 1;
+		return TRUE;
+	}
+	digits = start + 1;
+	hex = digits < parser->end && (*digits == 'x' || *digits == 'X');
+	if (hex)
+		++digits;
+	semicolon = digits;
+	while (semicolon < parser->end && *semicolon != ';' && semicolon < start + 12) {
+		WCHAR c = *semicolon++;
+		if (c >= '0' && c <= '9')
+			value = value * (hex ? 16 : 10) + (c - '0');
+		else if (hex && c >= 'a' && c <= 'f')
+			value = value * 16 + (c - 'a' + 10);
+		else if (hex && c >= 'A' && c <= 'F')
+			value = value * 16 + (c - 'A' + 10);
+		else
+			return FALSE;
+	}
+	if (semicolon >= parser->end || *semicolon != ';')
+		return FALSE;
+	if (!svg_text_add(out, (WCHAR)value))
+		return FALSE;
+	parser->at = semicolon + 1;
+	return TRUE;
+}
+
+static BOOL svg_whitespace_only(const struct svg_text *text)
+{
+	UINT32 i;
+	for (i = 0; i < text->used; ++i)
+		if (!svg_is_space(text->data[i]))
+			return FALSE;
+	return TRUE;
+}
+
+/* The character data up to the next tag, entities decoded, as a text child of the open element. */
+static void svg_read_text(struct svg_parser *parser)
+{
+	struct svg_text text = {0};
+	while (parser->at < parser->end && *parser->at != '<') {
+		if (*parser->at == '&') {
+			if (!svg_entity(parser, &text)) {
+				svg_text_add(&text, '&');
+				++parser->at;
+			}
+		} else
+			svg_text_add(&text, *parser->at++);
+	}
+	if (text.used && !svg_whitespace_only(&text) && parser->depth)
+		svg_attach_text(parser->stack[parser->depth - 1], text.data, text.used);
+	FREE(text.data);
+}
+
+/* The quoted value of an attribute, entities decoded. */
+static WCHAR *svg_read_quoted(struct svg_parser *parser, WCHAR quote)
+{
+	struct svg_text text = {0};
+	++parser->at;
+	while (parser->at < parser->end && *parser->at != quote) {
+		if (*parser->at == '&') {
+			if (!svg_entity(parser, &text)) {
+				svg_text_add(&text, '&');
+				++parser->at;
+			}
+		} else
+			svg_text_add(&text, *parser->at++);
+	}
+	if (parser->at >= parser->end) {
+		FREE(text.data);
+		return NULL;
+	}
+	++parser->at;
+	if (!text.data)
+		text.data = svg_dup(L"", 0);
+	return text.data;
+}
+
+static BOOL svg_parse_attributes(struct svg_parser *parser, struct svg_element *element)
+{
+	for (;;) {
+		const WCHAR *start;
+		UINT32 length;
+		WCHAR *value;
+		struct svg_attribute *attribute;
+		while (parser->at < parser->end && svg_is_space(*parser->at))
+			++parser->at;
+		if (parser->at >= parser->end)
+			return FALSE;
+		if (*parser->at == '>' || *parser->at == '/')
+			return TRUE;
+		start = parser->at;
+		while (parser->at < parser->end && !svg_is_space(*parser->at) && *parser->at != '=' && *parser->at != '>' && *parser->at != '/')
+			++parser->at;
+		length = (UINT32)(parser->at - start);
+		if (!length)
+			return FALSE;
+		while (parser->at < parser->end && svg_is_space(*parser->at))
+			++parser->at;
+		if (parser->at < parser->end && *parser->at == '=') {
+			++parser->at;
+			while (parser->at < parser->end && svg_is_space(*parser->at))
+				++parser->at;
+			if (parser->at >= parser->end || (*parser->at != '"' && *parser->at != '\''))
+				return FALSE;
+			value = svg_read_quoted(parser, *parser->at);
+		} else
+			value = svg_dup(L"", 0);
+		if (!value)
+			return FALSE;
+		if (!(attribute = svg_add_attribute_counted(element, start, length))) {
+			FREE(value);
+			return FALSE;
+		}
+		attribute->string = value;
+	}
+}
+
+static BOOL svg_starts(struct svg_parser *parser, const char *mark)
+{
+	const UINT32 length = svg_clen(mark);
+	UINT32 i;
+	if ((UINT32)(parser->end - parser->at) < length)
+		return FALSE;
+	for (i = 0; i < length; ++i)
+		if (parser->at[i] != (WCHAR)mark[i])
+			return FALSE;
+	return TRUE;
+}
+
+static void svg_skip_to(struct svg_parser *parser, const char *mark)
+{
+	const UINT32 length = svg_clen(mark);
+	while (parser->at + length <= parser->end) {
+		UINT32 i;
+		BOOL same = TRUE;
+		for (i = 0; i < length; ++i)
+			if (parser->at[i] != (WCHAR)mark[i])
+				same = FALSE;
+		if (same) {
+			parser->at += length;
+			return;
+		}
+		++parser->at;
+	}
+	parser->at = parser->end;
+}
+
+/* An element complete in itself: attached to the open parent, or the root of the document. */
+static BOOL svg_finish_element(struct svg_parser *parser, struct svg_element *element)
+{
+	if (parser->depth)
+		return svg_attach_child(parser->stack[parser->depth - 1], element);
+	if (parser->root_seen || parser->document->root) {
+		svg_fail(parser, "more than one top-level element");
+		return FALSE;
+	}
+	parser->root_seen = TRUE;
+	parser->document->root = element;
+	return TRUE;
+}
+
+/* The XML itself: prolog constructs, the elements, the text. The first top-level element is the root;
+ * a second one is an error, as XML demands. */
+static BOOL svg_parse(struct svg_document *document, const WCHAR *xml, UINT32 count, UINT32 *fail_offset)
+{
+	struct svg_parser parser;
+	memset(&parser, 0, sizeof(parser));
+	parser.document = document;
+	parser.at = xml;
+	parser.end = xml + count;
+	parser.start = xml;
+	parser.fail_at = 0;
+	while (!parser.error && parser.at < parser.end) {
+		if (*parser.at != '<') {
+			svg_read_text(&parser);
+			continue;
+		}
+		if (svg_starts(&parser, "<?")) {
+			svg_skip_to(&parser, "?>");
+			continue;
+		}
+		if (svg_starts(&parser, "<!--")) {
+			svg_skip_to(&parser, "-->");
+			continue;
+		}
+		if (svg_starts(&parser, "<![CDATA[")) {
+			struct svg_text text = {0};
+			parser.at += 9;
+			while (parser.at + 3 <= parser.end && !(parser.at[0] == ']' && parser.at[1] == ']' && parser.at[2] == '>'))
+				svg_text_add(&text, *parser.at++);
+			if (parser.at + 3 <= parser.end)
+				parser.at += 3;
+			else
+				parser.at = parser.end;
+			if (text.used && !svg_whitespace_only(&text) && parser.depth)
+				svg_attach_text(parser.stack[parser.depth - 1], text.data, text.used);
+			FREE(text.data);
+			continue;
+		}
+		if (svg_starts(&parser, "<!")) {
+			/* a declaration or a document type: skipped, its internal subset included */
+			const WCHAR *bracket = parser.at;
+			while (bracket < parser.end && *bracket != '[' && *bracket != '>')
+				++bracket;
+			svg_skip_to(&parser, bracket < parser.end && *bracket == '[' ? "]>" : ">");
+			continue;
+		}
+		if (parser.at + 1 < parser.end && parser.at[1] == '/') {
+			const WCHAR *start;
+			++parser.at;
+			++parser.at;
+			start = parser.at;
+			while (parser.at < parser.end && *parser.at != '>')
+				++parser.at;
+			if (parser.at >= parser.end || !parser.depth) {
+				svg_fail(&parser, "a closing tag with no open element");
+				break;
+			}
+			if (!svg_same_count(parser.stack[parser.depth - 1]->tag, start, (UINT32)(parser.at - start)))
+				svg_fail(&parser, "a closing tag of another element");
+			else
+				--parser.depth;
+			if (parser.at < parser.end)
+				++parser.at;
+			continue;
+		}
+		{
+			/* an open or self-closing tag */
+			const WCHAR *start;
+			UINT32 length;
+			struct svg_element *element;
+			BOOL self_closing;
+			++parser.at;
+			start = parser.at;
+			while (parser.at < parser.end && !svg_is_space(*parser.at) && *parser.at != '>' && *parser.at != '/')
+				++parser.at;
+			length = (UINT32)(parser.at - start);
+			if (!length) {
+				svg_fail(&parser, "a tag with no name");
+				break;
+			}
+			if (!(element = svg_new_element(document, start, length))) {
+				svg_fail(&parser, "out of memory");
+				break;
+			}
+			if (!svg_parse_attributes(&parser, element) || parser.at >= parser.end) {
+				svg_fail(&parser, "a tag that does not parse");
+				break;
+			}
+			self_closing = *parser.at == '/';
+			++parser.at;
+			if (self_closing) {
+				if (!svg_finish_element(&parser, element))
+					break;
+			} else if (parser.depth >= 128) {
+				svg_fail(&parser, "the elements nest too deep");
+				break;
+			} else {
+				if (parser.depth) {
+					if (!svg_attach_child(parser.stack[parser.depth - 1], element))
+						break;
+				} else {
+					if (parser.root_seen || document->root) {
+						svg_fail(&parser, "more than one top-level element");
+						break;
+					}
+					parser.root_seen = TRUE;
+					document->root = element;
+				}
+				parser.stack[parser.depth++] = element;
+			}
+		}
+	}
+	if (parser.error || parser.depth || !document->root) {
+		if (fail_offset)
+			*fail_offset = parser.fail_at;
+		return FALSE;
+	}
+	if (fail_offset)
+		*fail_offset = 0;
+	return TRUE;
+}
+
+/* ---- the stream: the XML of a document, in UTF-8 or UTF-16 with or without a mark ---- */
+static HRESULT svg_read_stream(IStream *stream, WCHAR **out, UINT32 *count)
+{
+	struct bytes raw = {0};
+	char take[8192];
+	ULONG read = 0;
+	WCHAR *wide = NULL;
+	if (!stream || !out || !count)
+		return E_POINTER;
+	*out = NULL;
+	*count = 0;
+	for (;;) {
+		if (FAILED(IStream_Read(stream, take, sizeof(take), &read)) || !read)
+			break;
+		if (!bytes_add(&raw, take, read)) {
+			FREE(raw.data);
+			return E_OUTOFMEMORY;
+		}
+		if (raw.size > 32 * 1024 * 1024) {
+			FREE(raw.data);
+			return E_OUTOFMEMORY;
+		}
+	}
+	/* UTF-16 little or big endian, with a mark or without one: a leading pair whose exactly one byte is
+	 * zero is BOM-less UTF-16 (the XML encoding sniff — a UTF-8 document can never begin with a NUL),
+	 * which is what a program writing the wide text back into its stream hands the parser */
+	{
+		BOOL little = raw.size >= 2 && (BYTE)raw.data[0] == 0xff && (BYTE)raw.data[1] == 0xfe;
+		BOOL big = raw.size >= 2 && (BYTE)raw.data[0] == 0xfe && (BYTE)raw.data[1] == 0xff;
+		UINT32 skip = 0, characters, i;
+		const char *pairs;
+		if (!little && !big && raw.size >= 2 && ((BYTE)raw.data[0] == 0) != ((BYTE)raw.data[1] == 0)) {
+			little = (BYTE)raw.data[1] == 0;
+			big = !little;
+		}
+		if (little || big) {
+			skip = 2;
+			pairs = raw.data + skip;
+			characters = (UINT32)((raw.size - skip) / 2);
+			if (!(wide = ALLOC(((size_t)characters + 1) * sizeof(WCHAR)))) {
+				FREE(raw.data);
+				return E_OUTOFMEMORY;
+			}
+			for (i = 0; i < characters; ++i) {
+				if (little) {
+					((BYTE *)wide)[i * 2] = pairs[i * 2];
+					((BYTE *)wide)[i * 2 + 1] = pairs[i * 2 + 1];
+				} else {
+					((BYTE *)wide)[i * 2] = pairs[i * 2 + 1];
+					((BYTE *)wide)[i * 2 + 1] = pairs[i * 2];
+				}
+			}
+			wide[characters] = 0;
+			*count = characters;
+		} else {
+			/* UTF-8 (the byte order mark, if any, drops out of the text) */
+			const char *text = raw.data;
+			UINT32 total = raw.size;
+			int length;
+			if (raw.size >= 3 && (BYTE)raw.data[0] == 0xef && (BYTE)raw.data[1] == 0xbb && (BYTE)raw.data[2] == 0xbf) {
+				text += 3;
+				total -= 3;
+			}
+			if ((length = MultiByteToWideChar(CP_UTF8, 0, text, (int)total, NULL, 0)) > 0) {
+				if (!(wide = ALLOC(((size_t)length + 1) * sizeof(WCHAR)))) {
+					FREE(raw.data);
+					return E_OUTOFMEMORY;
+				}
+				MultiByteToWideChar(CP_UTF8, 0, text, (int)total, wide, length);
+				wide[length] = 0;
+				*count = (UINT32)length;
+			}
+		}
+	}
+	FREE(raw.data);
+	if (!wide)
+		return E_INVALIDARG;
+	/* a leading byte order mark that survived the conversion is not part of the document */
+	if (*count && wide[0] == 0xfeff) {
+		memmove(wide, wide + 1, (*count - 1) * sizeof(WCHAR));
+		*count -= 1;
+	}
+	*out = wide;
+	return S_OK;
+}
+
+/* ---- serialization: the tree back to XML in UTF-8 for SaveAsync ---- */
+static void svg_write_escaped(struct bytes *out, const WCHAR *text, UINT32 count, BOOL attribute)
+{
+	UINT32 i;
+	for (i = 0; i < count; ++i) {
+		WCHAR c = text[i];
+		if (c == '&')
+			bytes_add(out, "&amp;", 5);
+		else if (c == '<')
+			bytes_add(out, "&lt;", 4);
+		else if (c == '>' && !attribute)
+			bytes_add(out, "&gt;", 4);
+		else if (c == '"' && attribute)
+			bytes_add(out, "&quot;", 6);
+		else if (c >= 32 && c < 127)
+			bytes_add(out, &c, 1);
+		else if (c) {
+			/* anything outside ASCII as its XML numeric character reference */
+			char reference[14];
+			UINT32 value = c, at = 0, digit_count = 0;
+			char digits[8];
+			reference[at++] = '&';
+			reference[at++] = '#';
+			while (value && digit_count < 7) {
+				digits[digit_count++] = (char)('0' + value % 10);
+				value /= 10;
+			}
+			while (digit_count)
+				reference[at++] = digits[--digit_count];
+			reference[at++] = ';';
+			bytes_add(out, reference, at);
+		}
+	}
+}
+
+static void svg_serialize_element(struct bytes *out, struct svg_element *element)
+{
+	UINT32 i;
+	if (element->tag && element->tag[0]) {
+		bytes_add(out, "<", 1);
+		svg_write_escaped(out, element->tag, svg_len(element->tag), FALSE);
+		for (i = 0; i < element->attribute_count; ++i) {
+			struct svg_text text = {0};
+			BOOL have_text = FALSE;
+			bytes_add(out, " ", 1);
+			svg_write_escaped(out, element->attributes[i].name, svg_len(element->attributes[i].name), FALSE);
+			bytes_add(out, "=\"", 2);
+			if (element->attributes[i].string)
+				have_text = TRUE;
+			else if (element->attributes[i].pod)
+				have_text = svg_format_pod(element->attributes[i].pod_type, element->attributes[i].pod, &text);
+			else if (element->attributes[i].value) {
+				/* an attribute object: its paint state as text */
+				ID2D1SvgPaint *paint = NULL;
+				if (SUCCEEDED(IUnknown_QueryInterface(element->attributes[i].value, &IID_ID2D1SvgPaint, (void **)&paint))) {
+					struct svg_paint *p = (struct svg_paint *)paint;
+					if (p->type == D2D1_SVG_PAINT_TYPE_NONE)
+						have_text = svg_text_puts(&text, L"none");
+					else
+						have_text = svg_format_pod(D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR, &p->color, &text);
+					object_Release(paint);
+				}
+			}
+			if (have_text && text.data)
+				svg_write_escaped(out, text.data, text.used, TRUE);
+			else if (element->attributes[i].string)
+				svg_write_escaped(out, element->attributes[i].string, svg_len(element->attributes[i].string), TRUE);
+			bytes_add(out, "\"", 1);
+			FREE(text.data);
+		}
+		if (!element->child_count) {
+			bytes_add(out, "/>", 2);
+			return;
+		}
+		bytes_add(out, ">", 1);
+	}
+	for (i = 0; i < element->child_count; ++i) {
+		struct svg_element *child = element->children[i];
+		if (child->text) {
+			svg_write_escaped(out, child->text, svg_len(child->text), FALSE);
+			continue;
+		}
+		svg_serialize_element(out, child);
+	}
+	if (element->tag && element->tag[0]) {
+		bytes_add(out, "</", 2);
+		svg_write_escaped(out, element->tag, svg_len(element->tag), FALSE);
+		bytes_add(out, ">", 1);
+	}
+}
+
+/* A narrow unsigned number for a trace line. */
+static UINT32 svg_narrow_uint(char *out, UINT32 value)
+{
+	char digits[10];
+	UINT32 count = 0, at = 0;
+	if (!value)
+		digits[count++] = '0';
+	while (value && count < 10) {
+		digits[count++] = (char)('0' + value % 10);
+		value /= 10;
+	}
+	while (count)
+		out[at++] = digits[--count];
+	return at;
+}
+
+static void svg_trace_created(struct svg_document *document, D2D1_SIZE_F viewport)
+{
+	char more[128], number[12];
+	UINT32 at = 0, i, length;
+	/* the root tag in ASCII, or that there is none */
+	if (document->root) {
+		more[at++] = '<';
+		length = svg_len(document->root->tag);
+		for (i = 0; i < length && i < 20 && document->root->tag[i] >= 32 && document->root->tag[i] < 127; ++i)
+			more[at++] = (char)document->root->tag[i];
+		more[at++] = '>';
+		more[at++] = ',';
+		more[at++] = ' ';
+	} else {
+		memcpy(more, "no root, ", 9);
+		at = 9;
+	}
+	at += svg_narrow_uint(more + at, document->element_count);
+	memcpy(more + at, " elements, viewport ", 20);
+	at += 20;
+	at += svg_narrow_uint(more + at, (UINT32)viewport.width);
+	more[at++] = 'x';
+	at += svg_narrow_uint(more + at, (UINT32)viewport.height);
+	more[at] = 0;
+	svg_trace2("ID2D1DeviceContext5", "CreateSvgDocument", more);
+}
+
+/* ---- the attribute values: text, typed, or objects ---- */
+static HRESULT svg_element_set_attribute_string(struct svg_element *self, PCWSTR name, D2D1_SVG_ATTRIBUTE_STRING_TYPE type, PCWSTR value)
+{
+	struct svg_attribute *attribute;
+	if (!name || !value)
+		return E_INVALIDARG;
+	if (type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG && type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_ID)
+		return E_INVALIDARG;
+	if (!(attribute = svg_find_attribute(self, name)) && !(attribute = svg_add_attribute(self, name)))
+		return E_OUTOFMEMORY;
+	svg_attribute_clear(attribute);
+	attribute->string = svg_dup(value, svg_len(value));
+	if (!attribute->string)
+		return E_OUTOFMEMORY;
+	return S_OK;
+}
+
+/* An attribute object answers GetElement with the element it hangs on. */
+static void svg_attribute_note_element(IUnknown *unknown, struct svg_element *element)
+{
+	ID2D1SvgPaint *paint = NULL;
+	ID2D1SvgStrokeDashArray *dash = NULL;
+	ID2D1SvgPointCollection *points = NULL;
+	ID2D1SvgPathData *data = NULL;
+	if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPaint, (void **)&paint)))
+		((struct svg_paint *)paint)->element = element;
+	else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgStrokeDashArray, (void **)&dash)))
+		((struct svg_dash_array *)dash)->element = element;
+	else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPointCollection, (void **)&points)))
+		((struct svg_points *)points)->element = element;
+	else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPathData, (void **)&data)))
+		((struct svg_path_data *)data)->element = element;
+	if (paint)
+		object_Release(paint);
+	if (dash)
+		object_Release(dash);
+	if (points)
+		object_Release(points);
+	if (data)
+		object_Release(data);
+}
+
+static HRESULT svg_element_get_attribute_text(struct svg_element *self, PCWSTR name, PWSTR buffer, UINT32 buffer_count, UINT32 *length_out)
+{
+	struct svg_attribute *attribute;
+	struct svg_text text = {0};
+	BOOL have = FALSE;
+	HRESULT result;
+	if (!name)
+		return E_INVALIDARG;
+	if (!(attribute = svg_find_attribute(self, name)))
+		return E_INVALIDARG;
+	if (attribute->string) {
+		if (length_out)
+			*length_out = svg_len(attribute->string);
+		result = svg_text_out(attribute->string, buffer, buffer_count);
+	} else if (attribute->pod) {
+		have = svg_format_pod(attribute->pod_type, attribute->pod, &text);
+		if (length_out)
+			*length_out = text.used;
+		result = have ? svg_text_out(text.data, buffer, buffer_count) : E_INVALIDARG;
+	} else if (attribute->value) {
+		ID2D1SvgPaint *paint = NULL;
+		if (SUCCEEDED(IUnknown_QueryInterface(attribute->value, &IID_ID2D1SvgPaint, (void **)&paint))) {
+			struct svg_paint *p = (struct svg_paint *)paint;
+			if (p->type == D2D1_SVG_PAINT_TYPE_NONE)
+				have = svg_text_puts(&text, L"none");
+			else
+				have = svg_format_pod(D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR, &p->color, &text);
+			object_Release(paint);
+		}
+		if (length_out)
+			*length_out = text.used;
+		result = have ? svg_text_out(text.data, buffer, buffer_count) : E_INVALIDARG;
+	} else
+		result = E_INVALIDARG;
+	FREE(text.data);
+	if (FAILED(result))
+		svg_trace2("ID2D1SvgElement", "GetAttributeValue", "the value does not come back as text");
+	return result;
+}
+
+static HRESULT svg_element_get_attribute_length(struct svg_element *self, PCWSTR name, UINT32 *value_length)
+{
+	struct svg_attribute *attribute;
+	struct svg_text text = {0};
+	HRESULT result = S_OK;
+	if (!name || !value_length)
+		return E_POINTER;
+	*value_length = 0;
+	if (!(attribute = svg_find_attribute(self, name)))
+		return E_INVALIDARG;
+	if (attribute->string)
+		*value_length = svg_len(attribute->string);
+	else if (attribute->pod) {
+		if (svg_format_pod(attribute->pod_type, attribute->pod, &text))
+			*value_length = text.used;
+	} else if (attribute->value) {
+		ID2D1SvgPaint *paint = NULL;
+		if (SUCCEEDED(IUnknown_QueryInterface(attribute->value, &IID_ID2D1SvgPaint, (void **)&paint))) {
+			struct svg_paint *p = (struct svg_paint *)paint;
+			if (p->type != D2D1_SVG_PAINT_TYPE_NONE && svg_format_pod(D2D1_SVG_ATTRIBUTE_POD_TYPE_COLOR, &p->color, &text))
+				*value_length = text.used;
+			else if (p->type == D2D1_SVG_PAINT_TYPE_NONE)
+				*value_length = 4; /* "none" */
+			object_Release(paint);
+		}
+	} else
+		result = E_INVALIDARG;
+	FREE(text.data);
+	return result;
+}
+
+static HRESULT svg_element_set_attribute_pod(struct svg_element *self, PCWSTR name, D2D1_SVG_ATTRIBUTE_POD_TYPE type, const void *value, UINT32 bytes)
+{
+	struct svg_attribute *attribute;
+	UINT32 expected;
+	if (!name || !value)
+		return E_INVALIDARG;
+	if (!(expected = svg_pod_bytes(type)) || bytes != expected)
+		return E_INVALIDARG;
+	if (!(attribute = svg_find_attribute(self, name)) && !(attribute = svg_add_attribute(self, name)))
+		return E_OUTOFMEMORY;
+	svg_attribute_clear(attribute);
+	if (!(attribute->pod = ALLOC(bytes)))
+		return E_OUTOFMEMORY;
+	memcpy(attribute->pod, value, bytes);
+	attribute->pod_bytes = bytes;
+	attribute->pod_type = type;
+	return S_OK;
+}
+
+static HRESULT svg_element_get_attribute_pod(struct svg_element *self, PCWSTR name, D2D1_SVG_ATTRIBUTE_POD_TYPE type, void *value, UINT32 bytes)
+{
+	struct svg_attribute *attribute;
+	UINT32 expected;
+	if (!name || !value)
+		return E_POINTER;
+	if (!(expected = svg_pod_bytes(type)) || bytes != expected)
+		return E_INVALIDARG;
+	if (!(attribute = svg_find_attribute(self, name)))
+		return E_INVALIDARG;
+	if (attribute->pod) {
+		if (attribute->pod_type != (int)type || attribute->pod_bytes != bytes)
+			return E_INVALIDARG;
+		memcpy(value, attribute->pod, bytes);
+		return S_OK;
+	}
+	if (attribute->string && svg_parse_pod(attribute->string, type, value, bytes))
+		return S_OK;
+	svg_trace2("ID2D1SvgElement", "GetAttributeValue", "the value does not read as the typed form asked");
+	return E_INVALIDARG;
+}
+
+static HRESULT svg_element_set_attribute_object(struct svg_element *self, PCWSTR name, ID2D1SvgAttribute *value)
+{
+	struct svg_attribute *attribute;
+	if (!name)
+		return E_INVALIDARG;
+	if (!(attribute = svg_find_attribute(self, name)) && !(attribute = svg_add_attribute(self, name)))
+		return E_OUTOFMEMORY;
+	svg_attribute_clear(attribute);
+	attribute->value = (IUnknown *)value;
+	if (attribute->value) {
+		IUnknown_AddRef(attribute->value);
+		svg_attribute_note_element(attribute->value, self);
+	}
+	return S_OK;
+}
+
+/* An attribute object made out of what the document parsed: the paint of a fill or stroke, the dash
+ * array of a stroke-dasharray, the points of a polyline. The path data of a d attribute is not built
+ * here: its grammar is its own work, and the trace names the ask. */
+static HRESULT svg_element_materialize_attribute(struct svg_element *self, PCWSTR name, REFIID riid, void **out)
+{
+	struct svg_attribute *attribute;
+	struct svg_paint *paint;
+	svg_trace2("ID2D1SvgElement", "GetAttributeValue", "an attribute object made of the parsed value");
+	if (svg_same(name, L"fill") || svg_same(name, L"stroke")) {
+		D2D1_SVG_PAINT_TYPE type = D2D1_SVG_PAINT_TYPE_NONE;
+		D2D1_COLOR_F color = {0, 0, 0, 1};
+		WCHAR *id = NULL;
+		const WCHAR *text = NULL;
+		if ((attribute = svg_find_attribute(self, name)) && attribute->string && attribute->string[0])
+			text = attribute->string;
+		if (text) {
+			if (svg_same(text, L"none"))
+				type = D2D1_SVG_PAINT_TYPE_NONE;
+			else if (svg_same(text, L"currentColor"))
+				type = D2D1_SVG_PAINT_TYPE_CURRENT_COLOR;
+			else if (svg_same_count(text, L"url(", 4)) {
+				const WCHAR *open = text + 4;
+				const WCHAR *close = open;
+				UINT32 length;
+				type = D2D1_SVG_PAINT_TYPE_URI;
+				while (*close && *close != ')')
+					++close;
+				if (open < close && *open == '#')
+					open += 1;
+				length = (UINT32)(close - open);
+				if (length && (id = svg_dup(open, length))) {
+					const WCHAR *rest = close + (*close ? 1 : 0);
+					while (*rest == ' ')
+						++rest;
+					if (*rest) {
+						if (svg_same(rest, L"none"))
+							type = D2D1_SVG_PAINT_TYPE_URI_NONE;
+						else if (svg_same(rest, L"currentColor"))
+							type = D2D1_SVG_PAINT_TYPE_URI_CURRENT_COLOR;
+						else if (svg_color(rest, &color))
+							type = D2D1_SVG_PAINT_TYPE_URI_COLOR;
+					}
+				}
+			} else if (svg_color(text, &color))
+				type = D2D1_SVG_PAINT_TYPE_COLOR;
+		}
+		if (!(paint = ALLOC(sizeof(*paint))))
+			return E_OUTOFMEMORY;
+		object_init(&paint->base, svg_paint_table, NULL, svg_paint_iids, 3, self->document->base.factory);
+		paint->element = self;
+		paint->type = type;
+		paint->color = color;
+		paint->id = id;
+		*out = paint;
+		return S_OK;
+	}
+	if (svg_same(name, L"stroke-dasharray")) {
+		struct svg_dash_array *array;
+		if (!(array = ALLOC(sizeof(*array))))
+			return E_OUTOFMEMORY;
+		object_init(&array->base, svg_dash_table, NULL, svg_dash_iids, 3, self->document->base.factory);
+		array->element = self;
+		if ((attribute = svg_find_attribute(self, name)) && attribute->string && attribute->string[0] && !svg_same(attribute->string, L"none")) {
+			const WCHAR *text = attribute->string;
+			UINT32 i = 0, count = 0, length = svg_len(text);
+			D2D1_SVG_LENGTH parsed[64];
+			while (i < length && count < 64) {
+				UINT32 start;
+				while (i < length && (svg_is_space(text[i]) || text[i] == ','))
+					++i;
+				start = i;
+				while (i < length && !svg_is_space(text[i]) && text[i] != ',')
+					++i;
+				if (i > start) {
+					parsed[count].value = svg_wtof(text + start, i - start, NULL);
+					parsed[count].units = start < length && text[length - 1] == '%' && i == length ? D2D1_SVG_LENGTH_UNITS_PERCENTAGE : D2D1_SVG_LENGTH_UNITS_NUMBER;
+					++count;
+				} else
+					++i;
+			}
+			if (count) {
+				if (!(array->dashes = ALLOC(count * sizeof(*array->dashes)))) {
+					object_Release(&array->base);
+					return E_OUTOFMEMORY;
+				}
+				memcpy(array->dashes, parsed, count * sizeof(*array->dashes));
+				array->count = count;
+			}
+		}
+		*out = array;
+		return S_OK;
+	}
+	if (svg_same(name, L"points")) {
+		struct svg_points *collection;
+		if (!(collection = ALLOC(sizeof(*collection))))
+			return E_OUTOFMEMORY;
+		object_init(&collection->base, svg_points_table, NULL, svg_points_iids, 3, self->document->base.factory);
+		collection->element = self;
+		if ((attribute = svg_find_attribute(self, name)) && attribute->string && attribute->string[0]) {
+			const WCHAR *text = attribute->string;
+			UINT32 i = 0, count = 0, length = svg_len(text);
+			D2D1_POINT_2F parsed[256];
+			while (i < length && count < 256) {
+				UINT32 start;
+				float x, y;
+				BOOL ok;
+				while (i < length && (svg_is_space(text[i]) || text[i] == ','))
+					++i;
+				start = i;
+				while (i < length && text[i] != ',' && !svg_is_space(text[i]))
+					++i;
+				x = svg_wtof(text + start, i - start, &ok);
+				if (!ok)
+					break;
+				while (i < length && (svg_is_space(text[i]) || text[i] == ','))
+					++i;
+				start = i;
+				while (i < length && text[i] != ',' && !svg_is_space(text[i]))
+					++i;
+				y = svg_wtof(text + start, i - start, &ok);
+				if (!ok)
+					break;
+				parsed[count].x = x;
+				parsed[count].y = y;
+				++count;
+			}
+			if (count) {
+				if (!(collection->points = ALLOC(count * sizeof(*collection->points)))) {
+					object_Release(&collection->base);
+					return E_OUTOFMEMORY;
+				}
+				memcpy(collection->points, parsed, count * sizeof(*collection->points));
+				collection->count = count;
+			}
+		}
+		*out = collection;
+		return S_OK;
+	}
+	if (svg_same(name, L"d")) {
+		svg_trace2("ID2D1SvgElement", "GetAttributeValue", "the path data object of a d attribute is not built here");
+		return E_NOINTERFACE;
+	}
+	svg_trace2("ID2D1SvgElement", "GetAttributeValue", "the name holds no attribute object");
+	return E_INVALIDARG;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_SetAttributeValue_string(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_STRING_TYPE type, PCWSTR value)
+{
+	struct svg_element *self = iface;
+	HRESULT result;
+	svg_trace("ID2D1SvgElement", "SetAttributeValue");
+	if (FAILED(result = svg_element_set_attribute_string(self, name, type, value)))
+		svg_trace2("ID2D1SvgElement", "SetAttributeValue", "the value was not kept");
+	return result;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetAttributeValue_string(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_STRING_TYPE type, PWSTR value, UINT32 value_count)
+{
+	struct svg_element *self = iface;
+	if (type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG && type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_ID)
+		return E_INVALIDARG;
+	return svg_element_get_attribute_text(self, name, value, value_count, NULL);
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetAttributeValueLength(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_STRING_TYPE type, UINT32 *value_length)
+{
+	struct svg_element *self = iface;
+	if (type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG && type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_ID)
+		return E_INVALIDARG;
+	return svg_element_get_attribute_length(self, name, value_length);
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_SetAttributeValue_pod(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_POD_TYPE type, const void *value, UINT32 value_size_in_bytes)
+{
+	struct svg_element *self = iface;
+	HRESULT result;
+	svg_trace("ID2D1SvgElement", "SetAttributeValue");
+	if (FAILED(result = svg_element_set_attribute_pod(self, name, type, value, value_size_in_bytes)))
+		svg_trace2("ID2D1SvgElement", "SetAttributeValue", "the typed value was not kept");
+	return result;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetAttributeValue_pod(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_POD_TYPE type, void *value, UINT32 value_size_in_bytes)
+{
+	struct svg_element *self = iface;
+	return svg_element_get_attribute_pod(self, name, type, value, value_size_in_bytes);
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_SetAttributeValue_object(void *iface, PCWSTR name, ID2D1SvgAttribute *value)
+{
+	struct svg_element *self = iface;
+	HRESULT result;
+	svg_trace("ID2D1SvgElement", "SetAttributeValue");
+	if (FAILED(result = svg_element_set_attribute_object(self, name, value)))
+		svg_trace2("ID2D1SvgElement", "SetAttributeValue", "the attribute object was not kept");
+	return result;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetAttributeValue_interface(void *iface, PCWSTR name, REFIID riid, void **value)
+{
+	struct svg_element *self = iface;
+	struct svg_attribute *attribute;
+	HRESULT result;
+	if (!value)
+		return E_POINTER;
+	*value = NULL;
+	if (!name || !riid)
+		return E_INVALIDARG;
+	if ((attribute = svg_find_attribute(self, name)) && attribute->value)
+		return IUnknown_QueryInterface(attribute->value, riid, value);
+	result = svg_element_materialize_attribute(self, name, riid, value);
+	if (SUCCEEDED(result) && *value) {
+		/* the object made of the parsed value becomes the attribute, so a later get finds it */
+		if (!(attribute = svg_find_attribute(self, name)))
+			attribute = svg_add_attribute(self, name);
+		if (attribute) {
+			svg_attribute_clear(attribute);
+			attribute->value = (IUnknown *)*value;
+			IUnknown_AddRef(attribute->value);
+		}
+	}
+	return result;
+}
+
+/* ---- the document members ---- */
+static HRESULT STDMETHODCALLTYPE svg_document_SetViewportSize(void *iface, D2D1_SIZE_F viewport_size)
+{
+	struct svg_document *self = iface;
+	svg_trace("ID2D1SvgDocument", "SetViewportSize");
+	self->viewport = viewport_size;
+	return S_OK;
+}
+
+static D2D1_SIZE_F STDMETHODCALLTYPE svg_document_GetViewportSize(void *iface)
+{
+	struct svg_document *self = iface;
+	svg_trace("ID2D1SvgDocument", "GetViewportSize");
+	return self->viewport;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_document_SetRoot(void *iface, ID2D1SvgElement *root)
+{
+	struct svg_document *self = iface;
+	struct svg_element *element = (struct svg_element *)root;
+	svg_trace("ID2D1SvgDocument", "SetRoot");
+	if (element) {
+		if (element->base.factory != self->base.factory) {
+			svg_trace2("ID2D1SvgDocument", "SetRoot", "an element of another resource domain");
+			return D2DERR_WRONG_RESOURCE_DOMAIN;
+		}
+		if (element->document != self)
+			svg_adopt_subtree(element, self); /* a sibling document's element over the same device */
+		svg_detach_child(element); /* out of any parent; the document owns it now */
+		object_AddRef(&element->base);
+	}
+	if (self->root)
+		object_Release(&self->root->base);
+	self->root = element;
+	return S_OK;
+}
+
+static void STDMETHODCALLTYPE svg_document_GetRoot(void *iface, ID2D1SvgElement **root)
+{
+	struct svg_document *self = iface;
+	if (!root)
+		return;
+	*root = (ID2D1SvgElement *)self->root;
+	if (*root)
+		object_AddRef(&self->root->base);
+}
+
+static BOOL svg_find_by_id(struct svg_element *element, const WCHAR *id, struct svg_element **found)
+{
+	UINT32 i;
+	struct svg_attribute *attribute;
+	if ((attribute = svg_find_attribute(element, L"id")) && attribute->string && svg_same(attribute->string, id)) {
+		*found = element;
+		return TRUE;
+	}
+	for (i = 0; i < element->child_count; ++i)
+		if (svg_find_by_id(element->children[i], id, found))
+			return TRUE;
+	return FALSE;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_document_FindElementById(void *iface, PCWSTR id, ID2D1SvgElement **out)
+{
+	struct svg_document *self = iface;
+	struct svg_element *found = NULL;
+	svg_trace("ID2D1SvgDocument", "FindElementById");
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!id || !self->root)
+		return E_INVALIDARG;
+	if (svg_find_by_id(self->root, id, &found)) {
+		*out = (ID2D1SvgElement *)found;
+		object_AddRef(&found->base);
+	}
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_document_Serialize(void *iface, IStream *stream, ID2D1SvgElement *subtree)
+{
+	struct svg_document *self = iface;
+	struct svg_element *element = (struct svg_element *)subtree;
+	struct bytes out = {0};
+	ULONG written = 0;
+	static const char declaration[] = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
+	HRESULT result;
+	svg_trace("ID2D1SvgDocument", "Serialize");
+	if (!stream)
+		return E_POINTER;
+	if (element && element->document != self) {
+		svg_trace2("ID2D1SvgDocument", "Serialize", "an element of another document");
+		return D2DERR_WRONG_RESOURCE_DOMAIN;
+	}
+	if (!element) {
+		bytes_add(&out, declaration, sizeof(declaration) - 1);
+		element = self->root;
+	}
+	if (element)
+		svg_serialize_element(&out, element);
+	if (out.size) {
+		static LONG serialized = 0;
+		LONG seen = InterlockedIncrement(&serialized);
+		if (seen <= 4) {
+			/* what the model writes back, on the trace: the round trip names its own breakage */
+			char head[64];
+			UINT32 at = 0, digits = 0;
+			char digits_buffer[12];
+			UINT32 digit = out.size;
+			while (digit && digits < 10) {
+				digits_buffer[digits++] = (char)('0' + digit % 10);
+				digit /= 10;
+			}
+			head[at++] = '#';
+			head[at++] = (char)('0' + seen);
+			head[at++] = ' ';
+			head[at++] = 'w';
+			head[at++] = 'r';
+			head[at++] = 'o';
+			head[at++] = 't';
+			head[at++] = 'e';
+			head[at++] = ' ';
+			while (digits)
+				head[at++] = digits_buffer[--digits];
+			head[at++] = ' ';
+			head[at++] = 'b';
+			head[at++] = 'y';
+			head[at++] = 't';
+			head[at++] = 'e';
+			head[at++] = 's';
+			head[at] = 0;
+			svg_trace2("ID2D1SvgDocument", "Serialize", head);
+			{
+				char text[160];
+				UINT32 source = 0;
+				while (source < out.size) {
+					UINT32 chunk_at = 0;
+					text[chunk_at++] = '|';
+					text[chunk_at++] = ' ';
+					while (source < out.size && chunk_at < sizeof(text) - 2) {
+						unsigned char c = (unsigned char)out.data[source];
+						text[chunk_at++] = (c >= 32 && c < 127) ? (char)c : '?';
+						++source;
+					}
+					text[chunk_at] = 0;
+					RavenTrace(text);
+				}
+			}
+		}
+		result = IStream_Write(stream, out.data, (ULONG)out.size, &written);
+		FREE(out.data);
+		if (FAILED(result))
+			return result;
+	} else
+		FREE(out.data);
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_document_Deserialize(void *iface, IStream *stream, ID2D1SvgElement **subtree)
+{
+	struct svg_document *self = iface;
+	WCHAR *xml = NULL;
+	UINT32 count = 0;
+	struct svg_element *element, *previous_root;
+	HRESULT result;
+	svg_trace("ID2D1SvgDocument", "Deserialize");
+	if (!subtree)
+		return E_POINTER;
+	*subtree = NULL;
+	if (!stream)
+		return E_POINTER;
+	if (FAILED(result = svg_read_stream(stream, &xml, &count)))
+		return result;
+	/* the fragment parses into the document but stays apart from it */
+	previous_root = self->root;
+	self->root = NULL;
+	if (!svg_parse(self, xml, count, NULL)) {
+		self->root = previous_root;
+		FREE(xml);
+		return E_INVALIDARG;
+	}
+	FREE(xml);
+	element = self->root;
+	self->root = previous_root;
+	if (!element)
+		return E_INVALIDARG;
+	object_AddRef(&element->base);
+	*subtree = (ID2D1SvgElement *)element;
+	return S_OK;
+}
+
+static struct svg_paint *svg_make_paint(IUnknown *factory, D2D1_SVG_PAINT_TYPE type, const D2D1_COLOR_F *color, WCHAR *id)
+{
+	struct svg_paint *paint = ALLOC(sizeof(*paint));
+	if (!paint)
+		return NULL;
+	object_init(&paint->base, svg_paint_table, NULL, svg_paint_iids, 3, factory);
+	paint->type = type;
+	paint->color = color ? *color : (D2D1_COLOR_F){0, 0, 0, 0};
+	paint->id = id; /* the copy comes with the call */
+	return paint;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_document_CreatePaint(void *iface, D2D1_SVG_PAINT_TYPE paint_type, const D2D1_COLOR_F *color, PCWSTR id, ID2D1SvgPaint **paint)
+{
+	struct svg_document *self = iface;
+	struct svg_paint *made;
+	WCHAR *copy = NULL;
+	svg_trace("ID2D1SvgDocument", "CreatePaint");
+	if (!paint)
+		return E_POINTER;
+	*paint = NULL;
+	if (id && !(copy = svg_dup(id, svg_len(id))))
+		return E_OUTOFMEMORY;
+	if (!(made = svg_make_paint(self->base.factory, paint_type, color, copy))) {
+		FREE(copy);
+		return E_OUTOFMEMORY;
+	}
+	*paint = (ID2D1SvgPaint *)made;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_document_CreateStrokeDashArray(void *iface, const D2D1_SVG_LENGTH *dashes, UINT32 dashes_count, ID2D1SvgStrokeDashArray **out)
+{
+	struct svg_document *self = iface;
+	struct svg_dash_array *array;
+	svg_trace("ID2D1SvgDocument", "CreateStrokeDashArray");
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (dashes_count && !dashes)
+		return E_INVALIDARG;
+	if (!(array = ALLOC(sizeof(*array))))
+		return E_OUTOFMEMORY;
+	object_init(&array->base, svg_dash_table, NULL, svg_dash_iids, 3, self->base.factory);
+	if (dashes_count) {
+		if (!(array->dashes = ALLOC(dashes_count * sizeof(*dashes)))) {
+			object_Release(&array->base);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(array->dashes, dashes, dashes_count * sizeof(*dashes));
+		array->count = dashes_count;
+	}
+	*out = (ID2D1SvgStrokeDashArray *)array;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_document_CreatePointCollection(void *iface, const D2D1_POINT_2F *points, UINT32 points_count, ID2D1SvgPointCollection **out)
+{
+	struct svg_document *self = iface;
+	struct svg_points *collection;
+	svg_trace("ID2D1SvgDocument", "CreatePointCollection");
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (points_count && !points)
+		return E_INVALIDARG;
+	if (!(collection = ALLOC(sizeof(*collection))))
+		return E_OUTOFMEMORY;
+	object_init(&collection->base, svg_points_table, NULL, svg_points_iids, 3, self->base.factory);
+	if (points_count) {
+		if (!(collection->points = ALLOC(points_count * sizeof(*points)))) {
+			object_Release(&collection->base);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(collection->points, points, points_count * sizeof(*points));
+		collection->count = points_count;
+	}
+	*out = (ID2D1SvgPointCollection *)collection;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_document_CreatePathData(void *iface, const FLOAT *segment_data, UINT32 segment_data_count, const D2D1_SVG_PATH_COMMAND *commands, UINT32 commands_count, ID2D1SvgPathData **out)
+{
+	struct svg_document *self = iface;
+	struct svg_path_data *data;
+	svg_trace("ID2D1SvgDocument", "CreatePathData");
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if ((segment_data_count && !segment_data) || (commands_count && !commands))
+		return E_INVALIDARG;
+	if (!(data = ALLOC(sizeof(*data))))
+		return E_OUTOFMEMORY;
+	object_init(&data->base, svg_path_table, NULL, svg_path_iids, 3, self->base.factory);
+	if (segment_data_count) {
+		if (!(data->data = ALLOC(segment_data_count * sizeof(*segment_data)))) {
+			object_Release(&data->base);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(data->data, segment_data, segment_data_count * sizeof(*segment_data));
+		data->data_count = segment_data_count;
+	}
+	if (commands_count) {
+		if (!(data->commands = ALLOC(commands_count * sizeof(*commands)))) {
+			object_Release(&data->base);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(data->commands, commands, commands_count * sizeof(*commands));
+		data->command_count = commands_count;
+	}
+	*out = (ID2D1SvgPathData *)data;
+	return S_OK;
+}
+
+/* ---- the element members ---- */
+static void STDMETHODCALLTYPE svg_element_GetDocument(void *iface, ID2D1SvgDocument **document)
+{
+	struct svg_element *self = iface;
+	if (!document)
+		return;
+	*document = (ID2D1SvgDocument *)self->document;
+	if (*document)
+		object_AddRef(&self->document->base);
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetTagName(void *iface, PWSTR name, UINT32 name_count)
+{
+	struct svg_element *self = iface;
+	HRESULT result = svg_text_out(self->tag, name, name_count);
+	if (FAILED(result))
+		svg_trace2("ID2D1SvgElement", "GetTagName", "the buffer is too small");
+	return result;
+}
+
+static UINT32 STDMETHODCALLTYPE svg_element_GetTagNameLength(void *iface)
+{
+	struct svg_element *self = iface;
+	return svg_len(self->tag);
+}
+
+static BOOL STDMETHODCALLTYPE svg_element_IsTextContent(void *iface)
+{
+	struct svg_element *self = iface;
+	return !self->tag[0];
+}
+
+static void STDMETHODCALLTYPE svg_element_GetParent(void *iface, ID2D1SvgElement **parent)
+{
+	struct svg_element *self = iface;
+	if (!parent)
+		return;
+	*parent = (ID2D1SvgElement *)self->parent;
+	if (*parent)
+		object_AddRef(&self->parent->base);
+}
+
+static BOOL STDMETHODCALLTYPE svg_element_HasChildren(void *iface)
+{
+	struct svg_element *self = iface;
+	return self->child_count != 0;
+}
+
+static void STDMETHODCALLTYPE svg_element_GetFirstChild(void *iface, ID2D1SvgElement **child)
+{
+	struct svg_element *self = iface;
+	if (!child)
+		return;
+	*child = self->child_count ? (ID2D1SvgElement *)self->children[0] : NULL;
+	if (*child)
+		object_AddRef(&self->children[0]->base);
+}
+
+static void STDMETHODCALLTYPE svg_element_GetLastChild(void *iface, ID2D1SvgElement **child)
+{
+	struct svg_element *self = iface;
+	if (!child)
+		return;
+	*child = self->child_count ? (ID2D1SvgElement *)self->children[self->child_count - 1] : NULL;
+	if (*child)
+		object_AddRef(&self->children[self->child_count - 1]->base);
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetPreviousChild(void *iface, ID2D1SvgElement *reference_child, ID2D1SvgElement **previous_child)
+{
+	struct svg_element *self = iface;
+	UINT32 index;
+	if (!previous_child)
+		return E_POINTER;
+	*previous_child = NULL;
+	if (!reference_child)
+		return E_INVALIDARG;
+	if (!svg_child_index(self, (struct svg_element *)reference_child, &index)) {
+		svg_trace2("ID2D1SvgElement", "GetPreviousChild", "the reference child is not a child of this element");
+		return E_INVALIDARG;
+	}
+	if (index) {
+		*previous_child = (ID2D1SvgElement *)self->children[index - 1];
+		object_AddRef(&self->children[index - 1]->base);
+	}
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetNextChild(void *iface, ID2D1SvgElement *reference_child, ID2D1SvgElement **next_child)
+{
+	struct svg_element *self = iface;
+	UINT32 index;
+	if (!next_child)
+		return E_POINTER;
+	*next_child = NULL;
+	if (!reference_child)
+		return E_INVALIDARG;
+	if (!svg_child_index(self, (struct svg_element *)reference_child, &index)) {
+		svg_trace2("ID2D1SvgElement", "GetNextChild", "the reference child is not a child of this element");
+		return E_INVALIDARG;
+	}
+	if (index + 1 < self->child_count) {
+		*next_child = (ID2D1SvgElement *)self->children[index + 1];
+		object_AddRef(&self->children[index + 1]->base);
+	}
+	return S_OK;
+}
+
+/* A child from another tree or document: out of where it was, into this element. Elements
+   of a sibling document over the same device share the resource domain, so they are
+   admitted and retagged (the app grafts material icons this way); a different factory is
+   D2DERR_WRONG_RESOURCE_DOMAIN, as is grafting an element into its own subtree. */
+static HRESULT svg_element_admit_child(struct svg_element *self, ID2D1SvgElement *new_child, const char *method)
+{
+	struct svg_element *child = (struct svg_element *)new_child;
+	struct svg_element *ancestor;
+	if (!child)
+		return E_POINTER;
+	if (child->base.factory != self->base.factory) {
+		svg_trace2("ID2D1SvgElement", method, "an element of another resource domain");
+		return D2DERR_WRONG_RESOURCE_DOMAIN;
+	}
+	if (child == self) {
+		svg_trace2("ID2D1SvgElement", method, "an element into itself");
+		return E_INVALIDARG;
+	}
+	for (ancestor = self->parent; ancestor; ancestor = ancestor->parent)
+		if (ancestor == child) {
+			svg_trace2("ID2D1SvgElement", method, "an element into its own subtree");
+			return E_INVALIDARG;
+		}
+	if (child->document != self->document) {
+		static const char note[] = " adopted from another document (";
+		char text[160];
+		UINT32 at = 0, moved, i;
+		text[at++] = '\'';
+		at += svg_tag_narrow(child->tag, text + at, sizeof(text) - sizeof(note) - 12);
+		text[at++] = '\'';
+		for (i = 0; note[i] && at < sizeof(text) - 2; ++i)
+			text[at++] = note[i];
+		moved = svg_adopt_subtree(child, self->document);
+		at += svg_narrow_uint(text + at, moved);
+		text[at++] = ')';
+		text[at] = 0;
+		svg_trace2("ID2D1SvgElement", method, text);
+	}
+	svg_detach_child(child);
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_InsertChildBefore(void *iface, ID2D1SvgElement *new_child, ID2D1SvgElement *reference_child)
+{
+	struct svg_element *self = iface;
+	struct svg_element *child = (struct svg_element *)new_child;
+	UINT32 index;
+	HRESULT result;
+	svg_trace("ID2D1SvgElement", "InsertChildBefore");
+	/* the reference is validated first: admitting the child moves it out of its old
+	   document, and that must not happen for a call that is going to fail */
+	if (reference_child && !svg_child_index(self, (struct svg_element *)reference_child, &index)) {
+		svg_trace2("ID2D1SvgElement", "InsertChildBefore", "the reference child is not a child of this element");
+		return E_INVALIDARG;
+	}
+	if (FAILED(result = svg_element_admit_child(self, new_child, "InsertChildBefore")))
+		return result;
+	if (!reference_child)
+		return svg_attach_child(self, child) ? S_OK : E_OUTOFMEMORY;
+	/* the admission may have detached the child from this very list: the reference's
+	   place is looked up again */
+	svg_child_index(self, (struct svg_element *)reference_child, &index);
+	if (self->child_count == self->child_capacity) {
+		UINT32 capacity = self->child_capacity ? self->child_capacity * 2 : 8;
+		struct svg_element **grown = GROW(self->children, capacity * sizeof(*grown));
+		if (!grown)
+			return E_OUTOFMEMORY;
+		self->children = grown;
+		self->child_capacity = capacity;
+	}
+	memmove(self->children + index + 1, self->children + index, (self->child_count - index) * sizeof(*self->children));
+	self->children[index] = child;
+	child->parent = self;
+	self->child_count += 1;
+	object_AddRef(&child->base);
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_AppendChild(void *iface, ID2D1SvgElement *new_child)
+{
+	struct svg_element *self = iface;
+	struct svg_element *child = (struct svg_element *)new_child;
+	HRESULT result;
+	svg_trace("ID2D1SvgElement", "AppendChild");
+	if (FAILED(result = svg_element_admit_child(self, new_child, "AppendChild")))
+		return result;
+	return svg_attach_child(self, child) ? S_OK : E_OUTOFMEMORY;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_ReplaceChild(void *iface, ID2D1SvgElement *new_child, ID2D1SvgElement *old_child)
+{
+	struct svg_element *self = iface;
+	struct svg_element *child = (struct svg_element *)new_child, *old = (struct svg_element *)old_child;
+	UINT32 index;
+	HRESULT result;
+	svg_trace("ID2D1SvgElement", "ReplaceChild");
+	if (!old)
+		return E_POINTER;
+	if (FAILED(result = svg_element_admit_child(self, new_child, "ReplaceChild")))
+		return result;
+	if (!svg_child_index(self, old, &index)) {
+		svg_trace2("ID2D1SvgElement", "ReplaceChild", "the old child is not a child of this element");
+		return E_INVALIDARG;
+	}
+	/* the old child leaves (the reference the parent held goes with it) and the new one takes its place */
+	old->parent = NULL;
+	object_Release(&old->base);
+	self->children[index] = child;
+	child->parent = self;
+	object_AddRef(&child->base);
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_RemoveChild(void *iface, ID2D1SvgElement *old_child)
+{
+	struct svg_element *self = iface;
+	UINT32 index;
+	svg_trace("ID2D1SvgElement", "RemoveChild");
+	if (!old_child)
+		return E_POINTER;
+	if (!svg_child_index(self, (struct svg_element *)old_child, &index)) {
+		svg_trace2("ID2D1SvgElement", "RemoveChild", "the child is not a child of this element");
+		return E_INVALIDARG;
+	}
+	svg_detach_child((struct svg_element *)old_child);
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_CreateChild(void *iface, PCWSTR tag_name, ID2D1SvgElement **new_child)
+{
+	struct svg_element *self = iface;
+	struct svg_element *child;
+	svg_trace("ID2D1SvgElement", "CreateChild");
+	if (!new_child)
+		return E_POINTER;
+	*new_child = NULL;
+	if (!tag_name)
+		return E_INVALIDARG;
+	if (!(child = svg_new_element(self->document, tag_name, svg_len(tag_name))))
+		return E_OUTOFMEMORY;
+	if (!svg_attach_child(self, child)) {
+		object_Release(&child->base);
+		return E_OUTOFMEMORY;
+	}
+	*new_child = (ID2D1SvgElement *)child;
+	return S_OK;
+}
+
+static BOOL STDMETHODCALLTYPE svg_element_IsAttributeSpecified(void *iface, PCWSTR name, BOOL *inherited)
+{
+	struct svg_element *self = iface;
+	BOOL found = name && svg_find_attribute(self, name) != NULL;
+	if (inherited)
+		*inherited = FALSE;
+	return found;
+}
+
+static UINT32 STDMETHODCALLTYPE svg_element_GetSpecifiedAttributeCount(void *iface)
+{
+	struct svg_element *self = iface;
+	return self->attribute_count;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetSpecifiedAttributeName(void *iface, UINT32 index, PWSTR name, UINT32 name_count, BOOL *inherited)
+{
+	struct svg_element *self = iface;
+	HRESULT result;
+	if (inherited)
+		*inherited = FALSE;
+	if (index >= self->attribute_count)
+		return E_INVALIDARG;
+	result = svg_text_out(self->attributes[index].name, name, name_count);
+	if (FAILED(result))
+		svg_trace2("ID2D1SvgElement", "GetSpecifiedAttributeName", "the buffer is too small");
+	return result;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetSpecifiedAttributeNameLength(void *iface, UINT32 index, UINT32 *name_length, BOOL *inherited)
+{
+	struct svg_element *self = iface;
+	if (inherited)
+		*inherited = FALSE;
+	if (!name_length)
+		return E_POINTER;
+	if (index >= self->attribute_count)
+		return E_INVALIDARG;
+	*name_length = svg_len(self->attributes[index].name);
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_RemoveAttribute(void *iface, PCWSTR name)
+{
+	struct svg_element *self = iface;
+	if (!name)
+		return E_INVALIDARG;
+	if (!svg_remove_attribute(self, name)) {
+		svg_trace2("ID2D1SvgElement", "RemoveAttribute", "no attribute of the name");
+		return E_INVALIDARG;
+	}
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_SetTextValue(void *iface, const WCHAR *text, UINT32 text_count)
+{
+	struct svg_element *self = iface;
+	WCHAR *copy;
+	svg_trace("ID2D1SvgElement", "SetTextValue");
+	if (!self->tag[0]) {
+		svg_trace2("ID2D1SvgElement", "SetTextValue", "the element holds no text of its own");
+		return E_INVALIDARG;
+	}
+	if (text_count && !text)
+		return E_INVALIDARG;
+	if (!(copy = svg_dup(text, text_count)))
+		return E_OUTOFMEMORY;
+	FREE(self->text);
+	self->text = copy;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_element_GetTextValue(void *iface, PWSTR text, UINT32 text_count)
+{
+	struct svg_element *self = iface;
+	HRESULT result;
+	if (!self->tag[0]) {
+		svg_trace2("ID2D1SvgElement", "GetTextValue", "the element holds no text of its own");
+		return E_INVALIDARG;
+	}
+	result = svg_text_out(self->text ? self->text : L"", text, text_count);
+	if (FAILED(result))
+		svg_trace2("ID2D1SvgElement", "GetTextValue", "the buffer is too small");
+	return result;
+}
+
+static UINT32 STDMETHODCALLTYPE svg_element_GetTextValueLength(void *iface)
+{
+	struct svg_element *self = iface;
+	return svg_len(self->text);
+}
+
+/* ---- the attribute objects: the members ID2D1SvgAttribute itself carries ---- */
+static void STDMETHODCALLTYPE svg_attribute_GetElement(void *iface, ID2D1SvgElement **element)
+{
+	struct svg_attribute_base *self = iface;
+	if (!element)
+		return;
+	*element = (ID2D1SvgElement *)self->element;
+	if (*element)
+		object_AddRef(&self->element->base);
+}
+
+/* ---- the paint attribute object ---- */
+static HRESULT STDMETHODCALLTYPE svg_paint_Clone(void *iface, ID2D1SvgAttribute **attribute)
+{
+	struct svg_paint *self = iface;
+	struct svg_paint *copy;
+	WCHAR *copy_id = NULL;
+	svg_trace("ID2D1SvgPaint", "Clone");
+	if (!attribute)
+		return E_POINTER;
+	if (self->id && !(copy_id = svg_dup(self->id, svg_len(self->id))))
+		return E_OUTOFMEMORY;
+	if (!(copy = svg_make_paint(self->base.factory, self->type, &self->color, copy_id))) {
+		FREE(copy_id);
+		return E_OUTOFMEMORY;
+	}
+	copy->element = self->element;
+	*attribute = (ID2D1SvgAttribute *)copy;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_paint_SetPaintType(void *iface, D2D1_SVG_PAINT_TYPE paint_type)
+{
+	struct svg_paint *self = iface;
+	svg_trace("ID2D1SvgPaint", "SetPaintType");
+	if (paint_type > D2D1_SVG_PAINT_TYPE_URI_CURRENT_COLOR)
+		return E_INVALIDARG;
+	self->type = paint_type;
+	return S_OK;
+}
+
+static D2D1_SVG_PAINT_TYPE STDMETHODCALLTYPE svg_paint_GetPaintType(void *iface)
+{
+	struct svg_paint *self = iface;
+	return self->type;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_paint_SetColor(void *iface, const D2D1_COLOR_F *color)
+{
+	struct svg_paint *self = iface;
+	svg_trace("ID2D1SvgPaint", "SetColor");
+	if (!color)
+		return E_INVALIDARG;
+	self->color = *color;
+	return S_OK;
+}
+
+static void STDMETHODCALLTYPE svg_paint_GetColor(void *iface, D2D1_COLOR_F *color)
+{
+	struct svg_paint *self = iface;
+	if (color)
+		*color = self->color;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_paint_SetId(void *iface, PCWSTR id)
+{
+	struct svg_paint *self = iface;
+	WCHAR *copy;
+	svg_trace("ID2D1SvgPaint", "SetId");
+	if (!id)
+		return E_INVALIDARG;
+	if (!(copy = svg_dup(id, svg_len(id))))
+		return E_OUTOFMEMORY;
+	FREE(self->id);
+	self->id = copy;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_paint_GetId(void *iface, PWSTR id, UINT32 id_count)
+{
+	struct svg_paint *self = iface;
+	HRESULT result = svg_text_out(self->id ? self->id : L"", id, id_count);
+	if (FAILED(result))
+		svg_trace2("ID2D1SvgPaint", "GetId", "the buffer is too small");
+	return result;
+}
+
+static UINT32 STDMETHODCALLTYPE svg_paint_GetIdLength(void *iface)
+{
+	struct svg_paint *self = iface;
+	return svg_len(self->id);
+}
+
+/* ---- the dash array attribute object: the dashes are lengths; the float form sees the values ---- */
+static HRESULT STDMETHODCALLTYPE svg_dash_Clone(void *iface, ID2D1SvgAttribute **attribute)
+{
+	struct svg_dash_array *self = iface;
+	struct svg_dash_array *copy;
+	svg_trace("ID2D1SvgStrokeDashArray", "Clone");
+	if (!attribute)
+		return E_POINTER;
+	if (!(copy = ALLOC(sizeof(*copy))))
+		return E_OUTOFMEMORY;
+	object_init(&copy->base, svg_dash_table, NULL, svg_dash_iids, 3, self->base.factory);
+	copy->element = self->element;
+	copy->count = self->count;
+	if (self->count) {
+		if (!(copy->dashes = ALLOC(self->count * sizeof(*copy->dashes)))) {
+			object_Release(&copy->base);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(copy->dashes, self->dashes, self->count * sizeof(*copy->dashes));
+	}
+	*attribute = (ID2D1SvgAttribute *)copy;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_dash_RemoveDashesAtEnd(void *iface, UINT32 dashes_count)
+{
+	struct svg_dash_array *self = iface;
+	svg_trace("ID2D1SvgStrokeDashArray", "RemoveDashesAtEnd");
+	if (dashes_count > self->count)
+		return E_INVALIDARG;
+	self->count -= dashes_count;
+	return S_OK;
+}
+
+static HRESULT svg_dash_update(struct svg_dash_array *self, const D2D1_SVG_LENGTH *dashes, UINT32 dashes_count, UINT32 start_index)
+{
+	if (start_index > self->count)
+		return E_INVALIDARG;
+	if (start_index + dashes_count > self->count) {
+		D2D1_SVG_LENGTH *grown = GROW(self->dashes, (start_index + dashes_count) * sizeof(*grown));
+		if (!grown)
+			return E_OUTOFMEMORY;
+		self->dashes = grown;
+		self->count = start_index + dashes_count;
+	}
+	memcpy(self->dashes + start_index, dashes, dashes_count * sizeof(*dashes));
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_dash_UpdateDashes_float(void *iface, const FLOAT *dashes, UINT32 dashes_count, UINT32 start_index)
+{
+	struct svg_dash_array *self = iface;
+	D2D1_SVG_LENGTH lengths[64];
+	UINT32 i;
+	HRESULT result;
+	svg_trace("ID2D1SvgStrokeDashArray", "UpdateDashes");
+	if (dashes_count && !dashes)
+		return E_INVALIDARG;
+	for (i = 0; i < dashes_count && i < 64; ++i) {
+		lengths[i].value = dashes[i];
+		lengths[i].units = D2D1_SVG_LENGTH_UNITS_NUMBER;
+	}
+	result = svg_dash_update(self, lengths, dashes_count > 64 ? 64 : dashes_count, start_index);
+	return result;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_dash_UpdateDashes_length(void *iface, const D2D1_SVG_LENGTH *dashes, UINT32 dashes_count, UINT32 start_index)
+{
+	struct svg_dash_array *self = iface;
+	HRESULT result;
+	svg_trace("ID2D1SvgStrokeDashArray", "UpdateDashes");
+	if (dashes_count && !dashes)
+		return E_INVALIDARG;
+	result = svg_dash_update(self, dashes, dashes_count, start_index);
+	return result;
+}
+
+static HRESULT svg_dash_get(const struct svg_dash_array *self, D2D1_SVG_LENGTH *dashes, UINT32 dashes_count, UINT32 start_index)
+{
+	if (start_index + dashes_count > self->count)
+		return E_INVALIDARG;
+	memcpy(dashes, self->dashes + start_index, dashes_count * sizeof(*dashes));
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_dash_GetDashes_float(void *iface, FLOAT *dashes, UINT32 dashes_count, UINT32 start_index)
+{
+	struct svg_dash_array *self = iface;
+	D2D1_SVG_LENGTH lengths[64];
+	UINT32 i;
+	HRESULT result;
+	svg_trace("ID2D1SvgStrokeDashArray", "GetDashes");
+	if (dashes_count && !dashes)
+		return E_INVALIDARG;
+	if (dashes_count > 64)
+		return E_INVALIDARG;
+	if (FAILED(result = svg_dash_get(self, lengths, dashes_count, start_index)))
+		return result;
+	for (i = 0; i < dashes_count; ++i)
+		dashes[i] = lengths[i].value;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_dash_GetDashes_length(void *iface, D2D1_SVG_LENGTH *dashes, UINT32 dashes_count, UINT32 start_index)
+{
+	struct svg_dash_array *self = iface;
+	HRESULT result;
+	svg_trace("ID2D1SvgStrokeDashArray", "GetDashes");
+	if (dashes_count && !dashes)
+		return E_INVALIDARG;
+	return svg_dash_get(self, dashes, dashes_count, start_index);
+}
+
+static UINT32 STDMETHODCALLTYPE svg_dash_GetDashesCount(void *iface)
+{
+	struct svg_dash_array *self = iface;
+	return self->count;
+}
+
+/* ---- the point collection attribute object ---- */
+static HRESULT STDMETHODCALLTYPE svg_points_Clone(void *iface, ID2D1SvgAttribute **attribute)
+{
+	struct svg_points *self = iface;
+	struct svg_points *copy;
+	svg_trace("ID2D1SvgPointCollection", "Clone");
+	if (!attribute)
+		return E_POINTER;
+	if (!(copy = ALLOC(sizeof(*copy))))
+		return E_OUTOFMEMORY;
+	object_init(&copy->base, svg_points_table, NULL, svg_points_iids, 3, self->base.factory);
+	copy->element = self->element;
+	copy->count = self->count;
+	if (self->count) {
+		if (!(copy->points = ALLOC(self->count * sizeof(*copy->points)))) {
+			object_Release(&copy->base);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(copy->points, self->points, self->count * sizeof(*copy->points));
+	}
+	*attribute = (ID2D1SvgAttribute *)copy;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_points_RemovePointsAtEnd(void *iface, UINT32 points_count)
+{
+	struct svg_points *self = iface;
+	svg_trace("ID2D1SvgPointCollection", "RemovePointsAtEnd");
+	if (points_count > self->count)
+		return E_INVALIDARG;
+	self->count -= points_count;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_points_UpdatePoints(void *iface, const D2D1_POINT_2F *points, UINT32 points_count, UINT32 start_index)
+{
+	struct svg_points *self = iface;
+	svg_trace("ID2D1SvgPointCollection", "UpdatePoints");
+	if (points_count && !points)
+		return E_INVALIDARG;
+	if (start_index > self->count)
+		return E_INVALIDARG;
+	if (start_index + points_count > self->count) {
+		D2D1_POINT_2F *grown = GROW(self->points, (start_index + points_count) * sizeof(*grown));
+		if (!grown)
+			return E_OUTOFMEMORY;
+		self->points = grown;
+		self->count = start_index + points_count;
+	}
+	memcpy(self->points + start_index, points, points_count * sizeof(*points));
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_points_GetPoints(void *iface, D2D1_POINT_2F *points, UINT32 points_count, UINT32 start_index)
+{
+	struct svg_points *self = iface;
+	svg_trace("ID2D1SvgPointCollection", "GetPoints");
+	if (points_count && !points)
+		return E_INVALIDARG;
+	if (start_index + points_count > self->count)
+		return E_INVALIDARG;
+	memcpy(points, self->points + start_index, points_count * sizeof(*points));
+	return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE svg_points_GetPointsCount(void *iface)
+{
+	struct svg_points *self = iface;
+	return self->count;
+}
+
+/* ---- the path data attribute object ---- */
+static HRESULT STDMETHODCALLTYPE svg_path_Clone(void *iface, ID2D1SvgAttribute **attribute)
+{
+	struct svg_path_data *self = iface;
+	struct svg_path_data *copy;
+	svg_trace("ID2D1SvgPathData", "Clone");
+	if (!attribute)
+		return E_POINTER;
+	if (!(copy = ALLOC(sizeof(*copy))))
+		return E_OUTOFMEMORY;
+	object_init(&copy->base, svg_path_table, NULL, svg_path_iids, 3, self->base.factory);
+	copy->element = self->element;
+	copy->data_count = self->data_count;
+	copy->command_count = self->command_count;
+	if (self->data_count) {
+		if (!(copy->data = ALLOC(self->data_count * sizeof(*copy->data)))) {
+			object_Release(&copy->base);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(copy->data, self->data, self->data_count * sizeof(*copy->data));
+	}
+	if (self->command_count) {
+		if (!(copy->commands = ALLOC(self->command_count * sizeof(*copy->commands)))) {
+			object_Release(&copy->base);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(copy->commands, self->commands, self->command_count * sizeof(*copy->commands));
+	}
+	*attribute = (ID2D1SvgAttribute *)copy;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_path_RemoveSegmentDataAtEnd(void *iface, UINT32 data_count)
+{
+	struct svg_path_data *self = iface;
+	svg_trace("ID2D1SvgPathData", "RemoveSegmentDataAtEnd");
+	if (data_count > self->data_count)
+		return E_INVALIDARG;
+	self->data_count -= data_count;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_path_UpdateSegmentData(void *iface, const FLOAT *data, UINT32 data_count, UINT32 start_index)
+{
+	struct svg_path_data *self = iface;
+	svg_trace("ID2D1SvgPathData", "UpdateSegmentData");
+	if (data_count && !data)
+		return E_INVALIDARG;
+	if (start_index > self->data_count)
+		return E_INVALIDARG;
+	if (start_index + data_count > self->data_count) {
+		FLOAT *grown = GROW(self->data, (start_index + data_count) * sizeof(*grown));
+		if (!grown)
+			return E_OUTOFMEMORY;
+		self->data = grown;
+		self->data_count = start_index + data_count;
+	}
+	memcpy(self->data + start_index, data, data_count * sizeof(*data));
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_path_GetSegmentData(void *iface, FLOAT *data, UINT32 data_count, UINT32 start_index)
+{
+	struct svg_path_data *self = iface;
+	svg_trace("ID2D1SvgPathData", "GetSegmentData");
+	if (data_count && !data)
+		return E_INVALIDARG;
+	if (start_index + data_count > self->data_count)
+		return E_INVALIDARG;
+	memcpy(data, self->data + start_index, data_count * sizeof(*data));
+	return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE svg_path_GetSegmentDataCount(void *iface)
+{
+	struct svg_path_data *self = iface;
+	return self->data_count;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_path_RemoveCommandsAtEnd(void *iface, UINT32 commands_count)
+{
+	struct svg_path_data *self = iface;
+	svg_trace("ID2D1SvgPathData", "RemoveCommandsAtEnd");
+	if (commands_count > self->command_count)
+		return E_INVALIDARG;
+	self->command_count -= commands_count;
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_path_UpdateCommands(void *iface, const D2D1_SVG_PATH_COMMAND *commands, UINT32 commands_count, UINT32 start_index)
+{
+	struct svg_path_data *self = iface;
+	svg_trace("ID2D1SvgPathData", "UpdateCommands");
+	if (commands_count && !commands)
+		return E_INVALIDARG;
+	if (start_index > self->command_count)
+		return E_INVALIDARG;
+	if (start_index + commands_count > self->command_count) {
+		D2D1_SVG_PATH_COMMAND *grown = GROW(self->commands, (start_index + commands_count) * sizeof(*grown));
+		if (!grown)
+			return E_OUTOFMEMORY;
+		self->commands = grown;
+		self->command_count = start_index + commands_count;
+	}
+	memcpy(self->commands + start_index, commands, commands_count * sizeof(*commands));
+	return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_path_GetCommands(void *iface, D2D1_SVG_PATH_COMMAND *commands, UINT32 commands_count, UINT32 start_index)
+{
+	struct svg_path_data *self = iface;
+	svg_trace("ID2D1SvgPathData", "GetCommands");
+	if (commands_count && !commands)
+		return E_INVALIDARG;
+	if (start_index + commands_count > self->command_count)
+		return E_INVALIDARG;
+	memcpy(commands, self->commands + start_index, commands_count * sizeof(*commands));
+	return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE svg_path_GetCommandsCount(void *iface)
+{
+	struct svg_path_data *self = iface;
+	return self->command_count;
+}
+
+static HRESULT STDMETHODCALLTYPE svg_path_CreatePathGeometry(void *iface, D2D1_FILL_MODE fill_mode, ID2D1PathGeometry1 **path_geometry)
+{
+	svg_trace2("ID2D1SvgPathData", "CreatePathGeometry", "the commands are not turned into a geometry here");
+	(void)iface;
+	(void)fill_mode;
+	if (path_geometry)
+		*path_geometry = NULL;
+	return E_NOTIMPL;
+}
+
+/* ---- the SVG glyph style of a device context ---- */
+static HRESULT STDMETHODCALLTYPE svg_style_SetFill(void *iface, ID2D1Brush *brush)
+{
+	struct svg_glyph_style *self = iface;
+	svg_trace("ID2D1SvgGlyphStyle", "SetFill");
+	if (brush)
+		ID2D1Brush_AddRef(brush);
+	if (self->fill)
+		ID2D1Brush_Release(self->fill);
+	self->fill = brush;
+	return S_OK;
+}
+
+static void STDMETHODCALLTYPE svg_style_GetFill(void *iface, ID2D1Brush **brush)
+{
+	struct svg_glyph_style *self = iface;
+	if (!brush)
+		return;
+	*brush = self->fill;
+	if (*brush)
+		ID2D1Brush_AddRef(*brush);
+}
+
+static HRESULT STDMETHODCALLTYPE svg_style_SetStroke(void *iface, ID2D1Brush *brush, FLOAT stroke_width, const FLOAT *dashes, UINT32 dashes_count, FLOAT dash_offset)
+{
+	struct svg_glyph_style *self = iface;
+	FLOAT *copy = NULL;
+	svg_trace("ID2D1SvgGlyphStyle", "SetStroke");
+	if (dashes_count && !dashes)
+		return E_INVALIDARG;
+	if (dashes_count && !(copy = ALLOC(dashes_count * sizeof(*copy))))
+		return E_OUTOFMEMORY;
+	memcpy(copy, dashes, dashes_count * sizeof(*copy));
+	if (brush)
+		ID2D1Brush_AddRef(brush);
+	if (self->stroke)
+		ID2D1Brush_Release(self->stroke);
+	FREE(self->dashes);
+	self->stroke = brush;
+	self->stroke_width = stroke_width;
+	self->dashes = copy;
+	self->dash_count = dashes_count;
+	self->dash_offset = dash_offset;
+	return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE svg_style_GetStrokeDashesCount(void *iface)
+{
+	struct svg_glyph_style *self = iface;
+	return self->dash_count;
+}
+
+static void STDMETHODCALLTYPE svg_style_GetStroke(void *iface, ID2D1Brush **brush, FLOAT *stroke_width, FLOAT *dashes, UINT32 dashes_count, FLOAT *dash_offset)
+{
+	struct svg_glyph_style *self = iface;
+	UINT32 i;
+	if (brush) {
+		*brush = self->stroke;
+		if (*brush)
+			ID2D1Brush_AddRef(*brush);
+	}
+	if (stroke_width)
+		*stroke_width = self->stroke_width;
+	if (dash_offset)
+		*dash_offset = self->dash_offset;
+	if (dashes && dashes_count)
+		for (i = 0; i < dashes_count && i < self->dash_count; ++i)
+			dashes[i] = self->dashes[i];
+}
+
+/* ---- the device context members ---- */
+static HRESULT STDMETHODCALLTYPE target_CreateSvgDocument(void *iface, IStream *input_xml_stream, D2D1_SIZE_F viewport_size, ID2D1SvgDocument **out)
+{
+	struct target *self = target_of(iface);
+	struct svg_document *document;
+	WCHAR *xml = NULL;
+	UINT32 count = 0;
+	UINT32 fail_offset = 0;
+	HRESULT result;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!(document = ALLOC(sizeof(*document))))
+		return E_OUTOFMEMORY;
+	object_init(&document->base, svg_document_table, svg_document_destroy, svg_document_iids, 2, self->factory);
+	document->viewport = viewport_size;
+	if (input_xml_stream) {
+		if (FAILED(result = svg_read_stream(input_xml_stream, &xml, &count))) {
+			svg_trace2("ID2D1DeviceContext5", "CreateSvgDocument", "the stream did not read");
+			object_Release(&document->base);
+			return result;
+		}
+		if (!svg_parse(document, xml, count, &fail_offset)) {
+			/* the failing input on the trace, so a round trip names its own breakage */
+			if (count) {
+				char offset_text[16];
+				char digits_buffer[12];
+				UINT32 at = 0, digits = 0, digit = fail_offset;
+				while (digit && digits < 10) {
+					digits_buffer[digits++] = (char)('0' + digit % 10);
+					digit /= 10;
+				}
+				if (!digits)
+					digits_buffer[digits++] = '0';
+				offset_text[at++] = '@';
+				while (digits)
+					offset_text[at++] = digits_buffer[--digits];
+				offset_text[at] = 0;
+				svg_trace2("ID2D1DeviceContext5", "CreateSvgDocument", offset_text);
+				svg_trace_text("CreateSvgDocument input", "", xml, count);
+			}
+			svg_trace2("ID2D1DeviceContext5", "CreateSvgDocument", "the XML did not parse");
+			FREE(xml);
+			object_Release(&document->base);
+			return E_INVALIDARG;
+		}
+		FREE(xml);
+	}
+	svg_trace_created(document, viewport_size);
+	*out = (ID2D1SvgDocument *)document;
+	return S_OK;
+}
+
+static void STDMETHODCALLTYPE target_DrawSvgDocument(void *iface, ID2D1SvgDocument *svg_document)
+{
+	static LONG dropped = 0;
+	LONG at = InterlockedIncrement(&dropped);
+	(void)iface;
+	(void)svg_document;
+	/* The document itself is real; only its rasterization is missing with no Skia in this build. */
+	if (at <= 20 || at % 1000 == 0)
+		svg_trace2("ID2D1DeviceContext5", "DrawSvgDocument", "dropped: no SVG rasterizer in this build");
+}
+
+static HRESULT STDMETHODCALLTYPE target_CreateSvgGlyphStyle(void *iface, ID2D1SvgGlyphStyle **out)
+{
+	struct target *self = target_of(iface);
+	struct svg_glyph_style *style;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!(style = ALLOC(sizeof(*style))))
+		return E_OUTOFMEMORY;
+	object_init(&style->base, svg_style_table, NULL, svg_style_iids, 2, self->factory);
+	style->stroke_width = 1;
+	style->dash_offset = 1;
+	svg_trace("ID2D1DeviceContext5", "CreateSvgGlyphStyle");
+	*out = (ID2D1SvgGlyphStyle *)style;
+	return S_OK;
+}
+
+static void build_svg_tables(void)
+{
+	svg_document_table = make_table(ID2D1SvgDocument_table, ID2D1SvgDocument_methods);
+	set_resource(svg_document_table);
+	svg_document_table[ID2D1SvgDocument_SetViewportSize_slot] = (void *)svg_document_SetViewportSize;
+	svg_document_table[ID2D1SvgDocument_GetViewportSize_slot] = (void *)svg_document_GetViewportSize;
+	svg_document_table[ID2D1SvgDocument_SetRoot_slot] = (void *)svg_document_SetRoot;
+	svg_document_table[ID2D1SvgDocument_GetRoot_slot] = (void *)svg_document_GetRoot;
+	svg_document_table[ID2D1SvgDocument_FindElementById_slot] = (void *)svg_document_FindElementById;
+	svg_document_table[ID2D1SvgDocument_Serialize_slot] = (void *)svg_document_Serialize;
+	svg_document_table[ID2D1SvgDocument_Deserialize_slot] = (void *)svg_document_Deserialize;
+	svg_document_table[ID2D1SvgDocument_CreatePaint_slot] = (void *)svg_document_CreatePaint;
+	svg_document_table[ID2D1SvgDocument_CreateStrokeDashArray_slot] = (void *)svg_document_CreateStrokeDashArray;
+	svg_document_table[ID2D1SvgDocument_CreatePointCollection_slot] = (void *)svg_document_CreatePointCollection;
+	svg_document_table[ID2D1SvgDocument_CreatePathData_slot] = (void *)svg_document_CreatePathData;
+
+	svg_element_table = make_table(ID2D1SvgElement_table, ID2D1SvgElement_methods);
+	set_resource(svg_element_table);
+	svg_element_table[ID2D1SvgElement_GetDocument_slot] = (void *)svg_element_GetDocument;
+	svg_element_table[ID2D1SvgElement_GetTagName_slot] = (void *)svg_element_GetTagName;
+	svg_element_table[ID2D1SvgElement_GetTagNameLength_slot] = (void *)svg_element_GetTagNameLength;
+	svg_element_table[ID2D1SvgElement_IsTextContent_slot] = (void *)svg_element_IsTextContent;
+	svg_element_table[ID2D1SvgElement_GetParent_slot] = (void *)svg_element_GetParent;
+	svg_element_table[ID2D1SvgElement_HasChildren_slot] = (void *)svg_element_HasChildren;
+	svg_element_table[ID2D1SvgElement_GetFirstChild_slot] = (void *)svg_element_GetFirstChild;
+	svg_element_table[ID2D1SvgElement_GetLastChild_slot] = (void *)svg_element_GetLastChild;
+	svg_element_table[ID2D1SvgElement_GetPreviousChild_slot] = (void *)svg_element_GetPreviousChild;
+	svg_element_table[ID2D1SvgElement_GetNextChild_slot] = (void *)svg_element_GetNextChild;
+	svg_element_table[ID2D1SvgElement_InsertChildBefore_slot] = (void *)svg_element_InsertChildBefore;
+	svg_element_table[ID2D1SvgElement_AppendChild_slot] = (void *)svg_element_AppendChild;
+	svg_element_table[ID2D1SvgElement_ReplaceChild_slot] = (void *)svg_element_ReplaceChild;
+	svg_element_table[ID2D1SvgElement_RemoveChild_slot] = (void *)svg_element_RemoveChild;
+	svg_element_table[ID2D1SvgElement_CreateChild_slot] = (void *)svg_element_CreateChild;
+	svg_element_table[ID2D1SvgElement_IsAttributeSpecified_slot] = (void *)svg_element_IsAttributeSpecified;
+	svg_element_table[ID2D1SvgElement_GetSpecifiedAttributeCount_slot] = (void *)svg_element_GetSpecifiedAttributeCount;
+	svg_element_table[ID2D1SvgElement_GetSpecifiedAttributeName_slot] = (void *)svg_element_GetSpecifiedAttributeName;
+	svg_element_table[ID2D1SvgElement_GetSpecifiedAttributeNameLength_slot] = (void *)svg_element_GetSpecifiedAttributeNameLength;
+	svg_element_table[ID2D1SvgElement_RemoveAttribute_slot] = (void *)svg_element_RemoveAttribute;
+	svg_element_table[ID2D1SvgElement_SetTextValue_slot] = (void *)svg_element_SetTextValue;
+	svg_element_table[ID2D1SvgElement_GetTextValue_slot] = (void *)svg_element_GetTextValue;
+	svg_element_table[ID2D1SvgElement_GetTextValueLength_slot] = (void *)svg_element_GetTextValueLength;
+	svg_element_table[ID2D1SvgElement_SetAttributeValue_slot] = (void *)svg_element_SetAttributeValue_string;
+	svg_element_table[ID2D1SvgElement_GetAttributeValue_slot] = (void *)svg_element_GetAttributeValue_string;
+	svg_element_table[ID2D1SvgElement_GetAttributeValueLength_slot] = (void *)svg_element_GetAttributeValueLength;
+	svg_element_table[ID2D1SvgElement_SetAttributeValue_1_slot] = (void *)svg_element_SetAttributeValue_pod;
+	svg_element_table[ID2D1SvgElement_GetAttributeValue_1_slot] = (void *)svg_element_GetAttributeValue_pod;
+	svg_element_table[ID2D1SvgElement_SetAttributeValue_1_1_slot] = (void *)svg_element_SetAttributeValue_object;
+	svg_element_table[ID2D1SvgElement_GetAttributeValue_1_1_slot] = (void *)svg_element_GetAttributeValue_interface;
+
+	svg_paint_table = make_table(ID2D1SvgPaint_table, ID2D1SvgPaint_methods);
+	set_resource(svg_paint_table);
+	svg_paint_table[ID2D1SvgPaint_GetElement_slot] = (void *)svg_attribute_GetElement;
+	svg_paint_table[ID2D1SvgPaint_Clone_slot] = (void *)svg_paint_Clone;
+	svg_paint_table[ID2D1SvgPaint_SetPaintType_slot] = (void *)svg_paint_SetPaintType;
+	svg_paint_table[ID2D1SvgPaint_GetPaintType_slot] = (void *)svg_paint_GetPaintType;
+	svg_paint_table[ID2D1SvgPaint_SetColor_slot] = (void *)svg_paint_SetColor;
+	svg_paint_table[ID2D1SvgPaint_GetColor_slot] = (void *)svg_paint_GetColor;
+	svg_paint_table[ID2D1SvgPaint_SetId_slot] = (void *)svg_paint_SetId;
+	svg_paint_table[ID2D1SvgPaint_GetId_slot] = (void *)svg_paint_GetId;
+	svg_paint_table[ID2D1SvgPaint_GetIdLength_slot] = (void *)svg_paint_GetIdLength;
+
+	svg_dash_table = make_table(ID2D1SvgStrokeDashArray_table, ID2D1SvgStrokeDashArray_methods);
+	set_resource(svg_dash_table);
+	svg_dash_table[ID2D1SvgStrokeDashArray_GetElement_slot] = (void *)svg_attribute_GetElement;
+	svg_dash_table[ID2D1SvgStrokeDashArray_Clone_slot] = (void *)svg_dash_Clone;
+	svg_dash_table[ID2D1SvgStrokeDashArray_RemoveDashesAtEnd_slot] = (void *)svg_dash_RemoveDashesAtEnd;
+	svg_dash_table[ID2D1SvgStrokeDashArray_UpdateDashes_slot] = (void *)svg_dash_UpdateDashes_float;
+	svg_dash_table[ID2D1SvgStrokeDashArray_UpdateDashes_1_slot] = (void *)svg_dash_UpdateDashes_length;
+	svg_dash_table[ID2D1SvgStrokeDashArray_GetDashes_slot] = (void *)svg_dash_GetDashes_float;
+	svg_dash_table[ID2D1SvgStrokeDashArray_GetDashes_1_slot] = (void *)svg_dash_GetDashes_length;
+	svg_dash_table[ID2D1SvgStrokeDashArray_GetDashesCount_slot] = (void *)svg_dash_GetDashesCount;
+
+	svg_points_table = make_table(ID2D1SvgPointCollection_table, ID2D1SvgPointCollection_methods);
+	set_resource(svg_points_table);
+	svg_points_table[ID2D1SvgPointCollection_GetElement_slot] = (void *)svg_attribute_GetElement;
+	svg_points_table[ID2D1SvgPointCollection_Clone_slot] = (void *)svg_points_Clone;
+	svg_points_table[ID2D1SvgPointCollection_RemovePointsAtEnd_slot] = (void *)svg_points_RemovePointsAtEnd;
+	svg_points_table[ID2D1SvgPointCollection_UpdatePoints_slot] = (void *)svg_points_UpdatePoints;
+	svg_points_table[ID2D1SvgPointCollection_GetPoints_slot] = (void *)svg_points_GetPoints;
+	svg_points_table[ID2D1SvgPointCollection_GetPointsCount_slot] = (void *)svg_points_GetPointsCount;
+
+	svg_path_table = make_table(ID2D1SvgPathData_table, ID2D1SvgPathData_methods);
+	set_resource(svg_path_table);
+	svg_path_table[ID2D1SvgPathData_GetElement_slot] = (void *)svg_attribute_GetElement;
+	svg_path_table[ID2D1SvgPathData_Clone_slot] = (void *)svg_path_Clone;
+	svg_path_table[ID2D1SvgPathData_RemoveSegmentDataAtEnd_slot] = (void *)svg_path_RemoveSegmentDataAtEnd;
+	svg_path_table[ID2D1SvgPathData_UpdateSegmentData_slot] = (void *)svg_path_UpdateSegmentData;
+	svg_path_table[ID2D1SvgPathData_GetSegmentData_slot] = (void *)svg_path_GetSegmentData;
+	svg_path_table[ID2D1SvgPathData_GetSegmentDataCount_slot] = (void *)svg_path_GetSegmentDataCount;
+	svg_path_table[ID2D1SvgPathData_RemoveCommandsAtEnd_slot] = (void *)svg_path_RemoveCommandsAtEnd;
+	svg_path_table[ID2D1SvgPathData_UpdateCommands_slot] = (void *)svg_path_UpdateCommands;
+	svg_path_table[ID2D1SvgPathData_GetCommands_slot] = (void *)svg_path_GetCommands;
+	svg_path_table[ID2D1SvgPathData_GetCommandsCount_slot] = (void *)svg_path_GetCommandsCount;
+	svg_path_table[ID2D1SvgPathData_CreatePathGeometry_slot] = (void *)svg_path_CreatePathGeometry;
+
+	svg_style_table = make_table(ID2D1SvgGlyphStyle_table, ID2D1SvgGlyphStyle_methods);
+	set_resource(svg_style_table);
+	svg_style_table[ID2D1SvgGlyphStyle_SetFill_slot] = (void *)svg_style_SetFill;
+	svg_style_table[ID2D1SvgGlyphStyle_GetFill_slot] = (void *)svg_style_GetFill;
+	svg_style_table[ID2D1SvgGlyphStyle_SetStroke_slot] = (void *)svg_style_SetStroke;
+	svg_style_table[ID2D1SvgGlyphStyle_GetStrokeDashesCount_slot] = (void *)svg_style_GetStrokeDashesCount;
+	svg_style_table[ID2D1SvgGlyphStyle_GetStroke_slot] = (void *)svg_style_GetStroke;
+}
+
 /* ---- the method tables ---- */
 static void set_target(void **table)
 {
@@ -4799,6 +8013,9 @@ static void set_context(void **table)
 	table[ID2D1DeviceContext5_GetUnitMode_slot] = (void *)context_GetUnitMode;
 	table[ID2D1DeviceContext5_DrawGlyphRun_82_slot] = (void *)target_DrawGlyphRun1;
 	table[ID2D1DeviceContext5_DrawImage_slot] = (void *)target_DrawImage;
+	table[ID2D1DeviceContext5_CreateSvgDocument_slot] = (void *)target_CreateSvgDocument;
+	table[ID2D1DeviceContext5_DrawSvgDocument_slot] = (void *)target_DrawSvgDocument;
+	table[ID2D1DeviceContext5_CreateSvgGlyphStyle_slot] = (void *)target_CreateSvgGlyphStyle;
 	table[ID2D1DeviceContext5_DrawBitmap_85_slot] = (void *)target_DrawBitmap1;
 	table[ID2D1DeviceContext5_PushLayer_86_slot] = (void *)target_PushLayer1;
 }
@@ -4815,6 +8032,7 @@ static void **make_target_table(void *const *stubs, size_t count)
 static void build_tables(void)
 {
 	build_geometry_tables();
+	build_svg_tables();
 	build_resource_tables();
 	hwnd_table = make_target_table(ID2D1HwndRenderTarget_table, ID2D1HwndRenderTarget_methods);
 	set_target(hwnd_table);
@@ -5083,6 +8301,53 @@ FLOAT WINAPI D2D1ComputeMaximumScaleFactor(const D2D1_MATRIX_3X2_F *matrix)
 	const float s1 = a * a + b * b + c * c + d * d, s2 = fsqrt((a * a + b * b - c * c - d * d) * (a * a + b * b - c * c - d * d) +
 		4 * (a * c + b * d) * (a * c + b * d));
 	return fsqrt((s1 + s2) / 2);
+}
+
+/* The interior control points of the gradient mesh patch that reproduces a Coons patch: the tensor-product patch shares the Coons
+ * patch's four boundary curves, and these four points give it the Coons blend's mixed curvature, which fixes the interior. The
+ * first digit of the patch's point names is the row (v) and the second the column (u), so point12 is the interior point a third
+ * from the top and two thirds across. Each output follows from the patch's mixed-partial coefficients, the interior of a Coons
+ * patch being the boundary blend minus the bilinear corner surface. */
+void WINAPI D2D1GetGradientMeshInteriorPointsFromCoonsPatch(const D2D1_POINT_2F *point0, const D2D1_POINT_2F *point1,
+	const D2D1_POINT_2F *point2, const D2D1_POINT_2F *point3, const D2D1_POINT_2F *point4, const D2D1_POINT_2F *point5,
+	const D2D1_POINT_2F *point6, const D2D1_POINT_2F *point7, const D2D1_POINT_2F *point8, const D2D1_POINT_2F *point9,
+	const D2D1_POINT_2F *point10, const D2D1_POINT_2F *point11, D2D1_POINT_2F *tensor_point11, D2D1_POINT_2F *tensor_point12,
+	D2D1_POINT_2F *tensor_point21, D2D1_POINT_2F *tensor_point22)
+{
+	/* The edge tangents as the patch fields name them: point0..3 the top edge left to right, point4..5 the right, point6..9 the
+	 * bottom right to left, point10..11 the left bottom to top. */
+	const D2D1_POINT_2F top_left = *point0, top_1 = *point1, top_2 = *point2, top_right = *point3;
+	const D2D1_POINT_2F right_1 = *point4, right_2 = *point5, bottom_right = *point6;
+	const D2D1_POINT_2F bottom_2 = *point7, bottom_1 = *point8, bottom_left = *point9;
+	const D2D1_POINT_2F left_2 = *point10, left_1 = *point11;
+	/* The bottom edge's tangents run the other way: the patch's point31 is this point8 and point32 is point7. */
+	const D2D1_POINT_2F edge31 = bottom_1, edge32 = bottom_2;
+	/* The curvature terms: q the bottom minus the top edge's per-span tangents, r the right minus the left edge's. */
+	const float q0x = (edge31.x - bottom_left.x - top_1.x + top_left.x) / 3, q0y = (edge31.y - bottom_left.y - top_1.y + top_left.y) / 3;
+	const float q1x = (edge32.x - edge31.x - top_2.x + top_1.x) / 3, q1y = (edge32.y - edge31.y - top_2.y + top_1.y) / 3;
+	const float r0x = (right_1.x - top_right.x - left_1.x + top_left.x) / 3, r0y = (right_1.y - top_right.y - left_1.y + top_left.y) / 3;
+	const float r1x = (right_2.x - right_1.x - left_2.x + left_1.x) / 3, r1y = (right_2.y - right_1.y - left_2.y + left_1.y) / 3;
+	/* The bilinear corner surface's mixed partial, one ninth of its constant curvature. */
+	const float corner_x = (top_left.x - top_right.x - bottom_left.x + bottom_right.x) / 9;
+	const float corner_y = (top_left.y - top_right.y - bottom_left.y + bottom_right.y) / 9;
+	/* point11 (a third across, a third down): the top-left interior slot of the mixed partial. */
+	const float p11x = left_1.x + top_1.x - top_left.x + q0x + r0x - corner_x;
+	const float p11y = left_1.y + top_1.y - top_left.y + q0y + r0y - corner_y;
+	tensor_point11->x = p11x;
+	tensor_point11->y = p11y;
+	/* point12 (two thirds across, a third down): one step along the top edge's curvature. */
+	const float p12x = p11x + top_2.x - top_1.x + q1x + r0x - corner_x;
+	const float p12y = p11y + top_2.y - top_1.y + q1y + r0y - corner_y;
+	tensor_point12->x = p12x;
+	tensor_point12->y = p12y;
+	/* point21 (a third across, two thirds down): one step down the left edge's curvature. */
+	const float p21x = left_2.x + p11x - left_1.x + q0x + r1x - corner_x;
+	const float p21y = left_2.y + p11y - left_1.y + q0y + r1y - corner_y;
+	tensor_point21->x = p21x;
+	tensor_point21->y = p21y;
+	/* point22: the last slot closes on both steps. */
+	tensor_point22->x = p21x + p12x - p11x + q1x + r1x - corner_x;
+	tensor_point22->y = p21y + p12y - p11y + q1y + r1y - corner_y;
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)

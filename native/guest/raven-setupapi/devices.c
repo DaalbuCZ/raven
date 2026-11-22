@@ -7,16 +7,26 @@
 #include <string.h>
 
 /* This runtime has no plug and play manager and no device tree, so a device set is honest about
- * being empty: it opens, it enumerates nothing and it closes. Device classes do exist, as registry
+ * holding only what the runtime itself has: no devices, except the one interface of the synthetic
+ * monitor, which the display configuration callers match against through the target's device path and
+ * read the monitor's EDID from through its device registry key. Device classes do exist, as registry
  * data under Control\Class, and those queries answer from there. */
 
 #define SET_MAGIC 0x56444652
 #define CLASS_ROOT L"System\\CurrentControlSet\\Control\\Class"
 
+static const GUID monitor_interface_guid = {0xe6f07b5f, 0xee97, 0x4a90, {0xb0, 0x76, 0x33, 0xf5, 0x7b, 0xf4, 0xea, 0xa7}};
+static const GUID monitor_class_guid = {0x4d36e96e, 0xe325, 0x11ce, {0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}};
+/* The device path of the one monitor interface, and the instance under the display enumerator whose
+ * device parameters hold the EDID. Both match what DisplayConfigGetDeviceInfo reports for the target. */
+static const WCHAR monitor_interface_path[] = L"\\\\?\\DISPLAY#RAVEN0000#5&2f5f805e&0&UID256#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+static const WCHAR monitor_device_parameters[] = L"System\\CurrentControlSet\\Enum\\DISPLAY\\RAVEN0000\\5&2f5f805e&0&UID256\\Device Parameters";
+
 struct device_set {
 	DWORD magic;
 	GUID class_guid;
 	BOOL has_class;
+	DWORD interface_count;
 };
 
 static HDEVINFO new_set(const GUID *guid)
@@ -28,6 +38,8 @@ static HDEVINFO new_set(const GUID *guid)
 		return INVALID_HANDLE_VALUE;
 	}
 	set->magic = SET_MAGIC;
+	if (guid && memcmp(guid, &monitor_interface_guid, sizeof(GUID)) == 0)
+		set->interface_count = 1;
 	if (guid) {
 		set->class_guid = *guid;
 		set->has_class = TRUE;
@@ -116,10 +128,73 @@ BOOL WINAPI SetupDiEnumDeviceInfo(HDEVINFO handle, DWORD index, PSP_DEVINFO_DATA
 
 BOOL WINAPI SetupDiEnumDeviceInterfaces(HDEVINFO handle, PSP_DEVINFO_DATA device, const GUID *guid, DWORD index, PSP_DEVICE_INTERFACE_DATA data)
 {
-	if (!set_of(handle))
+	struct device_set *set = set_of(handle);
+
+	if (!set || !set->interface_count)
+		goto none;
+	if (!data || data->cbSize != sizeof(SP_DEVICE_INTERFACE_DATA)) {
+		SetLastError(ERROR_INVALID_PARAMETER);
 		return FALSE;
+	}
+	if (index >= set->interface_count)
+		goto none;
+	data->InterfaceClassGuid = monitor_interface_guid;
+	data->Flags = SPINT_ACTIVE;
+	return TRUE;
+none:
 	SetLastError(ERROR_NO_MORE_ITEMS);
 	return FALSE;
+}
+
+/* The interface detail carries the monitor's device path right after its size word; the device
+ * information the caller passes on to SetupDiOpenDevRegKey names the monitor's class and instance. */
+BOOL WINAPI SetupDiGetDeviceInterfaceDetailW(HDEVINFO handle, PSP_DEVICE_INTERFACE_DATA data,
+	PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail, DWORD detail_size, PDWORD required, PSP_DEVINFO_DATA device)
+{
+	struct device_set *set = set_of(handle);
+	const DWORD bytes = (DWORD)(sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + sizeof(monitor_interface_path));
+
+	if (!set || !set->interface_count || !data || data->cbSize != sizeof(SP_DEVICE_INTERFACE_DATA)) {
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (required)
+		*required = bytes;
+	if (!detail || detail_size < bytes) {
+		SetLastError(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+	if (detail->cbSize != sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) {
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	memcpy(detail->DevicePath, monitor_interface_path, sizeof(monitor_interface_path));
+	if (device) {
+		if (device->cbSize != sizeof(SP_DEVINFO_DATA)) {
+			SetLastError(ERROR_INVALID_PARAMETER);
+			return FALSE;
+		}
+		device->ClassGuid = monitor_class_guid;
+		device->DevInst = 1;
+	}
+	return TRUE;
+}
+
+/* The device registry key of the monitor: the instance's Device Parameters under the display
+ * enumerator, whose EDID value the registry holds. */
+HKEY WINAPI SetupDiOpenDevRegKey(HDEVINFO handle, PSP_DEVINFO_DATA device, DWORD scope, DWORD profile, DWORD key_type, REGSAM access)
+{
+	HKEY key;
+
+	if (!set_of(handle) || !set_of(handle)->interface_count || key_type != DIREG_DEV) {
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return INVALID_HANDLE_VALUE;
+	}
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, monitor_device_parameters, 0, access, &key) != ERROR_SUCCESS) {
+		SetLastError(ERROR_FILE_NOT_FOUND);
+		return INVALID_HANDLE_VALUE;
+	}
+	return key;
 }
 
 BOOL WINAPI SetupDiGetDeviceInfoListClass(HDEVINFO handle, LPGUID guid)

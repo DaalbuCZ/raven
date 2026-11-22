@@ -602,8 +602,30 @@ CRT void _cexit(void)
 CRT void _c_exit(void) {}
 CRT void _exit(int status) { ExitProcess((UINT)status); }
 CRT void exit(int status) { _cexit(); ExitProcess((UINT)status); }
-CRT void abort(void) { ExitProcess(3); }
-CRT void __cdecl _assert(const char *expression, const char *file, unsigned line) { ExitProcess(3); }
+/* The fail paths end the process as Windows' CRT does (abort's exit code 3 among them), but Windows reports them first — a debugger
+ * sees the report and a console the abort message — so Raven names the fail path and whose call it was before the exit. The address is
+ * the failing function's return address; the runtime's trace shows the module bases it resolves against. Kept free of the CRT's own
+ * machinery so a broken runtime cannot re-enter it. */
+static void raven_crt_report(const char *what, void *caller)
+{
+	static const char hex[] = "0123456789abcdef";
+	char note[96];
+	size_t at = 0;
+	for (const char *text = "raven-crt: "; *text; ++text)
+		note[at++] = *text;
+	for (const char *text = what; *text && at < sizeof note - 1; ++text)
+		note[at++] = *text;
+	for (const char *text = " at 0x"; *text && at < sizeof note - 1; ++text)
+		note[at++] = *text;
+	const uintptr_t address = (uintptr_t)caller;
+	for (int shift = (int)sizeof(uintptr_t) * 8 - 4; shift >= 0 && at < sizeof note - 1; shift -= 4)
+		note[at++] = hex[(address >> shift) & 0xf];
+	note[at++] = '\n';
+	note[at] = 0;
+	OutputDebugStringA(note);
+}
+CRT void abort(void) { raven_crt_report("abort", __builtin_return_address(0)); ExitProcess(3); }
+CRT void __cdecl _assert(const char *expression, const char *file, unsigned line) { raven_crt_report("assert", __builtin_return_address(0)); ExitProcess(3); }
 typedef void (__cdecl *invalid_parameter_handler)(const wchar_t *, const wchar_t *, const wchar_t *, unsigned, uintptr_t);
 static invalid_parameter_handler current_invalid_parameter_handler;
 typedef struct {
@@ -639,7 +661,7 @@ CRT void _invalid_parameter_noinfo(void)
 	/* shortcut: with no handler, Raven retains its existing no-op; add the Windows fail-fast default when callers are ready. */
 	if (handler) handler(NULL, NULL, NULL, 0, 0);
 }
-CRT void _invalid_parameter_noinfo_noreturn(void) { _invalid_parameter_noinfo(); ExitProcess(3); }
+CRT void _invalid_parameter_noinfo_noreturn(void) { _invalid_parameter_noinfo(); raven_crt_report("invalid parameter", __builtin_return_address(0)); ExitProcess(3); }
 
 /* ---- streams ---- */
 /* The record is the size of msvcrt's FILE on x64 (48 bytes), so the table of standard streams is also the array that msvcrt

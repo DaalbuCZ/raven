@@ -193,10 +193,15 @@ HRESULT file_bytes_open(const WCHAR *path, DWORD mode, BOOL create, ILockBytes *
 	return S_OK;
 }
 
-/* Global memory. */
+/* Global memory. The bytes live in one HGLOBAL that clones share; every touch of the block's fields — the handle the
+ * block stands for, the logical size, the memory itself — runs under the block's critical section, the way ole32's
+ * lock bytes hold the block while a stream op runs. A write that must grow calls GlobalReAlloc inside the section:
+ * while a caller holds a GlobalLock of its own on the handle, the realloc fails (a locked object does not move), and
+ * the failure comes back as the medium-full error a Windows stream answers in that spot. */
 
 struct shared_block {
 	LONG refs;
+	CRITICAL_SECTION lock;
 	HGLOBAL memory;
 	BOOL free_on_release;
 	ULONGLONG size;
@@ -208,11 +213,13 @@ static HRESULT block_create(HGLOBAL memory, BOOL free_on_release, struct shared_
 
 	if (!block)
 		return E_OUTOFMEMORY;
+	InitializeCriticalSection(&block->lock);
 	if (memory) {
 		block->size = GlobalSize(memory);
 	} else {
 		memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_ZEROINIT, 0);
 		if (!memory) {
+			DeleteCriticalSection(&block->lock);
 			mem_free(block);
 			return E_OUTOFMEMORY;
 		}
@@ -230,10 +237,31 @@ static void block_release(struct shared_block *block)
 		return;
 	if (block->free_on_release)
 		GlobalFree(block->memory);
+	DeleteCriticalSection(&block->lock);
 	mem_free(block);
 }
 
-static HRESULT block_resize(struct shared_block *block, ULONGLONG size)
+/* The handle the block stands for now; a resize of a fixed caller block replaces it, so the read goes through the section. */
+static HGLOBAL block_memory(struct shared_block *block)
+{
+	HGLOBAL memory;
+	EnterCriticalSection(&block->lock);
+	memory = block->memory;
+	LeaveCriticalSection(&block->lock);
+	return memory;
+}
+
+static ULONGLONG block_logical_size(struct shared_block *block)
+{
+	ULONGLONG size;
+	EnterCriticalSection(&block->lock);
+	size = block->size;
+	LeaveCriticalSection(&block->lock);
+	return size;
+}
+
+/* The resize proper, called with the section held; block_resize is the callers' wrapper around it. */
+static HRESULT block_resize_locked(struct shared_block *block, ULONGLONG size)
 {
 	HGLOBAL grown;
 
@@ -242,6 +270,7 @@ static HRESULT block_resize(struct shared_block *block, ULONGLONG size)
 	if (size > GlobalSize(block->memory) || !size) {
 		grown = GlobalReAlloc(block->memory, (SIZE_T)size, GMEM_MOVEABLE | GMEM_ZEROINIT);
 		if (!grown)
+			/* A locked object does not move: the growth fails, as the same ask on Windows does. */
 			return STG_E_MEDIUMFULL;
 		block->memory = grown;
 	}
@@ -256,21 +285,35 @@ static HRESULT block_resize(struct shared_block *block, ULONGLONG size)
 	return S_OK;
 }
 
+static HRESULT block_resize(struct shared_block *block, ULONGLONG size)
+{
+	HRESULT status;
+
+	EnterCriticalSection(&block->lock);
+	status = block_resize_locked(block, size);
+	LeaveCriticalSection(&block->lock);
+	return status;
+}
+
 static ULONG block_read(struct shared_block *block, ULONGLONG offset, void *buffer, ULONG count)
 {
 	BYTE *data;
 
+	EnterCriticalSection(&block->lock);
 	if (offset >= block->size)
-		return 0;
-	if (count > block->size - offset)
+		count = 0;
+	else if (count > block->size - offset)
 		count = (ULONG)(block->size - offset);
-	if (!count)
-		return 0;
-	data = GlobalLock(block->memory);
-	if (!data)
-		return 0;
-	memcpy(buffer, data + offset, count);
-	GlobalUnlock(block->memory);
+	if (count) {
+		data = GlobalLock(block->memory);
+		if (!data)
+			count = 0;
+		else {
+			memcpy(buffer, data + offset, count);
+			GlobalUnlock(block->memory);
+		}
+	}
+	LeaveCriticalSection(&block->lock);
 	return count;
 }
 
@@ -281,17 +324,25 @@ static HRESULT block_write(struct shared_block *block, ULONGLONG offset, const v
 	*written = 0;
 	if (!count)
 		return S_OK;
+	EnterCriticalSection(&block->lock);
 	if (offset + count > block->size) {
-		HRESULT status = block_resize(block, offset + count);
-		if (FAILED(status))
-			return status;
+		/* The growth stays inside the section: the resize's realloc and this memcpy cannot interleave with another
+		   writer's, and a locked block answers the medium-full error before anything is written. */
+		HRESULT grown = block_resize_locked(block, offset + count);
+		if (FAILED(grown)) {
+			LeaveCriticalSection(&block->lock);
+			return grown;
+		}
 	}
 	data = GlobalLock(block->memory);
-	if (!data)
+	if (!data) {
+		LeaveCriticalSection(&block->lock);
 		return STG_E_MEDIUMFULL;
+	}
 	memcpy(data + offset, buffer, count);
 	GlobalUnlock(block->memory);
 	*written = count;
+	LeaveCriticalSection(&block->lock);
 	return S_OK;
 }
 
@@ -356,7 +407,7 @@ static HRESULT WINAPI memory_bytes_Stat(ILockBytes *iface, STATSTG *stat, DWORD 
 {
 	memset(stat, 0, sizeof(*stat));
 	stat->type = STGTY_LOCKBYTES;
-	stat->cbSize.QuadPart = memory_bytes_of(iface)->block->size;
+	stat->cbSize.QuadPart = block_logical_size(memory_bytes_of(iface)->block);
 	return S_OK;
 }
 
@@ -394,7 +445,7 @@ HRESULT WINAPI GetHGlobalFromILockBytes(ILockBytes *bytes, HGLOBAL *memory)
 	*memory = NULL;
 	if (!bytes || bytes->lpVtbl != &memory_bytes_vtable)
 		return E_INVALIDARG;
-	*memory = memory_bytes_of(bytes)->block->memory;
+	*memory = block_memory(memory_bytes_of(bytes)->block);
 	return S_OK;
 }
 
@@ -484,7 +535,7 @@ static HRESULT WINAPI memory_stream_Seek(IStream *iface, LARGE_INTEGER move, DWO
 		base = (LONGLONG)object->position;
 		break;
 	case STREAM_SEEK_END:
-		base = (LONGLONG)object->block->size;
+		base = (LONGLONG)block_logical_size(object->block);
 		break;
 	default:
 		status = STG_E_SEEKERROR;
@@ -507,7 +558,7 @@ static HRESULT WINAPI memory_stream_SetSize(IStream *iface, ULARGE_INTEGER size)
 {
 	memory_stream *object = memory_stream_of(iface);
 
-	if (size.QuadPart == object->block->size)
+	if (size.QuadPart == block_logical_size(object->block))
 		return S_OK;
 	return block_resize(object->block, size.QuadPart);
 }
@@ -564,7 +615,7 @@ static HRESULT WINAPI memory_stream_Stat(IStream *iface, STATSTG *stat, DWORD fl
 		return STG_E_INVALIDPOINTER;
 	memset(stat, 0, sizeof(*stat));
 	stat->type = STGTY_STREAM;
-	stat->cbSize.QuadPart = memory_stream_of(iface)->block->size;
+	stat->cbSize.QuadPart = block_logical_size(memory_stream_of(iface)->block);
 	return S_OK;
 }
 
@@ -588,10 +639,15 @@ static HRESULT WINAPI memory_stream_Clone(IStream *iface, IStream **out)
 
 	if (!out)
 		return E_INVALIDARG;
-	status = memory_stream_new(object->block, out);
-	if (FAILED(status))
-		return status;
+	/* The reference the clone will hold is taken before anything is handed out: a concurrent release of the last
+	 * other reference must not free the block while a clone of it is being born, which would leave the new stream
+	 * over freed memory and the handle's registration gone at the next realloc. */
 	InterlockedIncrement(&object->block->refs);
+	status = memory_stream_new(object->block, out);
+	if (FAILED(status)) {
+		block_release(object->block);
+		return status;
+	}
 	memory_stream_of(*out)->position = object->position;
 	return S_OK;
 }
@@ -626,6 +682,6 @@ HRESULT WINAPI GetHGlobalFromStream(IStream *stream, HGLOBAL *memory)
 	*memory = NULL;
 	if (!stream || stream->lpVtbl != &memory_stream_vtable)
 		return E_INVALIDARG;
-	*memory = memory_stream_of(stream)->block->memory;
+	*memory = block_memory(memory_stream_of(stream)->block);
 	return S_OK;
 }

@@ -324,27 +324,30 @@ static HRESULT WINAPI factory_CreateDecoderFromFilename(IWICImagingFactory *ifac
 static HRESULT WINAPI factory_CreateDecoderFromFileHandle(IWICImagingFactory *iface, ULONG_PTR handle, const GUID *vendor, WICDecodeOptions options, IWICBitmapDecoder **out)
 {
 	const DWORD size = GetFileSize((HANDLE)handle, NULL);
-	HGLOBAL memory;
-	IStream *stream = NULL;
+	BYTE *memory;
+	IWICStream *stream = NULL;
 	DWORD got = 0;
 	HRESULT result;
 	if (size == INVALID_FILE_SIZE)
 		return HRESULT_FROM_WIN32(GetLastError());
-	if (!(memory = GlobalAlloc(GMEM_MOVEABLE, size ? size : 1)))
+	if (!(memory = wic_alloc(size ? size : 1)))
 		return E_OUTOFMEMORY;
 	SetFilePointer((HANDLE)handle, 0, NULL, FILE_BEGIN);
-	if (!ReadFile((HANDLE)handle, GlobalLock(memory), size, &got, NULL)) {
-		GlobalUnlock(memory);
-		GlobalFree(memory);
-		return HRESULT_FROM_WIN32(GetLastError());
-	}
-	GlobalUnlock(memory);
-	if (FAILED(result = CreateStreamOnHGlobal(memory, TRUE, &stream))) {
-		GlobalFree(memory);
+	if (!ReadFile((HANDLE)handle, memory, size, &got, NULL)) {
+		result = HRESULT_FROM_WIN32(GetLastError());
+		wic_free(memory);
 		return result;
 	}
-	result = factory_CreateDecoderFromStream(iface, stream, vendor, options, out);
-	IStream_Release(stream);
+	/* the component's own memory stream: the guest's ole32 emulation does not answer CreateStreamOnHGlobal */
+	if (FAILED(result = wic_stream_create(&stream))) {
+		wic_free(memory);
+		return result;
+	}
+	result = IWICStream_InitializeFromMemory(stream, memory, got);
+	if (SUCCEEDED(result))
+		result = factory_CreateDecoderFromStream(iface, (IStream *)stream, vendor, options, out);
+	IWICStream_Release(stream);
+	wic_free(memory);
 	return result;
 }
 
