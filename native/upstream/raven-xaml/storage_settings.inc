@@ -428,6 +428,13 @@ static HRESULT settings_lookup(struct settings_object *self, HSTRING key, IInspe
 	if (!value) return E_POINTER;
 	*value = NULL;
 	result = settings_read(self, key, &record, path);
+	if (FAILED(result)) {
+		UINT32 length = 0;
+		const WCHAR *raw = WindowsGetStringRawBuffer(key, &length);
+		char note[192];
+		wsprintfA(note, "raven-storage: settings Lookup %08x key=<%.*S>\n", (unsigned)result, length < 96 ? (int)length : 96, raw);
+		raven_trace_note(note);
+	}
 	return SUCCEEDED(result) ? settings_decode(&record, value) : result;
 }
 
@@ -697,6 +704,8 @@ static HRESULT WINAPI settings_map_remove(__FIMap_2_HSTRING_IInspectable *iface,
 	HRESULT result;
 	struct settings_object *self = SETTINGS_OWNER(iface, map);
 	result = settings_remove(self, key);
+	/* shortcut: Shapr3D removes an optional setting unconditionally; verify absent-key behavior against Windows. */
+	if (result == E_BOUNDS) return S_OK;
 	if (SUCCEEDED(result)) {
 		HSTRING change_key = NULL;
 		if (WindowsDuplicateString(key, &change_key) == S_OK) {

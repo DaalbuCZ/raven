@@ -342,12 +342,7 @@ static HRESULT property_boxed(void)
 	static HRESULT WINAPI Set_##suffix(statics1 *This, uint64_t element, uint64_t value) \
 	{ \
 		(void)This; \
-		char note[80]; \
-		HRESULT result = text_set(attached_of(element), slot, value); \
-		wsprintfA(note, "raven-autoprops: Set" #suffix " element %llx value %llx -> %lx\n", \
-			(unsigned long long)element, (unsigned long long)value, (unsigned long)result); \
-		OutputDebugStringA(note); \
-		return result; \
+		return text_set(attached_of(element), slot, value); \
 	}
 
 TEXT_PROPERTY(AcceleratorKey, attached_accelerator)

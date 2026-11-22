@@ -237,9 +237,8 @@ DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics, 0x3b01077a
 
 /* The engine-internal readers of the engine's own PropertyMetadata objects. The real IPropertyMetadata surface exposes
  * only DefaultValue and CreateDefaultValueCallback — Microsoft's own remarks say a PropertyMetadata deliberately has no
- * way to find its property-changed callback, because the dependency-property system is the only caller. The engine has no
- * property-change notification for dependency properties yet, so the callback is held and never invoked; this internal
- * part is how the engine (and the style fixture) can still verify the held delegate. CreateDefaultValue is the engine's
+ * way to find its property-changed callback, because the dependency-property system is the only caller. This internal
+ * part lets the engine retain the delegate for Frame's property-change notifications. CreateDefaultValue is the engine's
  * counterpart of what that property system does with the metadata: it hands back the fixed default, or invokes the
  * create-default-value factory and returns what it produced. The real ABI carries no such member, which is why it lives
  * here rather than on IPropertyMetadata. */
@@ -274,8 +273,13 @@ struct raven_dependency_property_interop_vtbl {
 	HRESULT (WINAPI *get_TypeName)(raven_dependency_property_interop *, __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName *);
 	HRESULT (WINAPI *get_OwnerType)(raven_dependency_property_interop *, __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName *);
 	HRESULT (WINAPI *get_DefaultValue)(raven_dependency_property_interop *, IInspectable **);
+	HRESULT (WINAPI *get_PropertyChangedCallback)(raven_dependency_property_interop *, __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback **);
 };
 struct raven_dependency_property_interop { const struct raven_dependency_property_interop_vtbl *lpVtbl; };
+
+HRESULT raven_dependency_unset_value(IInspectable **value);
+HRESULT raven_dependency_notify(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *property,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *sender, IInspectable *old_value, IInspectable *new_value);
 
 /* Engine-internal setter application. A setter is addressed by its property NAME: the call stores a (property-name
  * string, value IInspectable) pair on the style — the pair shape the put_Style application walks. A setter created through
@@ -326,6 +330,17 @@ HRESULT raven_property_metadata_factory(HSTRING name, IActivationFactory **out);
  * Hands out an AddRef'd IDependencyPropertyStatics. */
 HRESULT __declspec(dllexport) raven_xaml_dependency_statics(
 	__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics **out);
+
+/* The DependencyProperty.UnsetValue singleton, AddRef'd: a dependency read with no stored value and no
+ * metadata default answers this marker — the real runtime's GetValue never returns a null reference, and
+ * the application's generated getters unbox the result directly (a null derefs). */
+HRESULT __declspec(dllexport) raven_xaml_dependency_unset_value(IInspectable **out);
+
+/* A framework property registration the engine's own statics serve (Control.FontSizeProperty and its siblings in
+ * xaml_controls.c): the same dp_register path the application's Register calls take, keyed by the owner class name
+ * so the duplicate contract collapses repeated reads of the same statics getter onto one registration. */
+HRESULT raven_xaml_property_register(const WCHAR *name, UINT32 name_length, const WCHAR *type_name,
+	UINT32 type_length, const WCHAR *owner_name, UINT32 owner_length, IInspectable **out);
 
 /* A fresh engine Setter, the Setter factory's ActivateInstance answer: the runtime catalog does not list the Setter class
  * yet either, so the fixture drives this through GetProcAddress the way it drives the other engine-internal exports; the

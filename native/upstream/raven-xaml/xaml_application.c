@@ -175,7 +175,6 @@ static HRESULT WINAPI application1_put_RequestedTheme(xaml_application1 *iface, 
 #define APPLICATION_EVENT(NAME, FIELD) \
 	static HRESULT WINAPI application1_add_##NAME(xaml_application1 *iface, uint64_t handler, uint64_t token) \
 	{ \
-		{ char note[64]; wsprintfA(note, "raven-app: add_" #NAME " reached\n"); OutputDebugStringA(note); } \
 		return raven_event_add(&((struct application1_part *)iface)->owner->FIELD, (IUnknown *)(uintptr_t)handler, \
 			(EventRegistrationToken *)(uintptr_t)token); \
 	} \
@@ -211,20 +210,32 @@ static HRESULT load_component(IInspectable *component, IInspectable *locator)
 	HRESULT result;
 	if (!component || !locator) return E_POINTER;
 	result = IInspectable_QueryInterface(locator, &IID___x_ABI_CWindows_CFoundation_CIUriRuntimeClass, (void **)&uri);
-	if (FAILED(result)) return result;
+	if (FAILED(result)) {
+		char note[80]; /* TEMPORARY */
+		wsprintfA(note, "raven-xaml: load_component: locator QI refused 0x%08x\n", (unsigned)result); /* TEMPORARY */
+		OutputDebugStringA(note); /* TEMPORARY */
+		return result;
+	}
 	result = uri->lpVtbl->get_AbsoluteUri(uri, &absolute);
 	uri->lpVtbl->Release(uri);
-	if (FAILED(result)) return result;
+	if (FAILED(result)) {
+		char note[80]; /* TEMPORARY */
+		wsprintfA(note, "raven-xaml: load_component: AbsoluteUri refused 0x%08x\n", (unsigned)result); /* TEMPORARY */
+		OutputDebugStringA(note); /* TEMPORARY */
+		return result;
+	}
 	const WCHAR *text = WindowsGetStringRawBuffer(absolute, &length);
 	if (length < ARRAYSIZE(prefix) - 1 + 5 || length + ARRAYSIZE(files) >= ARRAYSIZE(path) ||
 		CompareStringOrdinal(text, ARRAYSIZE(prefix) - 1, prefix, -1, TRUE) != CSTR_EQUAL ||
 		CompareStringOrdinal(text + length - 5, 5, L".xaml", -1, TRUE) != CSTR_EQUAL) {
+		OutputDebugStringA("raven-xaml: load_component refused: not a local .xaml URI\n"); /* TEMPORARY */
 		result = E_NOTIMPL;
 		goto done;
 	}
 	/* Shortcut: only local package XAML without escaping or URI qualifiers is resolved here. */
 	for (UINT32 i = ARRAYSIZE(prefix) - 1; i < length; ++i)
 		if (!text[i] || text[i] == L'?' || text[i] == L'#' || text[i] == L'%' || text[i] == L'\\') {
+			OutputDebugStringA("raven-xaml: load_component refused: URI qualifier\n"); /* TEMPORARY */
 			result = E_NOTIMPL;
 			goto done;
 		}
@@ -235,7 +246,19 @@ static HRESULT load_component(IInspectable *component, IInspectable *locator)
 	path_length -= 1; /* .xaml becomes .xbf */
 	memcpy(path + path_length - 4, L".xbf", 4 * sizeof(WCHAR));
 	result = raven_pri_get_blob(path, path_length, &blob, &bytes);
-	if (SUCCEEDED(result)) result = raven_xaml_load_into(blob, bytes, component);
+	if (FAILED(result)) {
+		char note[96]; /* TEMPORARY */
+		wsprintfA(note, "raven-xaml: load_component: pri blob 0x%08x\n", (unsigned)result); /* TEMPORARY */
+		OutputDebugStringA(note); /* TEMPORARY */
+	}
+	if (SUCCEEDED(result)) {
+		result = raven_xaml_load_into(blob, bytes, component);
+		if (FAILED(result)) {
+			char note[96]; /* TEMPORARY */
+			wsprintfA(note, "raven-xaml: load_component: load_into 0x%08x\n", (unsigned)result); /* TEMPORARY */
+			OutputDebugStringA(note); /* TEMPORARY */
+		}
+	}
 done:
 	WindowsDeleteString(absolute);
 	return result;
@@ -245,7 +268,9 @@ static HRESULT WINAPI statics_LoadComponent(xaml_application_statics *iface, IIn
 static HRESULT WINAPI statics_LoadComponent2(xaml_application_statics *iface, IInspectable *component,
 	IInspectable *locator, INT32 location)
 {
-	if (location != 0) return location == 1 ? E_NOTIMPL : E_INVALIDARG;
+	/* location 1 is the form the UILibrary controls' generated InitializeComponent uses (the .NET Native 2.x
+	 * codegen passes it where app pages pass 0); the caller is authoritative, both load the same way. */
+	if (location != 0 && location != 1) return E_INVALIDARG;
 	return load_component(component, locator);
 }
 

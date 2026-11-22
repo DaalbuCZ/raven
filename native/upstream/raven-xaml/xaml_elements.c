@@ -32,7 +32,7 @@
 #include "events.h"
 #include "windows_ui_xaml_elements.h"
 #include "windows_ui_xaml_layout.h"
-#include "windows_ui_xaml_uielement.h"
+#include "xaml_element_ui.h"
 #include "windows_ui_xaml_buttonbase.h"
 #include "xaml_input.h"
 #include "xaml_automation.h"
@@ -61,67 +61,7 @@ DEFINE_GUID(IID___FIVector_1_UIElement, 0x393d6210, 0xfa21, 0x573a, 0xa2, 0x38, 
 DEFINE_GUID(IID___FIVector_1_RowDefinition, 0x2a17524a, 0x48ef, 0x579b, 0x9e, 0x63, 0xe1, 0xce, 0x52, 0xad, 0xca, 0xe2);
 DEFINE_GUID(IID___FIVector_1_ColumnDefinition, 0xcaf7c66c, 0x1ccb, 0x5ada, 0xaf, 0xce, 0xfc, 0x62, 0xd2, 0xdb, 0x2c, 0x66);
 
-/* The real IControl ABI (Windows.UI.Xaml.winmd, uuid A8912263-2951-4F58-A9C5-5A134EAA7F07): the members in the interface's
- * declaration order after the six IInspectable methods, Template among them. The hand headers cannot carry this interface
- * (they list only the classes earlier stages needed), so it is declared here once and the IID is defined in every TU that
- * includes the declaration (DEFINE_GUID is selectany under INITGUID). The engine stores only Template; the other members
- * answer E_NOTIMPL the way the control chrome itself waits for its stage. */
-typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControl control1;
-typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControlVtbl control1_vtbl;
-struct __x_ABI_CWindows_CUI_CXaml_CControls_CIControlVtbl {
-	BEGIN_INTERFACE
-	HRESULT (STDMETHODCALLTYPE *QueryInterface)(control1 *This, REFIID riid, void **object);
-	ULONG (STDMETHODCALLTYPE *AddRef)(control1 *This);
-	ULONG (STDMETHODCALLTYPE *Release)(control1 *This);
-	HRESULT (STDMETHODCALLTYPE *GetIids)(control1 *This, ULONG *count, IID **iids);
-	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(control1 *This, HSTRING *name);
-	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(control1 *This, TrustLevel *level);
-	HRESULT (STDMETHODCALLTYPE *get_FontSize)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_FontSize)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_FontFamily)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_FontFamily)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_FontWeight)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_FontWeight)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_FontStyle)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_FontStyle)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_FontStretch)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_FontStretch)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_CharacterSpacing)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_CharacterSpacing)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_Foreground)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_Foreground)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_IsTabStop)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_IsTabStop)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_IsEnabled)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_IsEnabled)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_TabIndex)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_TabIndex)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_TabNavigation)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_TabNavigation)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_Template)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_Template)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_Padding)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_Padding)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_HorizontalContentAlignment)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_HorizontalContentAlignment)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_VerticalContentAlignment)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_VerticalContentAlignment)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_Background)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_Background)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_BorderThickness)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_BorderThickness)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_BorderBrush)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_BorderBrush)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_FocusState)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *add_IsEnabledChanged)(control1 *This, uint64_t handler, uint64_t token);
-	HRESULT (STDMETHODCALLTYPE *remove_IsEnabledChanged)(control1 *This, uint64_t token);
-	HRESULT (STDMETHODCALLTYPE *ApplyTemplate)(control1 *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *Focus)(control1 *This, uint64_t state, uint64_t value);
-	END_INTERFACE
-};
-interface __x_ABI_CWindows_CUI_CXaml_CControls_CIControl { CONST_VTBL control1_vtbl *lpVtbl; };
-DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl, 0xa8912263, 0x2951, 0x4f58, 0xa9, 0xc5, 0x5a, 0x13,
-	0x4e, 0xaa, 0x7f, 0x07);
+#include "windows_ui_xaml_control.h"
 
 /* The ControlTemplate surface declarations (root read, kind probe, factory) ride xaml_internal.h. */
 
@@ -134,12 +74,89 @@ static const WCHAR vector_class_name[] = L"Windows.Foundation.Collections.IVecto
 static const WCHAR row_vector_class_name[] = L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Controls.RowDefinition>";
 static const WCHAR column_vector_class_name[] = L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Controls.ColumnDefinition>";
 
+/* The real IButtonFactory ABI (Windows.Foundation.UniversalApiContract.winmd, uuid 80A13C19-843A-451C-8CF5-44C701B0E216,
+ * resolved through the SDK metadata's CustomAttribute blob on the IButtonFactory TypeDef): the factory face the .NET
+ * Native projection of `new Button()` drives, the same composable CreateInstance(outer, inner, instance) shape the
+ * IControlFactory face above xaml_controls.c serves — composable classes have no default constructor in the ABI. */
+typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIButtonFactory button_factory_create_i;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIButtonFactoryVtbl button_factory_create_vtbl;
+struct __x_ABI_CWindows_CUI_CXaml_CControls_CIButtonFactoryVtbl {
+	BEGIN_INTERFACE
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(button_factory_create_i *This, REFIID riid, void **object);
+	ULONG (STDMETHODCALLTYPE *AddRef)(button_factory_create_i *This);
+	ULONG (STDMETHODCALLTYPE *Release)(button_factory_create_i *This);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(button_factory_create_i *This, ULONG *count, IID **iids);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(button_factory_create_i *This, HSTRING *name);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(button_factory_create_i *This, TrustLevel *level);
+	HRESULT (STDMETHODCALLTYPE *CreateInstance)(button_factory_create_i *This, uint64_t outer, uint64_t inner, uint64_t instance);
+	END_INTERFACE
+};
+interface __x_ABI_CWindows_CUI_CXaml_CControls_CIButtonFactory { CONST_VTBL button_factory_create_vtbl *lpVtbl; };
+DEFINE_GUID(IID___x_ABI_CWindows_CUI_CXaml_CControls_CIButtonFactory, 0x80a13c19, 0x843a, 0x451c, 0x8c, 0xf5, 0x44, 0xc7,
+	0x01, 0xb0, 0xe2, 0x16);
+
 static HRESULT inspectable_iids(ULONG *count, IID **iids)
 {
 	if (!count || !iids)
 		return E_POINTER;
 	*count = 0;
 	*iids = NULL;
+	return S_OK;
+}
+
+/* The element-family GetIids the .NET Native projection's castclass consumes: SharedLibrary decides a managed
+ * cast of a projected object from the object's IInspectable::GetIids list (the suppress_transition round pinned
+ * the walk; docs/uwp-xaml.md), so an empty list turns every cast into InvalidCastException even when QueryInterface
+ * would answer. The list stays honest — an object lists exactly the faces its own QueryInterface grants, probed
+ * here against the element-family candidates — so the cast verdict and a later member call through the cast face
+ * can never disagree. The candidates are the IIDs the engine's element classes actually serve (the offline decode
+ * of Shapr3D.dll's Button EEType 0x66938 shows the app's cast targets inside this set: IFrameworkElement itself —
+ * EETypeRva 0x1afa0, name hash 0xea8ccd28 verified against the recovered ComputeNameHashCode — plus FE2/3/4/6). */
+extern const IID IID_frame_framework;   /* a391d09b-4a99-4b7c-9d8d-6fa5d01f6fbf, Windows.UI.Xaml.IFrameworkElement (xaml_controls.c) */
+extern const IID IID_frame_theme;       /* 792a5d91-62a1-40bf-a0ce-f9c131fcb7a7, IFrameworkElement6 (xaml_controls.c) */
+extern const IID IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement2;   /* f19104be-422a-4904-a52f-ee72010429e5 (xaml_controls.c) */
+extern const IID IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement3;   /* c81c2720-5c52-4bbe-a199-2b1e34f00f70 (xaml_controls.c) */
+extern const IID IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement4;   /* 6b765bb3-fba3-4404-bdee-1a45d1ca5f21 (xaml_controls.c) */
+static const IID *const element_family_iids[] = {
+	&IID__x_ABI_CWindows_CUI_CXaml_CIUIElement,
+	&IID_frame_framework,
+	&IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement2,
+	&IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement3,
+	&IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement4,
+	&IID_frame_theme,
+	&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid,
+	&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel,
+	&IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock,
+	&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton,
+	&IID__x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_CIButtonBase,
+	&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl,
+	&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl,
+};
+
+static HRESULT element_honest_iids(HRESULT (*query)(void *, REFIID, void **), void *owner, ULONG *count, IID **iids)
+{
+	if (!count || !iids)
+		return E_POINTER;
+	*count = 0;
+	*iids = NULL;
+	const ULONG cap = sizeof element_family_iids / sizeof element_family_iids[0];
+	IID *list = (IID *)HeapAlloc(GetProcessHeap(), 0, cap * sizeof *list);
+	if (!list)
+		return E_OUTOFMEMORY;
+	ULONG found = 0;
+	for (ULONG index = 0; index < cap; ++index) {
+		void *face = NULL;
+		if (query(owner, element_family_iids[index], &face) == S_OK && face) {
+			list[found++] = *element_family_iids[index];
+			IUnknown_Release((IUnknown *)face);
+		}
+	}
+	if (!found) {
+		HeapFree(GetProcessHeap(), 0, list);
+		return S_OK;
+	}
+	*count = found;
+	*iids = list;
 	return S_OK;
 }
 
@@ -172,21 +189,6 @@ static int equal_iid(REFIID left, const IID *right)
  * object. One stored handler list per pointer event; the tokens revoke exactly what add handed out, following the event
  * pattern of the CoreWindow's own events (events.c). The class name is the runtime class of the owner: a grid answers IUIElement
  * as Windows.UI.Xaml.Controls.Grid, the way a real projection reports the object rather than the interface. */
-typedef HRESULT (*element_query_function)(void *owner, REFIID iid, void **out);
-typedef ULONG (*element_reference_function)(void *owner);
-struct element_ui {
-	const __x_ABI_CWindows_CUI_CXaml_CIUIElementVtbl *lpVtbl;
-	void *owner;
-	HRESULT (*owner_query)(void *owner, REFIID iid, void **out);
-	ULONG (*owner_addref)(void *owner);
-	ULONG (*owner_release)(void *owner);
-	const WCHAR *class_name;
-	/* The element-specific pointer behavior (the button's IsPressed and Click); NULL where the engine has none. */
-	void (*behavior)(void *owner, IInspectable *element, enum raven_element_pointer kind,
-		__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args);
-	struct raven_event_list events[RAVEN_ELEMENT_POINTER_COUNT];
-	boolean hit_test_visible;
-};
 
 static HRESULT WINAPI ui_query(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, REFIID iid, void **out)
 {
@@ -205,8 +207,8 @@ static ULONG WINAPI ui_release(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This)
 }
 static HRESULT WINAPI ui_iids(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, ULONG *count, IID **iids)
 {
-	(void)This;
-	return inspectable_iids(count, iids);
+	struct element_ui *self = (struct element_ui *)This;
+	return element_honest_iids(self->owner_query, self->owner, count, iids);
 }
 static HRESULT WINAPI ui_name(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, HSTRING *name)
 {
@@ -248,7 +250,7 @@ static HRESULT WINAPI ui_stub2(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uin
 	(void)a2;
 	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 }
-static HRESULT WINAPI ui_stub3(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2, uint64_t a3)
+static HRESULT WINAPI __attribute__((unused)) ui_stub3(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2, uint64_t a3)
 {
 	(void)This;
 	(void)a1;
@@ -289,6 +291,37 @@ static HRESULT WINAPI ui_put_hit_test_visible(__x_ABI_CWindows_CUI_CXaml_CIUIEle
 {
 	((struct element_ui *)This)->hit_test_visible = !!value;
 	return S_OK;
+}
+
+struct routed_registration { struct routed_registration *next; IUnknown *identity; EventRegistrationToken token; int kind; };
+static int routed_pointer_kind(IInspectable *event);
+/* shortcut: handledEventsToo and keyboard delivery need routed Handled state and keyboard focus. */
+static HRESULT WINAPI ui_add_handler(ui_element *iface, IInspectable *event, IUnknown *handler, boolean handled_events_too)
+{
+ struct element_ui *self = (struct element_ui *)iface;
+ if (!event || !handler) return E_POINTER;
+ int kind = routed_pointer_kind(event);
+ if (kind < 0) return E_NOTIMPL;
+ struct routed_registration *entry = ALLOC(sizeof *entry);
+ if (!entry) return E_OUTOFMEMORY;
+ HRESULT hr = IUnknown_QueryInterface(handler, &IID_IUnknown, (void **)&entry->identity);
+ if (SUCCEEDED(hr)) hr = raven_event_add(&self->events[kind], handler, &entry->token);
+ if (FAILED(hr)) { if (entry->identity) IUnknown_Release(entry->identity); FREE(entry); return hr; }
+ entry->kind = kind; entry->next = self->routed_handlers; self->routed_handlers = entry;
+ (void)handled_events_too; return S_OK;
+}
+static HRESULT WINAPI ui_remove_handler(ui_element *iface, IInspectable *event, IUnknown *handler)
+{
+ struct element_ui *self = (struct element_ui *)iface;
+ if (!event || !handler) return E_POINTER;
+ int kind = routed_pointer_kind(event);
+ if (kind < 0) return E_NOTIMPL;
+ IUnknown *identity = NULL; HRESULT hr = IUnknown_QueryInterface(handler, &IID_IUnknown, (void **)&identity);
+ if (FAILED(hr)) return hr;
+ struct routed_registration **at = &self->routed_handlers;
+ while (*at && ((*at)->kind != kind || (*at)->identity != identity)) at = &(*at)->next;
+ if (*at) { struct routed_registration *entry = *at; *at = entry->next; raven_event_remove(&self->events[kind], entry->token); IUnknown_Release(entry->identity); FREE(entry); }
+ IUnknown_Release(identity); return S_OK;
 }
 
 /* The vtable follows the generated windows_ui_xaml_uielement.h slot for slot: IUIElement declares 96 methods after the
@@ -390,15 +423,15 @@ static const __x_ABI_CWindows_CUI_CXaml_CIUIElementVtbl uielement_table = {
 	.CapturePointer = ui_stub2,
 	.ReleasePointerCapture = ui_stub1,
 	.ReleasePointerCaptures = ui_stub0,
-	.AddHandler = ui_stub3,
-	.RemoveHandler = ui_stub2,
+	.AddHandler = ui_add_handler,
+	.RemoveHandler = ui_remove_handler,
 	.TransformToVisual = ui_stub2,
 	.InvalidateMeasure = ui_stub0,
 	.InvalidateArrange = ui_stub0,
 	.UpdateLayout = ui_stub0,
 };
 
-static void element_ui_init(struct element_ui *self, void *owner, HRESULT (*owner_query)(void *, REFIID, void **),
+void element_ui_init(struct element_ui *self, void *owner, HRESULT (*owner_query)(void *, REFIID, void **),
 	ULONG (*owner_addref)(void *), ULONG (*owner_release)(void *), const WCHAR *class_name)
 {
 	self->lpVtbl = &uielement_table;
@@ -412,8 +445,12 @@ static void element_ui_init(struct element_ui *self, void *owner, HRESULT (*owne
 		InitializeCriticalSection(&self->events[event].lock);
 }
 
-static void element_ui_release(struct element_ui *self)
+void element_ui_release(struct element_ui *self)
 {
+ while (self->routed_handlers) {
+  struct routed_registration *entry = self->routed_handlers; self->routed_handlers = entry->next;
+  IUnknown_Release(entry->identity); FREE(entry);
+ }
 	for (int event = 0; event < RAVEN_ELEMENT_POINTER_COUNT; ++event) {
 		raven_event_close(&self->events[event]);
 		DeleteCriticalSection(&self->events[event].lock);
@@ -440,14 +477,45 @@ static void element_deliver_handlers(struct element_ui *self, __x_ABI_CWindows_C
 	}
 }
 
+/* A query that answers success with a pointer no live interface can carry means the recorded element was freed and its
+ * memory reused; delivering into it would fault. The note names both pointers so the trace shows which recorded hit died
+ * (temporary diagnosis of the freed-element delivery the traced Shapr3D launch reached). */
+static int element_face_plausible(const void *face)
+{
+	return (uintptr_t)face > 0x10000 && ((uintptr_t)face & 7) == 0;
+}
+
+static void element_face_note(const void *element, const void *face)
+{
+	char line[130];
+	wsprintfA(line, "raven-xaml: element %p answered IUIElement with %p; freed or corrupt, delivery skipped\n",
+		element, face);
+	raven_trace_note(line);
+}
+
+static int element_deliverable(const void *element, void **ui, IInspectable *identity)
+{
+	__x_ABI_CWindows_CUI_CXaml_CIUIElement *face = NULL;
+	if (!element_face_plausible(element))
+		goto freed;
+	if (FAILED(identity->lpVtbl->QueryInterface(identity, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&face)) || !face)
+		return FALSE; /* the page and frame wrappers do not answer IUIElement and receive nothing */
+	if (!element_face_plausible(face))
+		goto freed;
+	*ui = face;
+	return TRUE;
+freed:
+	element_face_note(element, face);
+	return FALSE;
+}
+
 /* The target delivery: the element's own behavior first (a button tracks IsPressed and raises Click), then the handlers the
  * application stored. */
 void raven_xaml_element_pointer(IInspectable *element, enum raven_element_pointer kind,
 	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args)
 {
 	__x_ABI_CWindows_CUI_CXaml_CIUIElement *ui = NULL;
-	if (!element || !args ||
-		FAILED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui)) || !ui)
+	if (!element || !args || !element_deliverable(element, (void **)&ui, element))
 		return;
 	struct element_ui *self = (struct element_ui *)ui;
 	if (self->behavior)
@@ -463,8 +531,7 @@ void raven_xaml_element_bubble(IInspectable *element, enum raven_element_pointer
 	__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args)
 {
 	__x_ABI_CWindows_CUI_CXaml_CIUIElement *ui = NULL;
-	if (!element || !args ||
-		FAILED(element->lpVtbl->QueryInterface(element, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui)) || !ui)
+	if (!element || !args || !element_deliverable(element, (void **)&ui, element))
 		return;
 	element_deliver_handlers((struct element_ui *)ui, ui, kind, args);
 	ui->lpVtbl->Release(ui);
@@ -755,16 +822,35 @@ struct grid;
 struct grid1_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIGridVtbl *lpVtbl; struct grid *owner; };
 struct panel_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIPanelVtbl *lpVtbl; struct grid *owner; };
 
+/* What the element presents itself as: the grid's own machinery (children, the scalar sizes, the attached
+ * slots, the UIElement face) covers the shape elements the compiled control XBFs declare, so Border,
+ * StackPanel and Image build over the same struct — the shapes answer the Panel/UIElement faces and name
+ * themselves their own class; only the IGrid face stays the grid's. The Rectangle (the shape class a compiled
+ * document declares directly, not a panel) rides the same struct too and answers the IGrid face beside the
+ * Panel/UIElement ones, so the attached Grid.Row it is given stores and the layout pass reads it back — the
+ * machinery bargain the other shapes already have, extended to the one face its layout needs. */
+enum grid_shape { grid_shape_grid, grid_shape_border, grid_shape_stackpanel, grid_shape_image, grid_shape_rectangle };
+
 struct grid {
 	struct grid1_part first;
 	struct panel_part panel;
 	struct element_ui ui;
 	LONG refs;
 	HSTRING name;
-	struct children_vector *children, *rows, *columns;
+	const WCHAR *class_name; /* the runtime class the parts name themselves: the grid's own or the shape's */
+	unsigned shape; /* enum grid_shape */
+	struct children_vector *children, *rows, *columns, *groups;
 	COLORREF color;
 	BYTE alpha;
 	IInspectable *background;
+	/* The Rectangle's Shape.Fill rides the brush slot above (the shape's single brush — a rectangle has no
+	 * Background); the outline and corner radii the class also carries are stored without rendering yet, the
+	 * way the Border stores what it cannot paint. */
+	IInspectable *stroke;
+	COLORREF stroke_color;
+	BYTE stroke_alpha;
+	float stroke_thickness;
+	float radius_x, radius_y;
 	/* The Style the element was given (an owned reference); put_Style applied its setters into the fields above at the
 	 * put, so the reference records what was applied rather than overriding the own state at read time. */
 	IInspectable *style;
@@ -786,9 +872,13 @@ static ULONG grid_release(struct grid *self);
 	static ULONG WINAPI prefix##_addref(iface *This) { return grid_addref(((struct part *)This)->owner); } \
 	static ULONG WINAPI prefix##_release(iface *This) { return grid_release(((struct part *)This)->owner); } \
 	static HRESULT WINAPI prefix##_iids(iface *This, ULONG *count, IID **iids) \
-	{ (void)This; return inspectable_iids(count, iids); } \
+	{ return element_honest_iids((element_query_function)grid_query_any, ((struct part *)This)->owner, count, iids); } \
 	static HRESULT WINAPI prefix##_name(iface *This, HSTRING *name) \
-	{ (void)This; if (!name) return E_POINTER; return WindowsCreateString(grid_class, (UINT32)lstrlenW(grid_class), name); } \
+	{ \
+		struct grid *self = ((struct part *)This)->owner; \
+		if (!name) return E_POINTER; \
+		return WindowsCreateString(self->class_name, (UINT32)lstrlenW(self->class_name), name); \
+	} \
 	static HRESULT WINAPI prefix##_trust(iface *This, TrustLevel *level) \
 	{ (void)This; return inspectable_trust(level); }
 
@@ -801,7 +891,8 @@ static HRESULT grid_query_any(struct grid *self, REFIID iid, void **out)
 		return E_POINTER;
 	*out = NULL;
 	if (equal_iid(iid, &IID_IUnknown) || equal_iid(iid, &IID_IInspectable) ||
-		equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid))
+		((self->shape == grid_shape_grid || self->shape == grid_shape_rectangle) &&
+			equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid)))
 		*out = &self->first;
 	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel))
 		*out = &self->panel;
@@ -830,8 +921,12 @@ static ULONG grid_release(struct grid *self)
 			vector_release(self->rows);
 		if (self->columns)
 			vector_release(self->columns);
+		if (self->groups)
+			vector_release(self->groups);
 		if (self->background)
 			self->background->lpVtbl->Release(self->background);
+		if (self->stroke)
+			self->stroke->lpVtbl->Release(self->stroke);
 		if (self->style)
 			self->style->lpVtbl->Release(self->style);
 		if (self->resources)
@@ -951,8 +1046,21 @@ static const __x_ABI_CWindows_CUI_CXaml_CControls_CIPanelVtbl panel_table = {
 	.put_ChildrenTransitions = panel_put_transitions,
 };
 
-static struct grid *create_grid(void)
+static const WCHAR border_class[] = L"Windows.UI.Xaml.Controls.Border";
+static const WCHAR stackpanel_class[] = L"Windows.UI.Xaml.Controls.StackPanel";
+static const WCHAR image_class[] = L"Windows.UI.Xaml.Controls.Image";
+static const WCHAR rectangle_class[] = L"Windows.UI.Xaml.Shapes.Rectangle";
+
+static struct grid *create_grid_shape(enum grid_shape shape)
 {
+	static const WCHAR *const names[] = {
+		[grid_shape_grid] = NULL, /* the grid keeps its own class constant */
+		[grid_shape_border] = border_class,
+		[grid_shape_stackpanel] = stackpanel_class,
+		[grid_shape_image] = image_class,
+		[grid_shape_rectangle] = rectangle_class,
+	};
+	const WCHAR *class_name = shape == grid_shape_grid ? grid_class : names[shape];
 	struct grid *grid = ALLOC(sizeof *grid);
 	if (!grid)
 		return NULL;
@@ -961,23 +1069,33 @@ static struct grid *create_grid(void)
 	grid->panel.lpVtbl = &panel_table;
 	grid->panel.owner = grid;
 	element_ui_init(&grid->ui, grid, (element_query_function)grid_query_any, (element_reference_function)grid_addref,
-		(element_reference_function)grid_release, grid_class);
+		(element_reference_function)grid_release, class_name);
+	grid->class_name = class_name;
+	grid->shape = shape;
 	grid->refs = 1;
 	grid->children = create_children(&IID___FIVector_1_UIElement, vector_class_name, FALSE);
 	grid->rows = create_children(&IID___FIVector_1_RowDefinition, row_vector_class_name, TRUE);
 	grid->columns = create_children(&IID___FIVector_1_ColumnDefinition, column_vector_class_name, TRUE);
-	if (!grid->children || !grid->rows || !grid->columns) {
+	grid->groups = create_children(&IID___FIVector_1_UIElement, vector_class_name, FALSE);
+	if (!grid->children || !grid->rows || !grid->columns || !grid->groups) {
 		if (grid->children)
 			vector_release(grid->children);
 		if (grid->rows)
 			vector_release(grid->rows);
 		if (grid->columns)
 			vector_release(grid->columns);
+		if (grid->groups)
+			vector_release(grid->groups);
 		FREE(grid);
 		return NULL;
 	}
 	InterlockedIncrement(&raven_xaml_objects);
 	return grid;
+}
+
+static struct grid *create_grid(void)
+{
+	return create_grid_shape(grid_shape_grid);
 }
 
 /* TextBlock */
@@ -1060,8 +1178,7 @@ static ULONG WINAPI textblock_release(textblock1 *iface)
 
 static HRESULT WINAPI textblock_iids(textblock1 *iface, ULONG *count, IID **iids)
 {
-	(void)iface;
-	return inspectable_iids(count, iids);
+	return element_honest_iids((element_query_function)textblock_query, (struct textblock *)iface, count, iids);
 }
 
 static HRESULT WINAPI textblock_name(textblock1 *iface, HSTRING *name)
@@ -1281,6 +1398,98 @@ struct buttonbase_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CPrimitives_
 struct content_part { const __x_ABI_CWindows_CUI_CXaml_CControls_CIContentControlVtbl *lpVtbl; struct button *owner; };
 struct control_part { const control1_vtbl *lpVtbl; struct button *owner; };
 
+/* The FrameworkElement continuation family the frame carries (xaml_controls.c's fe2/fe3/fe4/theme parts,
+ * hand-declared there the same way because mingw's windows.ui.xaml.h models none of them): the projected
+ * FrameworkElement surface spreads its members across the version interfaces, and generated app code casts
+ * the object to the exact version declaring the member it touches. The traced Shapr3D constructor created a
+ * fresh Button through IButtonFactory and cast it to a face in this family — the traced cast message names
+ * the target EETypeRva 0x1afa0, the face after the WelcomePage round's IFrameworkElement3 (0x1af60) in the
+ * app's type table — and the button answered only its control faces, so the projection threw the
+ * InvalidCastException the unhandled rethrow fail-fasts on. The button now carries the same family the
+ * frame answers, with the same storage defaults. */
+extern const IID IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement2;   /* f19104be-422a-4904-a52f-ee72010429e5 (xaml_controls.c) */
+extern const IID IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement3;   /* c81c2720-5c52-4bbe-a199-2b1e34f00f70 (xaml_controls.c) */
+extern const IID IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement4;   /* 6b765bb3-fba3-4404-bdee-1a45d1ca5f21 (xaml_controls.c) */
+extern const IID IID_frame_theme;                                     /* 792a5d91-62a1-40bf-a0ce-f9c131fcb7a7 (xaml_controls.c, IFrameworkElement6) */
+struct button_framework_thickness { double left, top, right, bottom; };
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIFrameworkElement2 button_fe2_iface;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIFrameworkElement3 button_fe3_iface;
+typedef struct __x_ABI_CWindows_CUI_CXaml_CIFrameworkElement4 button_fe4_iface;
+struct button_fe2_part { const void *lpVtbl; struct button *owner; };
+struct button_fe3_part { const void *lpVtbl; struct button *owner; };
+struct button_fe4_part { const void *lpVtbl; struct button *owner; };
+struct button_theme_part { const void *lpVtbl; struct button *owner; };
+/* The three vtbls and the IFrameworkElement6 (ActualTheme) face, slot order the winmd's member order the
+ * frame's tables reconstruct. */
+struct button_fe2_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(button_fe2_iface *, REFIID, void **);
+	ULONG (STDMETHODCALLTYPE *AddRef)(button_fe2_iface *);
+	ULONG (STDMETHODCALLTYPE *Release)(button_fe2_iface *);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(button_fe2_iface *, ULONG *, IID **);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(button_fe2_iface *, HSTRING *);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(button_fe2_iface *, TrustLevel *);
+	HRESULT (STDMETHODCALLTYPE *get_RequestedTheme)(button_fe2_iface *, INT32 *);
+	HRESULT (STDMETHODCALLTYPE *put_RequestedTheme)(button_fe2_iface *, INT32);
+	HRESULT (STDMETHODCALLTYPE *add_DataContextChanged)(button_fe2_iface *, IUnknown *, EventRegistrationToken *);
+	HRESULT (STDMETHODCALLTYPE *remove_DataContextChanged)(button_fe2_iface *, EventRegistrationToken);
+	HRESULT (STDMETHODCALLTYPE *GetBindingExpression)(button_fe2_iface *, void *, void **);
+};
+struct button_fe3_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(button_fe3_iface *, REFIID, void **);
+	ULONG (STDMETHODCALLTYPE *AddRef)(button_fe3_iface *);
+	ULONG (STDMETHODCALLTYPE *Release)(button_fe3_iface *);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(button_fe3_iface *, ULONG *, IID **);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(button_fe3_iface *, HSTRING *);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(button_fe3_iface *, TrustLevel *);
+	HRESULT (STDMETHODCALLTYPE *add_Loading)(button_fe3_iface *, IUnknown *, EventRegistrationToken *);
+	HRESULT (STDMETHODCALLTYPE *remove_Loading)(button_fe3_iface *, EventRegistrationToken);
+};
+struct button_fe4_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(button_fe4_iface *, REFIID, void **);
+	ULONG (STDMETHODCALLTYPE *AddRef)(button_fe4_iface *);
+	ULONG (STDMETHODCALLTYPE *Release)(button_fe4_iface *);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(button_fe4_iface *, ULONG *, IID **);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(button_fe4_iface *, HSTRING *);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(button_fe4_iface *, TrustLevel *);
+	HRESULT (STDMETHODCALLTYPE *get_AllowFocusOnInteraction)(button_fe4_iface *, INT32 *);
+	HRESULT (STDMETHODCALLTYPE *put_AllowFocusOnInteraction)(button_fe4_iface *, INT32);
+	HRESULT (STDMETHODCALLTYPE *get_FocusVisualMargin)(button_fe4_iface *, struct button_framework_thickness *);
+	HRESULT (STDMETHODCALLTYPE *put_FocusVisualMargin)(button_fe4_iface *, struct button_framework_thickness);
+	HRESULT (STDMETHODCALLTYPE *get_FocusVisualSecondaryThickness)(button_fe4_iface *, struct button_framework_thickness *);
+	HRESULT (STDMETHODCALLTYPE *put_FocusVisualSecondaryThickness)(button_fe4_iface *, struct button_framework_thickness);
+	HRESULT (STDMETHODCALLTYPE *get_FocusVisualPrimaryThickness)(button_fe4_iface *, struct button_framework_thickness *);
+	HRESULT (STDMETHODCALLTYPE *put_FocusVisualPrimaryThickness)(button_fe4_iface *, struct button_framework_thickness);
+	HRESULT (STDMETHODCALLTYPE *get_FocusVisualSecondaryBrush)(button_fe4_iface *, IInspectable **);
+	HRESULT (STDMETHODCALLTYPE *put_FocusVisualSecondaryBrush)(button_fe4_iface *, IInspectable *);
+	HRESULT (STDMETHODCALLTYPE *get_FocusVisualPrimaryBrush)(button_fe4_iface *, IInspectable **);
+	HRESULT (STDMETHODCALLTYPE *put_FocusVisualPrimaryBrush)(button_fe4_iface *, IInspectable *);
+	HRESULT (STDMETHODCALLTYPE *get_AllowFocusWhenDisabled)(button_fe4_iface *, INT32 *);
+	HRESULT (STDMETHODCALLTYPE *put_AllowFocusWhenDisabled)(button_fe4_iface *, INT32);
+};
+struct button_theme_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(struct button_theme_part *, REFIID, void **);
+	ULONG (STDMETHODCALLTYPE *AddRef)(struct button_theme_part *);
+	ULONG (STDMETHODCALLTYPE *Release)(struct button_theme_part *);
+	HRESULT (STDMETHODCALLTYPE *GetIids)(struct button_theme_part *, ULONG *, IID **);
+	HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(struct button_theme_part *, HSTRING *);
+	HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(struct button_theme_part *, TrustLevel *);
+	HRESULT (STDMETHODCALLTYPE *get_ActualTheme)(struct button_theme_part *, INT32 *);
+	HRESULT (STDMETHODCALLTYPE *add_ActualThemeChanged)(struct button_theme_part *, IUnknown *, EventRegistrationToken *);
+	HRESULT (STDMETHODCALLTYPE *remove_ActualThemeChanged)(struct button_theme_part *, EventRegistrationToken);
+};
+
+/* Windows.UI.Xaml.IFrameworkElement itself — the interface the app's castclass of a fresh Button asks the
+ * projection for (Shapr3D.dll EETypeRva 0x1afa0, name hash 0xea8ccd28 verified against the recovered .NET Native
+ * ComputeNameHashCode; the app image's own interface record pairs the EEType pointer with the GUID a391d09b-4a99-
+ * 4b7c-9d8d-6fa5d01f6fbf, the same value the frame's face already carries). The 47 members follow the slot order
+ * the frame's face reconstructed from the winmd (xaml_controls.c): the members the button has storage for answer
+ * from it, the rest keep the frame's safe shapes (null-filled out slots on E_NOTIMPL). */
+struct button_framework_part { const void *lpVtbl; struct button *owner; };
+struct button_framework_vtbl {
+	IInspectableVtbl inspectable;
+	void *slots[47];
+};
+
 struct button {
 	struct button1_part first;
 	struct buttonbase_part base;
@@ -1297,6 +1506,9 @@ struct button {
 	IInspectable *template_value;
 	IInspectable *command, *command_parameter;
 	struct raven_event_list click;
+	/* The Control.IsEnabledChanged subscriptions the IControl face retains; the Click pair shares the same
+	 * machinery. */
+	struct raven_event_list is_enabled_changed;
 	UINT32 click_mode; /* enum raven_xaml_click_mode; the zero initialization is ClickMode.Release, the platform default */
 	boolean is_pressed, is_pointer_over;
 	/* The size the layout pass gave the button: its Width and Height, or the cell it lays out into. The routing records the
@@ -1313,6 +1525,29 @@ struct button {
 	 * sit beside them in the same order the store selector uses; a child without a span reads back one track. */
 	UINT32 row, column;
 	UINT32 row_span, column_span;
+	/* The FrameworkElement continuation storage: the fields the fe2/fe3/fe4/theme faces read and write, with
+	 * the real metadata defaults (RequestedTheme from the app theme, AllowFocusOnInteraction true, the
+	 * thicknesses empty, the brushes null, AllowFocusWhenDisabled false). The event lists retain the
+	 * DataContextChanged / Loading / ActualThemeChanged subscriptions the version faces carry. */
+	INT32 requested_theme, allow_focus_on_interaction, allow_focus_when_disabled;
+	struct button_framework_thickness focus_visual_margin, focus_visual_secondary_thickness, focus_visual_primary_thickness;
+	IInspectable *focus_visual_secondary_brush, *focus_visual_primary_brush;
+	struct raven_event_list data_context_changed, loading, actual_theme_changed;
+	struct button_fe2_part fe2;
+	struct button_fe3_part fe3;
+	struct button_fe4_part fe4;
+	struct button_theme_part theme;
+	/* The IFrameworkElement members' storage (the base face the generated cast obtains): the extents as
+	 * doubles with the real metadata defaults (Width/Height NaN auto, Min 0, Max PositiveInfinity — set in
+	 * create_button), the alignments Stretch, FlowDirection LeftToRight, an empty Margin, and the object
+	 * members Tag and DataContext (Style and Resources ride the button's own fields). The Loaded/Unloaded/
+	 * SizeChanged/LayoutUpdated pairs share the event machinery the other faces use. */
+	double fw_width, fw_height, fw_min_width, fw_max_width, fw_min_height, fw_max_height;
+	INT32 fw_horizontal_alignment, fw_vertical_alignment, fw_flow_direction;
+	struct button_framework_thickness fw_margin;
+	IInspectable *fw_tag, *fw_data_context;
+	struct raven_event_list fw_loaded, fw_unloaded, fw_size_changed, fw_layout_updated;
+	struct button_framework_part fw;
 };
 
 static HRESULT button_query_any(struct button *self, REFIID iid, void **out);
@@ -1325,7 +1560,7 @@ static ULONG button_release(struct button *self);
 	static ULONG WINAPI prefix##_addref(iface *This) { return button_addref(((struct part *)This)->owner); } \
 	static ULONG WINAPI prefix##_release(iface *This) { return button_release(((struct part *)This)->owner); } \
 	static HRESULT WINAPI prefix##_iids(iface *This, ULONG *count, IID **iids) \
-	{ (void)This; return inspectable_iids(count, iids); } \
+	{ return element_honest_iids((element_query_function)button_query_any, ((struct part *)This)->owner, count, iids); } \
 	static HRESULT WINAPI prefix##_name(iface *This, HSTRING *name) \
 	{ (void)This; if (!name) return E_POINTER; return WindowsCreateString(button_class, (UINT32)lstrlenW(button_class), name); } \
 	static HRESULT WINAPI prefix##_trust(iface *This, TrustLevel *level) \
@@ -1352,8 +1587,40 @@ static HRESULT button_query_any(struct button *self, REFIID iid, void **out)
 		*out = &self->content;
 	else if (equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl))
 		*out = &self->control;
-	else
+	else if (equal_iid(iid, &IID_frame_framework))
+		*out = &self->fw;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement2))
+		*out = &self->fe2;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement3))
+		*out = &self->fe3;
+	else if (equal_iid(iid, &IID__x_ABI_CWindows_CUI_CXaml_CIFrameworkElement4))
+		*out = &self->fe4;
+	else if (equal_iid(iid, &IID_frame_theme))
+		*out = &self->theme;
+	else {
+		/* Which face the caller asks the button for and the button refuses — the cast the .NET projection
+		 * drives on a fresh Button lands here, and a refused face is the InvalidCastException shape.
+		 * RAVEN_TRACE_ELEMENT_QI=1 in the guest enables it; the note rides raven-shell's RavenTrace host
+		 * call, which the trace carries without the debugger play. */
+		static int element_qi_gate = -1;
+		if (element_qi_gate < 0) {
+			char flag[8] = "";
+			element_qi_gate = GetEnvironmentVariableA("RAVEN_TRACE_ELEMENT_QI", flag, sizeof flag) ? 1 : 0;
+		}
+		if (element_qi_gate) {
+			static void (WINAPI *host_trace)(const char *);
+			if (!host_trace)
+				host_trace = (void (WINAPI *)(const char *))GetProcAddress(LoadLibraryW(L"ravenhost.dll"), "RavenTrace");
+			if (host_trace) {
+				char line[160];
+				wsprintfA(line, "raven-element: refused QI %08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+					(unsigned long)iid->Data1, iid->Data2, iid->Data3, iid->Data4[0], iid->Data4[1],
+					iid->Data4[2], iid->Data4[3], iid->Data4[4], iid->Data4[5], iid->Data4[6], iid->Data4[7]);
+				host_trace(line);
+			}
+		}
 		return E_NOINTERFACE;
+	}
 	button_addref(self);
 	return S_OK;
 }
@@ -1383,6 +1650,18 @@ static ULONG button_release(struct button *self)
 			IInspectable_Release(self->resources);
 		raven_event_close(&self->click);
 		DeleteCriticalSection(&self->click.lock);
+		raven_event_close(&self->is_enabled_changed);
+		DeleteCriticalSection(&self->is_enabled_changed.lock);
+		raven_event_close(&self->data_context_changed);
+		DeleteCriticalSection(&self->data_context_changed.lock);
+		raven_event_close(&self->loading);
+		DeleteCriticalSection(&self->loading.lock);
+		raven_event_close(&self->actual_theme_changed);
+		DeleteCriticalSection(&self->actual_theme_changed.lock);
+		if (self->focus_visual_secondary_brush)
+			IInspectable_Release(self->focus_visual_secondary_brush);
+		if (self->focus_visual_primary_brush)
+			IInspectable_Release(self->focus_visual_primary_brush);
 		element_ui_release(&self->ui);
 		FREE(self);
 		InterlockedDecrement(&raven_xaml_objects);
@@ -1390,6 +1669,272 @@ static ULONG button_release(struct button *self)
 	return (ULONG)refs;
 }
 
+/* The FrameworkElement continuation members: RequestedTheme (FE2) rides the button's theme field, the
+ * DataContextChanged / Loading / ActualThemeChanged pairs retain through the shared event lists, the FE4
+ * focus-visual scalars/thicknesses/brushes store over the button's own fields with the metadata defaults,
+ * GetBindingExpression answers the null a no-binding runtime answers. The ABI shapes mirror the frame's
+ * fe2/fe3/fe4/theme tables (xaml_controls.c). */
+#define BUTTON_FE_BOILERPLATE(prefix, iface_type, part_type) \
+	static HRESULT WINAPI prefix##_query(iface_type *This, REFIID iid, void **out) \
+	{ return button_query_any(((struct part_type *)This)->owner, iid, out); } \
+	static ULONG WINAPI prefix##_addref(iface_type *This) { return button_addref(((struct part_type *)This)->owner); } \
+	static ULONG WINAPI prefix##_release(iface_type *This) { return button_release(((struct part_type *)This)->owner); } \
+	static HRESULT WINAPI prefix##_iids(iface_type *This, ULONG *count, IID **iids) \
+	{ return element_honest_iids((element_query_function)button_query_any, ((struct part_type *)This)->owner, count, iids); } \
+	static HRESULT WINAPI prefix##_name(iface_type *This, HSTRING *name) \
+	{ (void)This; if (!name) return E_POINTER; return WindowsCreateString(button_class, (UINT32)lstrlenW(button_class), name); } \
+	static HRESULT WINAPI prefix##_trust(iface_type *This, TrustLevel *level) \
+	{ (void)This; return inspectable_trust(level); }
+BUTTON_FE_BOILERPLATE(button_fe2, button_fe2_iface, button_fe2_part)
+BUTTON_FE_BOILERPLATE(button_fe3, button_fe3_iface, button_fe3_part)
+BUTTON_FE_BOILERPLATE(button_fe4, button_fe4_iface, button_fe4_part)
+BUTTON_FE_BOILERPLATE(button_theme, struct button_theme_part, button_theme_part)
+static HRESULT WINAPI button_fe2_get_requested_theme(button_fe2_iface *This, INT32 *out)
+{ (void)This; if (!out) return E_POINTER; *out = ((struct button_fe2_part *)This)->owner->requested_theme; return S_OK; }
+static HRESULT WINAPI button_fe2_put_requested_theme(button_fe2_iface *This, INT32 value)
+{ ((struct button_fe2_part *)This)->owner->requested_theme = value; return S_OK; }
+static HRESULT WINAPI button_fe2_add_data_context_changed(button_fe2_iface *This, IUnknown *handler, EventRegistrationToken *token)
+{ if (!handler || !token) return E_POINTER; return raven_event_add(&((struct button_fe2_part *)This)->owner->data_context_changed, handler, token); }
+static HRESULT WINAPI button_fe2_remove_data_context_changed(button_fe2_iface *This, EventRegistrationToken token)
+{ return raven_event_remove(&((struct button_fe2_part *)This)->owner->data_context_changed, token); }
+static HRESULT WINAPI button_fe2_get_binding_expression(button_fe2_iface *This, void *dp, void **out)
+{ (void)This; (void)dp; if (!out) return E_POINTER; *out = NULL; return S_OK; }
+static HRESULT WINAPI button_fe3_add_loading(button_fe3_iface *This, IUnknown *handler, EventRegistrationToken *token)
+{ if (!handler || !token) return E_POINTER; return raven_event_add(&((struct button_fe3_part *)This)->owner->loading, handler, token); }
+static HRESULT WINAPI button_fe3_remove_loading(button_fe3_iface *This, EventRegistrationToken token)
+{ return raven_event_remove(&((struct button_fe3_part *)This)->owner->loading, token); }
+#define BUTTON_FE4_INT(name, field) \
+	static HRESULT WINAPI button_fe4_get_##name(button_fe4_iface *This, INT32 *out) \
+	{ (void)This; if (!out) return E_POINTER; *out = ((struct button_fe4_part *)This)->owner->field; return S_OK; } \
+	static HRESULT WINAPI button_fe4_put_##name(button_fe4_iface *This, INT32 value) \
+	{ ((struct button_fe4_part *)This)->owner->field = value; return S_OK; }
+BUTTON_FE4_INT(AllowFocusOnInteraction, allow_focus_on_interaction)
+BUTTON_FE4_INT(AllowFocusWhenDisabled, allow_focus_when_disabled)
+#undef BUTTON_FE4_INT
+#define BUTTON_FE4_THICKNESS(name, field) \
+	static HRESULT WINAPI button_fe4_get_##name(button_fe4_iface *This, struct button_framework_thickness *out) \
+	{ (void)This; if (!out) return E_POINTER; *out = ((struct button_fe4_part *)This)->owner->field; return S_OK; } \
+	static HRESULT WINAPI button_fe4_put_##name(button_fe4_iface *This, struct button_framework_thickness value) \
+	{ ((struct button_fe4_part *)This)->owner->field = value; return S_OK; }
+BUTTON_FE4_THICKNESS(FocusVisualMargin, focus_visual_margin)
+BUTTON_FE4_THICKNESS(FocusVisualSecondaryThickness, focus_visual_secondary_thickness)
+BUTTON_FE4_THICKNESS(FocusVisualPrimaryThickness, focus_visual_primary_thickness)
+#undef BUTTON_FE4_THICKNESS
+#define BUTTON_FE4_BRUSH(name, field) \
+	static HRESULT WINAPI button_fe4_get_##name(button_fe4_iface *This, IInspectable **out) \
+	{ if (!out) return E_POINTER; *out = ((struct button_fe4_part *)This)->owner->field; if (*out) IInspectable_AddRef(*out); return S_OK; } \
+	static HRESULT WINAPI button_fe4_put_##name(button_fe4_iface *This, IInspectable *value) \
+	{ \
+		struct button *self = ((struct button_fe4_part *)This)->owner; \
+		if (value) IInspectable_AddRef(value); \
+		if (self->field) IInspectable_Release(self->field); \
+		self->field = value; return S_OK; \
+	}
+BUTTON_FE4_BRUSH(FocusVisualSecondaryBrush, focus_visual_secondary_brush)
+BUTTON_FE4_BRUSH(FocusVisualPrimaryBrush, focus_visual_primary_brush)
+#undef BUTTON_FE4_BRUSH
+static HRESULT WINAPI button_theme_get_actual_theme(struct button_theme_part *This, INT32 *out)
+{ (void)This; if (!out) return E_POINTER; *out = 1; return S_OK; } /* the app theme the frame's face answers */
+static HRESULT WINAPI button_theme_add_actual_theme_changed(struct button_theme_part *This, IUnknown *handler, EventRegistrationToken *token)
+{ if (!handler || !token) return E_POINTER; return raven_event_add(&((struct button_theme_part *)This)->owner->actual_theme_changed, handler, token); }
+static HRESULT WINAPI button_theme_remove_actual_theme_changed(struct button_theme_part *This, EventRegistrationToken token)
+{ return raven_event_remove(&((struct button_theme_part *)This)->owner->actual_theme_changed, token); }
+static const struct button_fe2_vtbl button_fe2_table = {
+	button_fe2_query, button_fe2_addref, button_fe2_release,
+	button_fe2_iids, button_fe2_name, button_fe2_trust,
+	button_fe2_get_requested_theme, button_fe2_put_requested_theme,
+	button_fe2_add_data_context_changed, button_fe2_remove_data_context_changed,
+	button_fe2_get_binding_expression,
+};
+static const struct button_fe3_vtbl button_fe3_table = {
+	button_fe3_query, button_fe3_addref, button_fe3_release,
+	button_fe3_iids, button_fe3_name, button_fe3_trust,
+	button_fe3_add_loading, button_fe3_remove_loading,
+};
+static const struct button_fe4_vtbl button_fe4_table = {
+	button_fe4_query, button_fe4_addref, button_fe4_release,
+	button_fe4_iids, button_fe4_name, button_fe4_trust,
+	button_fe4_get_AllowFocusOnInteraction, button_fe4_put_AllowFocusOnInteraction,
+	button_fe4_get_FocusVisualMargin, button_fe4_put_FocusVisualMargin,
+	button_fe4_get_FocusVisualSecondaryThickness, button_fe4_put_FocusVisualSecondaryThickness,
+	button_fe4_get_FocusVisualPrimaryThickness, button_fe4_put_FocusVisualPrimaryThickness,
+	button_fe4_get_FocusVisualSecondaryBrush, button_fe4_put_FocusVisualSecondaryBrush,
+	button_fe4_get_FocusVisualPrimaryBrush, button_fe4_put_FocusVisualPrimaryBrush,
+	button_fe4_get_AllowFocusWhenDisabled, button_fe4_put_AllowFocusWhenDisabled,
+};
+static const struct button_theme_vtbl button_theme_table = {
+	button_theme_query, button_theme_addref, button_theme_release,
+	button_theme_iids, button_theme_name, button_theme_trust,
+	button_theme_get_actual_theme, button_theme_add_actual_theme_changed,
+	button_theme_remove_actual_theme_changed,
+};
+
+/* The IFrameworkElement base face's members, in the winmd slot order the frame's face documents. */
+static HRESULT WINAPI button_fw_query(struct button_framework_part *This, REFIID iid, void **out)
+{ return button_query_any(This->owner, iid, out); }
+static ULONG WINAPI button_fw_addref(struct button_framework_part *This)
+{ return button_addref(This->owner); }
+static ULONG WINAPI button_fw_release(struct button_framework_part *This)
+{ return button_release(This->owner); }
+static HRESULT WINAPI button_fw_iids(struct button_framework_part *This, ULONG *count, IID **iids)
+{ return element_honest_iids((element_query_function)button_query_any, This->owner, count, iids); }
+static HRESULT WINAPI button_fw_name_iface(struct button_framework_part *This, HSTRING *name)
+{ (void)This; if (!name) return E_POINTER; return WindowsCreateString(button_class, (UINT32)lstrlenW(button_class), name); }
+static HRESULT WINAPI button_fw_trust_iface(struct button_framework_part *This, TrustLevel *level)
+{ (void)This; return inspectable_trust(level); }
+static HRESULT WINAPI button_fw_triggers(struct button_framework_part *This, IInspectable **out)
+{ (void)This; if (!out) return E_POINTER; *out = NULL; return E_NOTIMPL; }
+static HRESULT WINAPI button_fw_get_resources(struct button_framework_part *This, IInspectable **out)
+{ if (!out) return E_POINTER; *out = This->owner->resources; if (*out) IInspectable_AddRef(*out); return S_OK; }
+static HRESULT WINAPI button_fw_put_resources(struct button_framework_part *This, IInspectable *value)
+{
+	struct button *self = This->owner;
+	if (value) IInspectable_AddRef(value);
+	if (self->resources) IInspectable_Release(self->resources);
+	self->resources = value;
+	return S_OK;
+}
+#define BUTTON_FW_OBJECT(name, field) \
+	static HRESULT WINAPI button_fw_get_##name(struct button_framework_part *This, IInspectable **out) \
+	{ if (!out) return E_POINTER; *out = This->owner->field; if (*out) IInspectable_AddRef(*out); return S_OK; } \
+	static HRESULT WINAPI button_fw_put_##name(struct button_framework_part *This, IInspectable *value) \
+	{ \
+		struct button *self = This->owner; \
+		if (value) IInspectable_AddRef(value); \
+		if (self->field) IInspectable_Release(self->field); \
+		self->field = value; return S_OK; \
+	}
+BUTTON_FW_OBJECT(Tag, fw_tag)
+BUTTON_FW_OBJECT(DataContext, fw_data_context)
+BUTTON_FW_OBJECT(Style, style)
+#undef BUTTON_FW_OBJECT
+static HRESULT WINAPI button_fw_get_language(struct button_framework_part *This, HSTRING *out)
+{ (void)This; if (!out) return E_POINTER; *out = NULL; return S_OK; }
+static HRESULT WINAPI button_fw_put_language(struct button_framework_part *This, HSTRING value)
+{ (void)This; (void)value; return S_OK; }
+#define BUTTON_FW_ACTUAL(name, field) \
+	static HRESULT WINAPI button_fw_get_##name(struct button_framework_part *This, double *out) \
+	{ if (!out) return E_POINTER; *out = (double)This->owner->field; return S_OK; }
+BUTTON_FW_ACTUAL(ActualWidth, width)
+BUTTON_FW_ACTUAL(ActualHeight, height)
+#undef BUTTON_FW_ACTUAL
+#define BUTTON_FW_DOUBLE(name, field) \
+	static HRESULT WINAPI button_fw_get_##name(struct button_framework_part *This, double *out) \
+	{ if (!out) return E_POINTER; *out = This->owner->field; return S_OK; } \
+	static HRESULT WINAPI button_fw_put_##name(struct button_framework_part *This, double value) \
+	{ This->owner->field = value; return S_OK; }
+BUTTON_FW_DOUBLE(Width, fw_width)
+BUTTON_FW_DOUBLE(Height, fw_height)
+BUTTON_FW_DOUBLE(MinWidth, fw_min_width)
+BUTTON_FW_DOUBLE(MaxWidth, fw_max_width)
+BUTTON_FW_DOUBLE(MinHeight, fw_min_height)
+BUTTON_FW_DOUBLE(MaxHeight, fw_max_height)
+#undef BUTTON_FW_DOUBLE
+#define BUTTON_FW_INT(name, field) \
+	static HRESULT WINAPI button_fw_get_##name(struct button_framework_part *This, INT32 *out) \
+	{ if (!out) return E_POINTER; *out = This->owner->field; return S_OK; } \
+	static HRESULT WINAPI button_fw_put_##name(struct button_framework_part *This, INT32 value) \
+	{ This->owner->field = value; return S_OK; }
+BUTTON_FW_INT(HorizontalAlignment, fw_horizontal_alignment)
+BUTTON_FW_INT(VerticalAlignment, fw_vertical_alignment)
+BUTTON_FW_INT(FlowDirection, fw_flow_direction)
+#undef BUTTON_FW_INT
+static HRESULT WINAPI button_fw_get_margin(struct button_framework_part *This, struct button_framework_thickness *out)
+{ if (!out) return E_POINTER; *out = This->owner->fw_margin; return S_OK; }
+static HRESULT WINAPI button_fw_put_margin(struct button_framework_part *This, struct button_framework_thickness value)
+{ This->owner->fw_margin = value; return S_OK; }
+static HRESULT WINAPI button_fw_get_name(struct button_framework_part *This, HSTRING *out)
+{ if (!out) return E_POINTER; return WindowsDuplicateString(This->owner->name, out); }
+static HRESULT WINAPI button_fw_put_name(struct button_framework_part *This, HSTRING value)
+{
+	struct button *self = This->owner;
+	HSTRING copy = NULL;
+	HRESULT hr = WindowsDuplicateString(value, &copy);
+	if (FAILED(hr)) return hr;
+	if (self->name) WindowsDeleteString(self->name);
+	self->name = copy;
+	return S_OK;
+}
+static HRESULT WINAPI button_fw_get_base_uri(struct button_framework_part *This, IInspectable **out)
+{ (void)This; if (!out) return E_POINTER; *out = NULL; return S_OK; }
+static HRESULT WINAPI button_fw_get_parent(struct button_framework_part *This, IInspectable **out)
+{ (void)This; if (!out) return E_POINTER; *out = NULL; return S_OK; }
+#define BUTTON_FW_EVENT(name, list) \
+	static HRESULT WINAPI button_fw_add_##name(struct button_framework_part *This, IUnknown *handler, EventRegistrationToken *token) \
+	{ if (!handler || !token) return E_POINTER; return raven_event_add(&This->owner->list, handler, token); } \
+	static HRESULT WINAPI button_fw_remove_##name(struct button_framework_part *This, EventRegistrationToken token) \
+	{ return raven_event_remove(&This->owner->list, token); }
+BUTTON_FW_EVENT(loaded, fw_loaded)
+BUTTON_FW_EVENT(unloaded, fw_unloaded)
+BUTTON_FW_EVENT(size_changed, fw_size_changed)
+BUTTON_FW_EVENT(layout_updated, fw_layout_updated)
+#undef BUTTON_FW_EVENT
+static HRESULT WINAPI button_fw_find_name(struct button_framework_part *This, HSTRING name, IInspectable **out)
+{ (void)This; (void)name; if (!out) return E_POINTER; *out = NULL; return E_NOTIMPL; }
+static HRESULT WINAPI button_fw_set_binding(struct button_framework_part *This, void *dp, void *binding)
+{ (void)This; (void)dp; (void)binding; return E_NOTIMPL; }
+/* The part's member functions take the part-typed first parameter; the IInspectable vtbl's slots cast them the
+ * way the engine's part tables cast their typed handlers ((element_query_function) and friends). */
+typedef HRESULT (STDMETHODCALLTYPE *button_fw_qi_t)(IInspectable *, REFIID, void **);
+typedef ULONG (STDMETHODCALLTYPE *button_fw_ref_t)(IInspectable *);
+typedef HRESULT (STDMETHODCALLTYPE *button_fw_iids_t)(IInspectable *, ULONG *, IID **);
+typedef HRESULT (STDMETHODCALLTYPE *button_fw_name_t)(IInspectable *, HSTRING *);
+typedef HRESULT (STDMETHODCALLTYPE *button_fw_trust_t)(IInspectable *, TrustLevel *);
+static const struct button_framework_vtbl button_framework_table = {
+	{
+		(button_fw_qi_t)button_fw_query,
+		(button_fw_ref_t)button_fw_addref,
+		(button_fw_ref_t)button_fw_release,
+		(button_fw_iids_t)button_fw_iids,
+		(button_fw_name_t)button_fw_name_iface,
+		(button_fw_trust_t)button_fw_trust_iface,
+	},
+	{
+		(void *)button_fw_triggers,                 /* 6  get_Triggers */
+		(void *)button_fw_get_resources,            /* 7  get_Resources */
+		(void *)button_fw_put_resources,            /* 8  put_Resources */
+		(void *)button_fw_get_Tag,                  /* 9  get_Tag */
+		(void *)button_fw_put_Tag,                  /* 10 put_Tag */
+		(void *)button_fw_get_language,             /* 11 get_Language */
+		(void *)button_fw_put_language,             /* 12 put_Language */
+		(void *)button_fw_get_ActualWidth,          /* 13 get_ActualWidth */
+		(void *)button_fw_get_ActualHeight,         /* 14 get_ActualHeight */
+		(void *)button_fw_get_Width,                /* 15 get_Width */
+		(void *)button_fw_put_Width,                /* 16 put_Width */
+		(void *)button_fw_get_Height,               /* 17 get_Height */
+		(void *)button_fw_put_Height,               /* 18 put_Height */
+		(void *)button_fw_get_MinWidth,             /* 19 get_MinWidth */
+		(void *)button_fw_put_MinWidth,             /* 20 put_MinWidth */
+		(void *)button_fw_get_MaxWidth,             /* 21 get_MaxWidth */
+		(void *)button_fw_put_MaxWidth,             /* 22 put_MaxWidth */
+		(void *)button_fw_get_MinHeight,            /* 23 get_MinHeight */
+		(void *)button_fw_put_MinHeight,            /* 24 put_MinHeight */
+		(void *)button_fw_get_MaxHeight,            /* 25 get_MaxHeight */
+		(void *)button_fw_put_MaxHeight,            /* 26 put_MaxHeight */
+		(void *)button_fw_get_HorizontalAlignment,  /* 27 get_HorizontalAlignment */
+		(void *)button_fw_put_HorizontalAlignment,  /* 28 put_HorizontalAlignment */
+		(void *)button_fw_get_VerticalAlignment,    /* 29 get_VerticalAlignment */
+		(void *)button_fw_put_VerticalAlignment,    /* 30 put_VerticalAlignment */
+		(void *)button_fw_get_margin,               /* 31 get_Margin */
+		(void *)button_fw_put_margin,               /* 32 put_Margin */
+		(void *)button_fw_get_name,                 /* 33 get_Name */
+		(void *)button_fw_put_name,                 /* 34 put_Name */
+		(void *)button_fw_get_base_uri,             /* 35 get_BaseUri */
+		(void *)button_fw_get_DataContext,          /* 36 get_DataContext */
+		(void *)button_fw_put_DataContext,          /* 37 put_DataContext */
+		(void *)button_fw_get_Style,                /* 38 get_Style */
+		(void *)button_fw_put_Style,                /* 39 put_Style */
+		(void *)button_fw_get_parent,               /* 40 get_Parent */
+		(void *)button_fw_get_FlowDirection,        /* 41 get_FlowDirection */
+		(void *)button_fw_put_FlowDirection,        /* 42 put_FlowDirection */
+		(void *)button_fw_add_loaded, (void *)button_fw_remove_loaded,
+		(void *)button_fw_add_unloaded, (void *)button_fw_remove_unloaded,
+		(void *)button_fw_add_size_changed, (void *)button_fw_remove_size_changed,
+		(void *)button_fw_add_layout_updated, (void *)button_fw_remove_layout_updated,
+		(void *)button_fw_find_name,                /* 51 FindName */
+		(void *)button_fw_set_binding               /* 52 SetBinding */
+	}
+};
 /* IButton declares no members of its own. */
 
 /* The RoutedEventArgs snapshot a Click raise carries: an IInspectable with the runtime class name, since the event carries no
@@ -1764,15 +2309,30 @@ CONTROL_STUB(control_horizontal_alignment_get)
 CONTROL_STUB(control_horizontal_alignment_put)
 CONTROL_STUB(control_vertical_alignment_get)
 CONTROL_STUB(control_vertical_alignment_put)
-CONTROL_STUB(control_background_get)
-CONTROL_STUB(control_background_put)
+static HRESULT WINAPI control_background_get(control1 *iface, IInspectable **value)
+{ (void)iface; (void)value; return E_NOTIMPL; }
+static HRESULT WINAPI control_background_put(control1 *iface, IInspectable *value)
+{ (void)iface; (void)value; return E_NOTIMPL; }
 CONTROL_STUB(control_border_thickness_get)
 CONTROL_STUB(control_border_thickness_put)
 CONTROL_STUB(control_border_brush_get)
 CONTROL_STUB(control_border_brush_put)
 CONTROL_STUB(control_focus_state_get)
-CONTROL_STUB2(control_is_enabled_changed_add)
-CONTROL_STUB(control_is_enabled_changed_remove)
+/* IsEnabledChanged rides the shared event machinery: the stub's flattened slot 43 (the six IInspectable
+ * methods plus this interface's own thirty-seventh member, the winmd's declaration order — the interface
+ * does not flatten its ancestors' members) lands here with the handler as the marshal's CCW and the token
+ * out-pointer packed the way the Click pair packs it. */
+static HRESULT WINAPI control_is_enabled_changed_add(control1 *This, uint64_t handler, uint64_t token)
+{
+	return raven_event_add(&((struct control_part *)This)->owner->is_enabled_changed,
+		(IUnknown *)(uintptr_t)handler, (EventRegistrationToken *)(uintptr_t)token);
+}
+static HRESULT WINAPI control_is_enabled_changed_remove(control1 *This, uint64_t token)
+{
+	EventRegistrationToken value;
+	value.value = (INT64)token;
+	return raven_event_remove(&((struct control_part *)This)->owner->is_enabled_changed, value);
+}
 CONTROL_STUB(control_apply_template)
 CONTROL_STUB2(control_focus)
 
@@ -1886,10 +2446,37 @@ static struct button *create_button(void)
 	button->content.owner = button;
 	button->control.lpVtbl = &control_table;
 	button->control.owner = button;
+	button->fe2.lpVtbl = &button_fe2_table;
+	button->fe2.owner = button;
+	button->fe3.lpVtbl = &button_fe3_table;
+	button->fe3.owner = button;
+	button->fe4.lpVtbl = &button_fe4_table;
+	button->fe4.owner = button;
+	button->theme.lpVtbl = &button_theme_table;
+	button->theme.owner = button;
+	button->fw.lpVtbl = &button_framework_table;
+	button->fw.owner = button;
 	element_ui_init(&button->ui, button, (element_query_function)button_query_any, (element_reference_function)button_addref,
 		(element_reference_function)button_release, button_class);
 	button->ui.behavior = button_pointer_behavior;
 	InitializeCriticalSection(&button->click.lock);
+	InitializeCriticalSection(&button->is_enabled_changed.lock);
+	InitializeCriticalSection(&button->data_context_changed.lock);
+	InitializeCriticalSection(&button->loading.lock);
+	InitializeCriticalSection(&button->actual_theme_changed.lock);
+	InitializeCriticalSection(&button->fw_loaded.lock);
+	InitializeCriticalSection(&button->fw_unloaded.lock);
+	InitializeCriticalSection(&button->fw_size_changed.lock);
+	InitializeCriticalSection(&button->fw_layout_updated.lock);
+	/* The metadata defaults the frame's constructor sets: the app theme (the launch runs dark) and
+	 * AllowFocusOnInteraction true; the thicknesses and brushes carry the zero/null defaults. The
+	 * IFrameworkElement extents take the real defaults: Width/Height NaN (auto), Min 0, Max PositiveInfinity,
+	 * the alignments Stretch, FlowDirection LeftToRight. */
+	button->requested_theme = 1;
+	button->allow_focus_on_interaction = 1;
+	button->fw_width = button->fw_height = __builtin_nan("");
+	button->fw_max_width = button->fw_max_height = __builtin_inf();
+	button->fw_horizontal_alignment = button->fw_vertical_alignment = 3; /* Stretch */
 	button->refs = 1;
 	InterlockedIncrement(&raven_xaml_objects);
 	return button;
@@ -1905,6 +2492,9 @@ struct row_definition {
 	LONG refs;
 	double height;
 	UINT32 unit;
+	/* The extent bounds the projected face reports; MinHeight starts at 0, MaxHeight at PositiveInfinity
+	 * (the real WinRT metadata defaults) and ActualHeight at 0 until a measure pass exists. */
+	double min_height, max_height, actual_height;
 };
 
 struct column_definition {
@@ -1912,6 +2502,7 @@ struct column_definition {
 	LONG refs;
 	double width;
 	UINT32 unit;
+	double min_width, max_width, actual_width;
 };
 
 static HRESULT WINAPI row_definition_query(row_definition1 *iface, REFIID iid, void **out)
@@ -1982,11 +2573,43 @@ static HRESULT WINAPI row_put_height(row_definition1 *iface, __x_ABI_CWindows_CU
 	return S_OK;
 }
 
-STUB1(row_definition1, row_max_height)
-STUB1_SET(row_definition1, row_put_max_height)
-STUB1(row_definition1, row_min_height)
-STUB1_SET(row_definition1, row_put_min_height)
-STUB1(row_definition1, row_actual_height)
+/* The bound getters answer the stored extents (the defaults the real metadata carries: MinHeight 0,
+ * MaxHeight PositiveInfinity, ActualHeight 0 until a measure pass exists). The application's generated
+ * getters unbox the returned double directly, so a refusal here derefs null (the traced TitleBarControl
+ * c0000005 reading SystemButtonsColumn's bounds). */
+static HRESULT WINAPI row_max_height(row_definition1 *iface, uint64_t out)
+{
+	if (!out)
+		return E_POINTER;
+	*(double *)(uintptr_t)out = ((struct row_definition *)iface)->max_height;
+	return S_OK;
+}
+static HRESULT WINAPI row_put_max_height(row_definition1 *iface, double value)
+{
+	((struct row_definition *)iface)->max_height = value;
+	raven_render_changed();
+	return S_OK;
+}
+static HRESULT WINAPI row_min_height(row_definition1 *iface, uint64_t out)
+{
+	if (!out)
+		return E_POINTER;
+	*(double *)(uintptr_t)out = ((struct row_definition *)iface)->min_height;
+	return S_OK;
+}
+static HRESULT WINAPI row_put_min_height(row_definition1 *iface, double value)
+{
+	((struct row_definition *)iface)->min_height = value;
+	raven_render_changed();
+	return S_OK;
+}
+static HRESULT WINAPI row_actual_height(row_definition1 *iface, uint64_t out)
+{
+	if (!out)
+		return E_POINTER;
+	*(double *)(uintptr_t)out = ((struct row_definition *)iface)->actual_height;
+	return S_OK;
+}
 
 static const __x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinitionVtbl row_definition_table = {
 	.QueryInterface = row_definition_query,
@@ -2072,11 +2695,43 @@ static HRESULT WINAPI column_put_width(column_definition1 *iface, __x_ABI_CWindo
 	return S_OK;
 }
 
-STUB1(column_definition1, column_max_width)
-STUB1_SET(column_definition1, column_put_max_width)
-STUB1(column_definition1, column_min_width)
-STUB1_SET(column_definition1, column_put_min_width)
-STUB1(column_definition1, column_actual_width)
+/* The bound getters answer the stored extents (the defaults the real metadata carries: MinWidth 0,
+ * MaxWidth PositiveInfinity, ActualWidth 0 until a measure pass exists). The application's generated
+ * getters unbox the returned double directly, so a refusal here derefs null (the traced TitleBarControl
+ * c0000005 reading SystemButtonsColumn's bounds). */
+static HRESULT WINAPI column_max_width(column_definition1 *iface, uint64_t out)
+{
+	if (!out)
+		return E_POINTER;
+	*(double *)(uintptr_t)out = ((struct column_definition *)iface)->max_width;
+	return S_OK;
+}
+static HRESULT WINAPI column_put_max_width(column_definition1 *iface, double value)
+{
+	((struct column_definition *)iface)->max_width = value;
+	raven_render_changed();
+	return S_OK;
+}
+static HRESULT WINAPI column_min_width(column_definition1 *iface, uint64_t out)
+{
+	if (!out)
+		return E_POINTER;
+	*(double *)(uintptr_t)out = ((struct column_definition *)iface)->min_width;
+	return S_OK;
+}
+static HRESULT WINAPI column_put_min_width(column_definition1 *iface, double value)
+{
+	((struct column_definition *)iface)->min_width = value;
+	raven_render_changed();
+	return S_OK;
+}
+static HRESULT WINAPI column_actual_width(column_definition1 *iface, uint64_t out)
+{
+	if (!out)
+		return E_POINTER;
+	*(double *)(uintptr_t)out = ((struct column_definition *)iface)->actual_width;
+	return S_OK;
+}
 
 static const __x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinitionVtbl column_definition_table = {
 	.QueryInterface = column_definition_query,
@@ -2101,6 +2756,7 @@ static struct row_definition *create_row_definition(void)
 		return NULL;
 	definition->lpVtbl = &row_definition_table;
 	definition->refs = 1;
+	definition->max_height = 1.7976931348623157e+308; /* PositiveInfinity, the real metadata default */
 	InterlockedIncrement(&raven_xaml_objects);
 	return definition;
 }
@@ -2112,6 +2768,7 @@ static struct column_definition *create_column_definition(void)
 		return NULL;
 	definition->lpVtbl = &column_definition_table;
 	definition->refs = 1;
+	definition->max_width = 1.7976931348623157e+308; /* PositiveInfinity, the real metadata default */
 	InterlockedIncrement(&raven_xaml_objects);
 	return definition;
 }
@@ -2342,6 +2999,188 @@ static void presenter_bind_walk(IInspectable *element, IInspectable *owner, int 
 		presenter_bind_walk((IInspectable *)self->children->items[index], owner, clear, depth + 1);
 }
 
+/* The visual-state tree the compiled control templates carry (ThemedImage.xbf's VisualStateManager.VisualStateGroups):
+ * VisualStateGroup holds named states, VisualState holds a Setter collection. The engine stores the tree so the
+ * documents load; nothing drives the states yet — GoToState arrives with the control surfaces that raise it. */
+static const WCHAR visual_state_group_class[] = L"Windows.UI.Xaml.VisualStateGroup";
+static const WCHAR visual_state_class[] = L"Windows.UI.Xaml.VisualState";
+
+struct visual_state_group {
+	const IInspectableVtbl *lpVtbl;
+	LONG refs;
+	HSTRING name;
+	struct children_vector *states;
+};
+
+struct visual_state {
+	const IInspectableVtbl *lpVtbl;
+	LONG refs;
+	HSTRING name;
+	struct children_vector *setters;
+};
+
+static HRESULT WINAPI visual_state_group_query(IInspectable *iface, REFIID iid, void **out)
+{
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&((struct visual_state_group *)iface)->refs);
+	*out = iface;
+	return S_OK;
+}
+
+static HRESULT WINAPI visual_state_query(IInspectable *iface, REFIID iid, void **out)
+{
+	return visual_state_group_query(iface, iid, out);
+}
+
+static ULONG WINAPI visual_state_group_addref(IInspectable *iface)
+{
+	return (ULONG)InterlockedIncrement(&((struct visual_state_group *)iface)->refs);
+}
+
+static ULONG WINAPI visual_state_group_release(IInspectable *iface)
+{
+	struct visual_state_group *self = (struct visual_state_group *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->name)
+			WindowsDeleteString(self->name);
+		if (self->states)
+			vector_release(self->states);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static ULONG WINAPI visual_state_release(IInspectable *iface)
+{
+	struct visual_state *self = (struct visual_state *)iface;
+	const LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		if (self->name)
+			WindowsDeleteString(self->name);
+		if (self->setters)
+			vector_release(self->setters);
+		FREE(self);
+		InterlockedDecrement(&raven_xaml_objects);
+	}
+	return (ULONG)refs;
+}
+
+static HRESULT WINAPI group_name_get(IInspectable *iface, HSTRING *out)
+{
+	if (!out)
+		return E_POINTER;
+	return WindowsDuplicateString(((struct visual_state_group *)iface)->name, out);
+}
+
+static HRESULT WINAPI state_name_get(IInspectable *iface, HSTRING *out)
+{
+	if (!out)
+		return E_POINTER;
+	return WindowsDuplicateString(((struct visual_state *)iface)->name, out);
+}
+
+static HRESULT WINAPI group_iids(IInspectable *iface, ULONG *count, IID **iids)
+{ (void)iface; return inspectable_iids(count, iids); }
+
+static HRESULT WINAPI group_trust(IInspectable *iface, TrustLevel *level)
+{ (void)iface; return inspectable_trust(level); }
+
+static const IInspectableVtbl visual_state_group_table = {
+	visual_state_group_query, visual_state_group_addref, visual_state_group_release,
+	group_iids, group_name_get, group_trust
+};
+
+static const IInspectableVtbl visual_state_table = {
+	visual_state_query, visual_state_group_addref, visual_state_release,
+	group_iids, state_name_get, group_trust
+};
+
+static struct visual_state_group *create_visual_state_group(void)
+{
+	struct visual_state_group *group = ALLOC(sizeof *group);
+	if (!group)
+		return NULL;
+	group->lpVtbl = &visual_state_group_table;
+	group->refs = 1;
+	group->name = NULL;
+	group->states = create_children(&IID___FIVector_1_UIElement, vector_class_name, FALSE);
+	if (!group->states) {
+		FREE(group);
+		return NULL;
+	}
+	InterlockedIncrement(&raven_xaml_objects);
+	return group;
+}
+
+static struct visual_state *create_visual_state(void)
+{
+	struct visual_state *state = ALLOC(sizeof *state);
+	if (!state)
+		return NULL;
+	state->lpVtbl = &visual_state_table;
+	state->refs = 1;
+	state->name = NULL;
+	state->setters = create_children(&IID___FIVector_1_UIElement, vector_class_name, FALSE);
+	if (!state->setters) {
+		FREE(state);
+		return NULL;
+	}
+	InterlockedIncrement(&raven_xaml_objects);
+	return state;
+}
+
+/* The named collections the visual-state tree and the shape elements carry: VisualStateGroups on the grid-shaped
+ * elements, States on a group, Setters on a state. The loader's collection pushes reach here before the panel and
+ * grid faces; S_FALSE means the object has no such collection. */
+HRESULT __declspec(dllexport) raven_xaml_elements_named_collection(IInspectable *object, const WCHAR *name,
+	UINT32 length, IInspectable **out)
+{
+	if (!object || !name || !out)
+		return E_POINTER;
+	*out = NULL;
+	if (same_text(name, length, L"VisualStateGroups")) {
+		grid1 *grid = NULL;
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)))
+			return S_FALSE;
+		struct grid *self = NULL;
+		if (grid->lpVtbl == &grid1_table)
+			self = ((struct grid1_part *)grid)->owner;
+		grid->lpVtbl->Release(grid);
+		if (!self || !self->groups)
+			return S_FALSE;
+		InterlockedIncrement(&self->groups->refs);
+		*out = (IInspectable *)self->groups;
+		return S_OK;
+	}
+	{
+		IInspectable *inspectable = NULL;
+		if (FAILED(object->lpVtbl->QueryInterface(object, &IID_IInspectable, (void **)&inspectable)))
+			return S_FALSE;
+		if (inspectable->lpVtbl == &visual_state_group_table && same_text(name, length, L"States")) {
+			struct visual_state_group *self = (struct visual_state_group *)inspectable;
+			InterlockedIncrement(&self->states->refs);
+			*out = (IInspectable *)self->states;
+			inspectable->lpVtbl->Release(inspectable);
+			return S_OK;
+		}
+		if (inspectable->lpVtbl == &visual_state_table && same_text(name, length, L"Setters")) {
+			struct visual_state *self = (struct visual_state *)inspectable;
+			InterlockedIncrement(&self->setters->refs);
+			*out = (IInspectable *)self->setters;
+			inspectable->lpVtbl->Release(inspectable);
+			return S_OK;
+		}
+		inspectable->lpVtbl->Release(inspectable);
+	}
+	return S_FALSE;
+}
+
 /* Loader application: names, text and object properties on the three classes. */
 
 static int elements_name(IInspectable *object, const WCHAR *text, UINT32 length)
@@ -2349,10 +3188,18 @@ static int elements_name(IInspectable *object, const WCHAR *text, UINT32 length)
 	grid1 *grid = NULL;
 	textblock1 *textblock = NULL;
 	button1 *button = NULL;
+	panel1 *panel = NULL;
 	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
 		if (grid->lpVtbl == &grid1_table)
 			store_name(&((struct grid1_part *)grid)->owner->name, text, length);
 		grid->lpVtbl->Release(grid);
+		return 1;
+	}
+	/* The shape elements (Border, StackPanel, Image) ride the panel face: same owner machinery, their own class. */
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel, (void **)&panel)) && panel) {
+		if (panel->lpVtbl == &panel_table)
+			store_name(&((struct panel_part *)panel)->owner->name, text, length);
+		panel->lpVtbl->Release(panel);
 		return 1;
 	}
 	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CITextBlock, (void **)&textblock)) && textblock) {
@@ -2413,6 +3260,29 @@ static void grid_store_color(struct grid *self, COLORREF color, BYTE alpha, IIns
 		self->background->lpVtbl->Release(self->background);
 	self->background = brush;
 	raven_render_changed();
+}
+
+/* The Rectangle's outline store: the same shape as the fill store, into the stroke fields the rectangle carries.
+ * Stored without rendering yet — the fields hold what the document gave until the shape-painting stage. */
+static void grid_store_stroke(struct grid *self, COLORREF color, BYTE alpha, IInspectable *brush)
+{
+	self->stroke_color = color;
+	self->stroke_alpha = alpha;
+	if (self->stroke)
+		self->stroke->lpVtbl->Release(self->stroke);
+	self->stroke = brush;
+	raven_render_changed();
+}
+
+/* The Fill application note: the engine's fill store is not a traced API call, so a launch that passes the former
+ * Rectangle frontier carries its evidence only through this note — scoped to the one property, the way the frame
+ * creation note above the factories is. */
+static void rectangle_fill_note(COLORREF color, BYTE alpha)
+{
+	char note[64];
+	wsprintfA(note, "raven-xaml: Rectangle fill stored %02x%02x%02x alpha %u\n",
+		(unsigned)GetRValue(color), (unsigned)GetGValue(color), (unsigned)GetBValue(color), (unsigned)alpha);
+	raven_trace_note(note);
 }
 
 /* The compiled colour-name path of the TextBlock foreground: the named colour replaces the brush reference, the way the
@@ -2525,15 +3395,23 @@ HRESULT raven_xaml_elements_set_float(IInspectable *object, const WCHAR *name, U
 		textblock->lpVtbl->Release(textblock);
 		return S_OK;
 	}
-	if (!same_text(name, length, L"Width") && !same_text(name, length, L"Height"))
+	if (!same_text(name, length, L"Width") && !same_text(name, length, L"Height") &&
+		!same_text(name, length, L"StrokeThickness") && !same_text(name, length, L"RadiusX") &&
+		!same_text(name, length, L"RadiusY"))
 		return S_FALSE;
 	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid)) && grid) {
 		if (grid->lpVtbl == &grid1_table) {
 			struct grid *self = ((struct grid1_part *)grid)->owner;
 			if (same_text(name, length, L"Width"))
 				self->width = value;
-			else
+			else if (same_text(name, length, L"Height"))
 				self->height = value;
+			else if (self->shape == grid_shape_rectangle && same_text(name, length, L"StrokeThickness"))
+				self->stroke_thickness = value;
+			else if (self->shape == grid_shape_rectangle && same_text(name, length, L"RadiusX"))
+				self->radius_x = value;
+			else if (self->shape == grid_shape_rectangle && same_text(name, length, L"RadiusY"))
+				self->radius_y = value;
 			raven_render_changed();
 		}
 		grid->lpVtbl->Release(grid);
@@ -2858,6 +3736,77 @@ static HRESULT grid_apply_setter(void *state, const WCHAR *name, UINT32 length, 
 		 * the engine does not know — fails the application; put_Style answers E_INVALIDARG and stores nothing. */
 		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2859\n"); return E_INVALIDARG; }
 	}
+	/* The Rectangle's own shape properties. The fill rides the brush slot the Background store keeps (a rectangle has
+	 * no Background); a colour brush lands there the way a Background does, and so does the boxed colour a compiled
+	 * theme dictionary hands a ThemeResource lookup and the named-colour constant. A value the engine cannot read
+	 * fails the application the way the Background setter does — the trace then names the runtime class the resource
+	 * resolved to. Stroke stores beside it; the thickness and the corner radii are numbers. The outline and radii are
+	 * stored without rendering yet, the way the Border stores what it cannot paint. */
+	if (self->shape == grid_shape_rectangle &&
+		(same_text(name, length, L"Fill") || same_text(name, length, L"Stroke"))) {
+		const int fill = same_text(name, length, L"Fill");
+		COLORREF color = 0;
+		BYTE alpha = 0;
+		if (value && style_brush_color(value, &color, &alpha)) {
+			if (!check_only) {
+				value->lpVtbl->AddRef(value);
+				if (fill) {
+					grid_store_color(self, color, alpha, value);
+					rectangle_fill_note(color, alpha);
+				} else
+					grid_store_stroke(self, color, alpha, value);
+			}
+			return S_OK;
+		}
+		__x_ABI_CWindows_CUI_CColor boxed;
+		if (value && raven_color_value_of(value, &boxed) == S_OK) {
+			if (!check_only) {
+				color = RGB(boxed.R, boxed.G, boxed.B);
+				alpha = boxed.A;
+				if (fill) {
+					grid_store_color(self, color, alpha, NULL);
+					rectangle_fill_note(color, alpha);
+				} else
+					grid_store_stroke(self, color, alpha, NULL);
+			}
+			return S_OK;
+		}
+		HSTRING string = NULL;
+		if (value && style_boxed_text(value, &string)) {
+			UINT32 text_length = 0;
+			const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
+			const int named = named_color(text, text_length, &color, &alpha);
+			WindowsDeleteString(string);
+			if (named) {
+				if (!check_only) {
+					if (fill) {
+						grid_store_color(self, color, alpha, NULL);
+						rectangle_fill_note(color, alpha);
+					} else
+						grid_store_stroke(self, color, alpha, NULL);
+				}
+				return S_OK;
+			}
+		}
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3212\n"); return E_INVALIDARG; }
+	}
+	if (self->shape == grid_shape_rectangle &&
+		(same_text(name, length, L"StrokeThickness") || same_text(name, length, L"RadiusX") ||
+			same_text(name, length, L"RadiusY"))) {
+		float number = 0;
+		if (!value || !style_boxed_number(value, &number))
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3222\n"); return E_INVALIDARG; }
+		if (!check_only) {
+			if (same_text(name, length, L"StrokeThickness"))
+				self->stroke_thickness = number;
+			else if (same_text(name, length, L"RadiusX"))
+				self->radius_x = number;
+			else
+				self->radius_y = number;
+			raven_render_changed();
+		}
+		return S_OK;
+	}
 	if (same_text(name, length, L"Width") || same_text(name, length, L"Height")) {
 		float number = 0;
 		if (!value || !style_boxed_number(value, &number))
@@ -3094,6 +4043,11 @@ HRESULT __declspec(dllexport) raven_xaml_element_apply_value(IInspectable *objec
 	 * (SetValueFromStaticResource Style_BasedOn), which lands here with the resolved base style. */
 	if (length == 7 && CompareStringOrdinal(name, 7, L"BasedOn", -1, FALSE) == CSTR_EQUAL) {
 		__x_ABI_CWindows_CUI_CXaml_CIStyle *style = NULL, *base = NULL;
+		{
+			char note[96];
+			wsprintfA(note, "raven-xaml: BasedOn apply on object %p value %p\n", (void *)object, (void *)value);
+			raven_trace_note(note);
+		}
 		if (FAILED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style)) || !style)
 			return S_FALSE;
 		if (FAILED(value->lpVtbl->QueryInterface(value, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&base)) || !base) {
@@ -3606,7 +4560,7 @@ HRESULT raven_xaml_element_render_slot(IInspectable *object, UINT32 *row, UINT32
 /* Factories */
 
 enum element_kind { element_grid, element_textblock, element_button, element_row_definition, element_column_definition,
-	element_presenter };
+	element_presenter, element_border, element_stackpanel, element_image, element_rectangle };
 
 struct element_factory {
 	const IActivationFactoryVtbl *lpVtbl;
@@ -3614,14 +4568,27 @@ struct element_factory {
 	enum element_kind kind;
 };
 
+/* The IButtonFactory face's part: a standalone object the factory hands out (its own refcount, the factory's
+ * lifetime stays independent). Defined after the element factories; the query forward-references it. */
+struct button_factory_create_part;
+static struct button_factory_create_part button_create_part;
+
 static HRESULT WINAPI element_factory_query(IActivationFactory *iface, REFIID iid, void **out)
 {
 	struct element_factory *self = (struct element_factory *)iface;
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, &IID_IActivationFactory))
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, &IID_IActivationFactory)) {
+		/* The IButtonFactory face the .NET Native projection's `new Button()` drives: Windows serves its factory
+		 * interface on the same factory object, so the refusal the projection fail-fasts on is served here. */
+		if (self->kind == element_button && equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CIButtonFactory)) {
+			InterlockedIncrement(&self->refs);
+			*out = &button_create_part;
+			return S_OK;
+		}
 		return E_NOINTERFACE;
+	}
 	InterlockedIncrement(&self->refs);
 	*out = iface;
 	return S_OK;
@@ -3650,7 +4617,11 @@ static HRESULT WINAPI element_factory_name(IActivationFactory *iface, HSTRING *n
 		self->kind == element_textblock ? textblock_class :
 		self->kind == element_button ? button_class :
 		self->kind == element_row_definition ? row_definition_class :
-		self->kind == element_presenter ? presenter_class : column_definition_class;
+		self->kind == element_presenter ? presenter_class :
+		self->kind == element_border ? border_class :
+		self->kind == element_stackpanel ? stackpanel_class :
+		self->kind == element_image ? image_class :
+		self->kind == element_rectangle ? rectangle_class : column_definition_class;
 	if (!name)
 		return E_POINTER;
 	return WindowsCreateString(text, (UINT32)lstrlenW(text), name);
@@ -3698,6 +4669,20 @@ static HRESULT WINAPI element_factory_activate(IActivationFactory *iface, IInspe
 		if (!presenter)
 			return E_OUTOFMEMORY;
 		*out = (IInspectable *)presenter;
+	} else if (self->kind == element_border || self->kind == element_stackpanel || self->kind == element_image ||
+		self->kind == element_rectangle) {
+		/* The shape elements the compiled control XBFs declare build over the grid's machinery (children, the
+		 * scalar sizes, the attached slots); they answer the Panel/UIElement faces and name themselves their
+		 * own class — only the IGrid face stays the grid's, which the Rectangle answers too so the attached
+		 * row it is given stores and the layout pass reads it back. */
+		struct grid *shape = create_grid_shape(self->kind == element_border ? grid_shape_border :
+			self->kind == element_stackpanel ? grid_shape_stackpanel :
+			self->kind == element_image ? grid_shape_image : grid_shape_rectangle);
+		if (!shape)
+			return E_OUTOFMEMORY;
+		*out = (IInspectable *)&shape->first;
+		if (self->kind == element_rectangle)
+			raven_trace_note("raven-xaml: Rectangle activated\n");
 	} else {
 		struct column_definition *definition = create_column_definition();
 		if (!definition)
@@ -3720,9 +4705,185 @@ static const IActivationFactoryVtbl element_factory_table = {
 static struct element_factory grid_factory = {&element_factory_table, 1, element_grid};
 static struct element_factory textblock_factory = {&element_factory_table, 1, element_textblock};
 static struct element_factory button_factory = {&element_factory_table, 1, element_button};
+
+/* The IButtonFactory.CreateInstance the projection constructor drives: the same creation ActivateInstance performs
+ * (the element's engine default style included). The base controls compose over an outer the button object cannot
+ * aggregate yet, so a non-null outer answers E_NOINTERFACE honestly rather than dropping the composed identity. */
+struct button_factory_create_part {
+	const button_factory_create_vtbl *lpVtbl;
+	LONG refs;
+};
+
+static HRESULT WINAPI button_create_query(button_factory_create_i *This, REFIID iid, void **out)
+{
+	struct button_factory_create_part *self = (struct button_factory_create_part *)This;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CIButtonFactory) && !equal_iid(iid, &IID_IUnknown) &&
+		!equal_iid(iid, &IID_IInspectable))
+		return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs);
+	*out = This;
+	return S_OK;
+}
+
+static ULONG WINAPI button_create_addref(button_factory_create_i *This)
+{
+	struct button_factory_create_part *self = (struct button_factory_create_part *)This;
+	return (ULONG)InterlockedIncrement(&self->refs);
+}
+
+static ULONG WINAPI button_create_release(button_factory_create_i *This)
+{
+	struct button_factory_create_part *self = (struct button_factory_create_part *)This;
+	return (ULONG)InterlockedDecrement(&self->refs);
+}
+
+static HRESULT WINAPI button_create_iids(button_factory_create_i *This, ULONG *count, IID **iids)
+{
+	(void)This;
+	return inspectable_iids(count, iids);
+}
+
+static HRESULT WINAPI button_create_name(button_factory_create_i *This, HSTRING *name)
+{
+	(void)This;
+	if (!name)
+		return E_POINTER;
+	return WindowsCreateString(button_class, (UINT32)lstrlenW(button_class), name);
+}
+
+static HRESULT WINAPI button_create_trust(button_factory_create_i *This, TrustLevel *level)
+{
+	(void)This;
+	return inspectable_trust(level);
+}
+
+static HRESULT WINAPI button_create_instance(button_factory_create_i *This, uint64_t outer, uint64_t inner, uint64_t instance)
+{
+	struct button *button;
+	(void)This;
+	if (!instance || (outer && !inner))
+		return E_POINTER;
+	*(void **)(uintptr_t)instance = NULL;
+	if (inner)
+		*(void **)(uintptr_t)inner = NULL;
+	if (outer)
+		return E_NOINTERFACE;
+	if (!(button = create_button()))
+		return E_OUTOFMEMORY;
+	*(void **)(uintptr_t)instance = &button->first;
+	if (raven_style_default_attach(*(IInspectable **)(uintptr_t)instance) != S_OK)
+		return E_OUTOFMEMORY;
+	return S_OK;
+}
+
+static const button_factory_create_vtbl button_create_vtbl = {
+	.QueryInterface = button_create_query,
+	.AddRef = button_create_addref,
+	.Release = button_create_release,
+	.GetIids = button_create_iids,
+	.GetRuntimeClassName = button_create_name,
+	.GetTrustLevel = button_create_trust,
+	.CreateInstance = button_create_instance,
+};
+
+static struct button_factory_create_part button_create_part = {&button_create_vtbl, 1};
 static struct element_factory row_definition_factory = {&element_factory_table, 1, element_row_definition};
 static struct element_factory column_definition_factory = {&element_factory_table, 1, element_column_definition};
 static struct element_factory presenter_factory = {&element_factory_table, 1, element_presenter};
+static struct element_factory border_factory = {&element_factory_table, 1, element_border};
+static struct element_factory stackpanel_factory = {&element_factory_table, 1, element_stackpanel};
+static struct element_factory image_factory = {&element_factory_table, 1, element_image};
+static struct element_factory rectangle_factory = {&element_factory_table, 1, element_rectangle};
+
+/* UIElement statics expose stable RoutedEvent identities, in metadata slot order. */
+DEFINE_GUID(IID_ui_statics, 0x58d3573b, 0xf52c, 0x45be, 0x98, 0x8b, 0xa5, 0x86, 0x95, 0x64, 0x87, 0x3c);
+DEFINE_GUID(IID_routed_event, 0xa6b25818, 0x43c1, 0x4c70, 0x86, 0x5c, 0x7b, 0xdd, 0x5a, 0x32, 0xe3, 0x27);
+static HRESULT WINAPI routed_event_query(IInspectable *iface, REFIID iid, void **out)
+{
+ if (!out) return E_POINTER;
+ *out = NULL;
+ if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IInspectable) && !IsEqualIID(iid, &IID_IAgileObject) && !IsEqualIID(iid, &IID_routed_event)) return E_NOINTERFACE;
+ *out = iface; return S_OK;
+}
+static ULONG WINAPI routed_event_addref(IInspectable *iface) { (void)iface; return 2; }
+static ULONG WINAPI routed_event_release(IInspectable *iface) { (void)iface; return 1; }
+static HRESULT WINAPI routed_event_iids(IInspectable *iface, ULONG *count, IID **iids) { (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI routed_event_name(IInspectable *iface, HSTRING *name)
+{ static const WCHAR text[] = L"Windows.UI.Xaml.RoutedEvent"; (void)iface; return name ? WindowsCreateString(text, ARRAYSIZE(text)-1, name) : E_POINTER; }
+static HRESULT WINAPI routed_event_trust(IInspectable *iface, TrustLevel *level) { (void)iface; return inspectable_trust(level); }
+static const IInspectableVtbl routed_event_table = {routed_event_query, routed_event_addref, routed_event_release, routed_event_iids, routed_event_name, routed_event_trust};
+static IInspectable routed_events[23] = {
+{(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table}, {(IInspectableVtbl *)&routed_event_table} };
+static int routed_pointer_kind(IInspectable *event)
+{
+ if (event == &routed_events[0]) return RAVEN_ELEMENT_KEY_DOWN;
+ if (event == &routed_events[1]) return RAVEN_ELEMENT_KEY_UP;
+ if (event == &routed_events[2]) return RAVEN_ELEMENT_POINTER_ENTERED;
+ if (event == &routed_events[3]) return RAVEN_ELEMENT_POINTER_PRESSED;
+ if (event == &routed_events[4]) return RAVEN_ELEMENT_POINTER_MOVED;
+ if (event == &routed_events[5]) return RAVEN_ELEMENT_POINTER_RELEASED;
+ if (event == &routed_events[6]) return RAVEN_ELEMENT_POINTER_EXITED;
+ if (event == &routed_events[7]) return RAVEN_ELEMENT_POINTER_CAPTURE_LOST;
+ if (event == &routed_events[9]) return RAVEN_ELEMENT_POINTER_WHEEL;
+ return -1;
+}
+static HRESULT routed_get(unsigned index, IInspectable **out)
+{ if (!out) return E_POINTER; *out = &routed_events[index]; return S_OK; }
+static HRESULT WINAPI routed_get_0(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(0, out); }
+static HRESULT WINAPI routed_get_1(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(1, out); }
+static HRESULT WINAPI routed_get_2(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(2, out); }
+static HRESULT WINAPI routed_get_3(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(3, out); }
+static HRESULT WINAPI routed_get_4(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(4, out); }
+static HRESULT WINAPI routed_get_5(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(5, out); }
+static HRESULT WINAPI routed_get_6(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(6, out); }
+static HRESULT WINAPI routed_get_7(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(7, out); }
+static HRESULT WINAPI routed_get_8(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(8, out); }
+static HRESULT WINAPI routed_get_9(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(9, out); }
+static HRESULT WINAPI routed_get_10(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(10, out); }
+static HRESULT WINAPI routed_get_11(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(11, out); }
+static HRESULT WINAPI routed_get_12(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(12, out); }
+static HRESULT WINAPI routed_get_13(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(13, out); }
+static HRESULT WINAPI routed_get_14(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(14, out); }
+static HRESULT WINAPI routed_get_15(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(15, out); }
+static HRESULT WINAPI routed_get_16(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(16, out); }
+static HRESULT WINAPI routed_get_17(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(17, out); }
+static HRESULT WINAPI routed_get_18(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(18, out); }
+static HRESULT WINAPI routed_get_19(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(19, out); }
+static HRESULT WINAPI routed_get_20(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(20, out); }
+static HRESULT WINAPI routed_get_21(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(21, out); }
+static HRESULT WINAPI routed_get_22(IInspectable *iface, IInspectable **out) { (void)iface; return routed_get(22, out); }
+/* shortcut: dependency-property statics require real UIElement property registrations. */
+static HRESULT WINAPI ui_property_unimplemented(IInspectable *iface, IInspectable **out)
+{ (void)iface; if (!out) return E_POINTER; *out = NULL; return E_NOTIMPL; }
+struct ui_statics_table { IInspectableVtbl base; void *slots[40]; };
+static IActivationFactory ui_activation;
+static IInspectable ui_statics;
+static HRESULT WINAPI ui_factory_query(IActivationFactory *iface, REFIID iid, void **out)
+{
+ (void)iface; if (!out) return E_POINTER; *out = NULL;
+ if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject) || IsEqualIID(iid, &IID_IActivationFactory)) *out = &ui_activation;
+ else if (IsEqualIID(iid, &IID_ui_statics)) *out = &ui_statics;
+ else return E_NOINTERFACE;
+ return S_OK;
+}
+static ULONG WINAPI ui_factory_addref(IActivationFactory *iface) { (void)iface; return 2; }
+static ULONG WINAPI ui_factory_release(IActivationFactory *iface) { (void)iface; return 1; }
+static HRESULT WINAPI ui_factory_iids(IActivationFactory *iface, ULONG *count, IID **iids) { (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI ui_factory_name(IActivationFactory *iface, HSTRING *out)
+{ static const WCHAR text[] = L"Windows.UI.Xaml.UIElement"; (void)iface; return out ? WindowsCreateString(text, ARRAYSIZE(text)-1, out) : E_POINTER; }
+static HRESULT WINAPI ui_factory_trust(IActivationFactory *iface, TrustLevel *level) { (void)iface; return inspectable_trust(level); }
+static HRESULT WINAPI ui_factory_activate(IActivationFactory *iface, IInspectable **out)
+{ (void)iface; if (!out) return E_POINTER; *out = NULL; return E_NOTIMPL; }
+static const IActivationFactoryVtbl ui_activation_table = {ui_factory_query,ui_factory_addref,ui_factory_release,ui_factory_iids,ui_factory_name,ui_factory_trust,ui_factory_activate};
+static const struct ui_statics_table ui_statics_vtbl = {
+ {(void *)ui_factory_query,(void *)ui_factory_addref,(void *)ui_factory_release,(void *)ui_factory_iids,(void *)ui_factory_name,(void *)ui_factory_trust},
+ {(void *)routed_get_0, (void *)routed_get_1, (void *)routed_get_2, (void *)routed_get_3, (void *)routed_get_4, (void *)routed_get_5, (void *)routed_get_6, (void *)routed_get_7, (void *)routed_get_8, (void *)routed_get_9, (void *)routed_get_10, (void *)routed_get_11, (void *)routed_get_12, (void *)routed_get_13, (void *)routed_get_14, (void *)routed_get_15, (void *)routed_get_16, (void *)routed_get_17, (void *)routed_get_18, (void *)routed_get_19, (void *)routed_get_20, (void *)routed_get_21, (void *)routed_get_22, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented, (void *)ui_property_unimplemented }
+};
+static IActivationFactory ui_activation = {(IActivationFactoryVtbl *)&ui_activation_table};
+static IInspectable ui_statics = {(IInspectableVtbl *)&ui_statics_vtbl};
 
 HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out)
 {
@@ -3733,6 +4894,7 @@ HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out)
 		return E_POINTER;
 	*out = NULL;
 	text = WindowsGetStringRawBuffer(name, &length);
+	if (same_text(text, length, L"Windows.UI.Xaml.UIElement")) { *out = &ui_activation; return S_OK; }
 	if (same_text(text, length, grid_class))
 		factory = &grid_factory;
 	else if (same_text(text, length, textblock_class))
@@ -3745,6 +4907,14 @@ HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out)
 		factory = &column_definition_factory;
 	else if (same_text(text, length, presenter_class))
 		factory = &presenter_factory;
+	else if (same_text(text, length, border_class))
+		factory = &border_factory;
+	else if (same_text(text, length, stackpanel_class))
+		factory = &stackpanel_factory;
+	else if (same_text(text, length, image_class))
+		factory = &image_factory;
+	else if (same_text(text, length, rectangle_class))
+		factory = &rectangle_factory;
 	else
 		return CLASS_E_CLASSNOTAVAILABLE;
 	InterlockedIncrement(&factory->refs);

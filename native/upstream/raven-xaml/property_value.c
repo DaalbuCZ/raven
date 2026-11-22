@@ -41,7 +41,7 @@ static HRESULT WINAPI boxed_query(struct boxed_value *self, REFIID iid, void **o
  if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue) || IsEqualIID(iid, &IID_IAgileObject)) *out = &self->value;
  else if (IsEqualIID(iid, &IID_IWeakReferenceSource)) *out = &self->weak;
  else if (reference_iid(self->type) && IsEqualIID(iid, reference_iid(self->type))) *out = &self->reference;
- else return E_NOINTERFACE;
+ else { raven_xaml_qi_refuse("property-value", iid); return E_NOINTERFACE; }
  InterlockedIncrement(&self->refs); return S_OK;
 }
 static ULONG boxed_release(struct boxed_value *self) { LONG refs = InterlockedDecrement(&self->refs); if (!refs) {

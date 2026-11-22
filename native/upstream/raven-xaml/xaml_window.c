@@ -291,9 +291,7 @@ static HRESULT WINAPI window_compositor(xaml_window3 *iface, uint64_t out)
 	(void)iface;
 	if (!out)
 		return E_POINTER;
-	*(void **)(uintptr_t)out = NULL;
-	/* The composition layer is a later stage. */
-	{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
+	return raven_composition_instance((__x_ABI_CWindows_CUI_CComposition_CICompositor **)(uintptr_t)out);
 }
 
 static HRESULT WINAPI window_ui_context(xaml_window4 *iface, uint64_t out)

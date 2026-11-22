@@ -188,6 +188,22 @@ struct pri_data_section {
 	UINT32 data_bytes;
 };
 
+/* The path index: one per parsed state, built on the first lookup that searches it. Every schema entry's full path is
+ * hashed with the ASCII letters folded — the case transformation CompareStringOrdinal's case-insensitive compare applies
+ * to the file paths an index carries — so the entries a linear scan could answer all hash to the needle's bucket and the
+ * walk compares only those, in entry order. An index is all-or-nothing: a state whose paths are not pure ASCII (the fold
+ * above covers the ordinal compare's ASCII case only) or whose build fails to allocate keeps the linear scan, which the
+ * lookups also run on a bucket miss so an indexed state answers exactly what the unindexed one did. The nodes hold entry
+ * indices, never strings — the paths are rebuilt transiently from the schema, which owns them. */
+#define PRI_INDEX_NONE 0xFFFFFFFFu
+#define PRI_INDEX_MAX_BUCKETS 65536
+struct pri_path_index {
+	UINT32 bucket_count; /* a power of two */
+	UINT32 *heads;       /* each bucket's first entry, PRI_INDEX_NONE when empty */
+	UINT32 *tails;       /* each bucket's last entry, so entries link in index order */
+	UINT32 *next;        /* per entry: the next entry of its bucket, PRI_INDEX_NONE at the end */
+};
+
 struct pri_state {
 	BYTE *file;
 	UINT32 file_length;
@@ -206,6 +222,9 @@ struct pri_state {
 	struct pri_data_section data[PRI_MAX_DATA_SECTIONS];
 	UINT16 data_section_index[PRI_MAX_DATA_SECTIONS]; /* directory index per data section */
 	UINT32 data_count;
+	struct pri_path_index *index; /* the lazily built path index, per map */
+	LONG index_state;             /* the index build guard: 0 unbuilt, 1 building, 2 settled */
+	BOOL no_index;                /* the lookups keep the linear scan: non-ASCII paths or a failed build */
 };
 
 static struct pri_state pri_state;
@@ -771,37 +790,137 @@ static BOOL candidate_range(UINT32 index, UINT32 *first, UINT32 *count)
 	return TRUE;
 }
 
+/* A path's bucket hash: FNV-1a over the UTF-16 units with the ASCII letters folded, the same constants the dictionary
+ * keys hash with. Two paths that differ only in ASCII case fold alike and land in one bucket; a difference outside that
+ * range is left unfolded, and the all-or-nothing build below refuses such a state instead of indexing it. */
+static UINT32 path_string_hash(const WCHAR *text, UINT32 length)
+{
+	UINT32 hash = 2166136261u;
+	for (UINT32 i = 0; i < length; ++i) {
+		WCHAR c = text[i];
+		if (c >= L'a' && c <= L'z') c = (WCHAR)(c - L'a' + L'A');
+		hash = (hash ^ c) * 16777619u;
+	}
+	return hash;
+}
+
+/* The index is built once per state on the first lookup that searches it: every entry's path hashed and linked, guarded
+ * the way the parse is — the first asker builds, later askers wait for the result. A build that cannot complete (a
+ * non-ASCII path the fold does not cover, an allocation that fails) marks the state no_index, and its lookups keep the
+ * linear scan they always ran. */
+static void pri_index_ensure(void)
+{
+	struct pri_state *state = active_pri;
+	if (state->index || state->no_index || !state->entry_count)
+		return;
+	if (InterlockedCompareExchange(&state->index_state, 1, 0) == 0) {
+		const UINT32 entry_count = state->entry_count;
+		UINT32 bucket_count = 64, built = 0;
+		struct pri_path_index *index = ALLOC(sizeof *index);
+		if (index) {
+			while (bucket_count < entry_count && bucket_count < PRI_INDEX_MAX_BUCKETS)
+				bucket_count <<= 1;
+			index->bucket_count = bucket_count;
+			index->heads = ALLOC(sizeof(UINT32) * (SIZE_T)bucket_count);
+			index->tails = ALLOC(sizeof(UINT32) * (SIZE_T)bucket_count);
+			index->next = ALLOC(sizeof(UINT32) * (SIZE_T)entry_count);
+			if (index->heads && index->tails && index->next) {
+				BOOL ascii = TRUE;
+				for (UINT32 b = 0; b < bucket_count; ++b) {
+					index->heads[b] = PRI_INDEX_NONE;
+					index->tails[b] = PRI_INDEX_NONE;
+				}
+				for (UINT32 i = 0; i < entry_count && ascii; ++i) {
+					WCHAR path[PRI_MAX_PATH_UNITS];
+					UINT32 length;
+					/* an entry whose path cannot be built is no match for any lookup; the scan skips it the same way */
+					if (!entry_path(i, path, ARRAYSIZE(path), &length))
+						continue;
+					for (UINT32 j = 0; j < length && ascii; ++j)
+						if (path[j] >= 0x80) ascii = FALSE; /* the fold covers the ASCII case only */
+					if (!ascii)
+						break;
+					built = i + 1;
+					const UINT32 bucket = path_string_hash(path, length) & (bucket_count - 1);
+					index->next[i] = PRI_INDEX_NONE;
+					if (index->tails[bucket] != PRI_INDEX_NONE)
+						index->next[index->tails[bucket]] = i;
+					else
+						index->heads[bucket] = i;
+					index->tails[bucket] = i;
+				}
+				if (!ascii)
+					state->no_index = TRUE;
+			} else
+				state->no_index = TRUE;
+			if (state->no_index || !built) {
+				if (index->heads) FREE(index->heads);
+				if (index->tails) FREE(index->tails);
+				if (index->next) FREE(index->next);
+				FREE(index);
+				if (!built && !state->no_index)
+					state->no_index = TRUE; /* an empty index needs no table, but stay off the indexed path */
+			} else
+				state->index = index;
+		} else
+			state->no_index = TRUE;
+		InterlockedExchange(&state->index_state, 2);
+	} else {
+		while (InterlockedCompareExchange(&state->index_state, 2, 2) != 2)
+			Sleep(0);
+	}
+}
+
+/* The blob an item entry resolves to: its first candidate's data-item range, bounded against the section it names. */
+static HRESULT pri_blob_from_entry(UINT32 i, const BYTE **data, UINT32 *length)
+{
+	UINT32 first, count, item, section, index, offset, bytes;
+	const BYTE *candidate;
+	struct pri_data_section *items;
+	if (!candidate_range(i, &first, &count) || !count) return E_BOUNDS;
+	candidate = active_pri->candidates + first * 8;
+	if (candidate[0] != 1) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
+	item = read_u16(candidate, 4), section = read_u16(candidate, 6);
+	for (index = 0; index < active_pri->data_count; ++index)
+		if (active_pri->data_section_index[index] == section) break;
+	if (index == active_pri->data_count) return E_BOUNDS;
+	items = &active_pri->data[index];
+	/* Both item tables store byte ranges; small binary resources can use the compact table too. */
+	if (item < items->string_count) {
+		offset = read_u16(items->table, item * 4);
+		bytes = read_u16(items->table, item * 4 + 2);
+	} else {
+		item -= items->string_count;
+		if (item >= items->blob_count) return E_INVALIDARG;
+		offset = read_u32(items->blob_table, item * 8);
+		bytes = read_u32(items->blob_table, item * 8 + 4);
+	}
+	if (offset > items->data_bytes || bytes > items->data_bytes - offset) return E_INVALIDARG;
+	*data = items->data + offset; *length = bytes;
+	return S_OK;
+}
+
 /* Resolve a package resource to a bounded blob in the process-lifetime PRI buffer. */
 /* The blob lookup itself, against the active map. */
 static HRESULT pri_lookup_blob(const WCHAR *name, UINT32 name_length, const BYTE **data, UINT32 *length)
 {
 	WCHAR path[PRI_MAX_PATH_UNITS];
-	UINT32 path_length, first, count;
+	UINT32 path_length;
+	pri_index_ensure();
+	if (active_pri->index) {
+		const struct pri_path_index *index = active_pri->index;
+		for (UINT32 i = index->heads[path_string_hash(name, name_length) & (index->bucket_count - 1)];
+			i != PRI_INDEX_NONE; i = index->next[i]) {
+			if ((active_pri->entries[i].flags & 0x10) || !entry_path(i, path, ARRAYSIZE(path), &path_length)) continue;
+			if (CompareStringOrdinal(name, (int)name_length, path, (int)path_length, TRUE) != CSTR_EQUAL) continue;
+			return pri_blob_from_entry(i, data, length);
+		}
+		/* a bucket miss falls through to the same scan the unindexed lookups run, so the index cannot change an answer */
+	}
 	for (UINT32 i = 0; i < active_pri->entry_count; ++i) {
 		if ((active_pri->entries[i].flags & 0x10) || !entry_path(i, path, ARRAYSIZE(path), &path_length)) continue;
 		if (CompareStringOrdinal(name, (int)name_length, path, (int)path_length, TRUE) != CSTR_EQUAL) continue;
-		if (!candidate_range(i, &first, &count) || !count) return E_BOUNDS;
-		const BYTE *candidate = active_pri->candidates + first * 8;
-		if (candidate[0] != 1) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
-		UINT32 item = read_u16(candidate, 4), section = read_u16(candidate, 6), index;
-		for (index = 0; index < active_pri->data_count; ++index)
-			if (active_pri->data_section_index[index] == section) break;
-		if (index == active_pri->data_count) return E_BOUNDS;
-		struct pri_data_section *items = &active_pri->data[index];
-		UINT32 offset, bytes;
-		/* Both item tables store byte ranges; small binary resources can use the compact table too. */
-		if (item < items->string_count) {
-			offset = read_u16(items->table, item * 4);
-			bytes = read_u16(items->table, item * 4 + 2);
-		} else {
-			item -= items->string_count;
-			if (item >= items->blob_count) return E_INVALIDARG;
-			offset = read_u32(items->blob_table, item * 8);
-			bytes = read_u32(items->blob_table, item * 8 + 4);
-		}
-		if (offset > items->data_bytes || bytes > items->data_bytes - offset) return E_INVALIDARG;
-		*data = items->data + offset; *length = bytes;
-		return S_OK;
+		return pri_blob_from_entry(i, data, length);
 	}
 	return E_BOUNDS;
 }
@@ -1678,7 +1797,9 @@ static HRESULT WINAPI map_uri(map_i *iface, uint64_t out)
 }
 
 /* The requested name resolves against the map's prefix: the full path is prefix + "/" + name, matched against the
- * schema's item paths without case, the way resource names look up. */
+ * schema's item paths without case, the way resource names look up. The map reads the main index, whose path index the
+ * first lookup builds — the parse and the package-qualified blob reads are the only active-map switches, and neither is
+ * live when a map call runs, so the state the build searches here is the one active_pri points at. */
 static BOOL map_find_entry(struct map_object *self, const WCHAR *name, UINT32 name_length, BOOL scope,
 	UINT32 *entry)
 {
@@ -1693,6 +1814,22 @@ static BOOL map_find_entry(struct map_object *self, const WCHAR *name, UINT32 na
 	full[full_length++] = L'/';
 	memcpy(full + full_length, name, name_length * sizeof(WCHAR));
 	full_length += name_length;
+	pri_index_ensure();
+	if (pri_state.index) {
+		const struct pri_path_index *index = pri_state.index;
+		for (i = index->heads[path_string_hash(full, full_length) & (index->bucket_count - 1)];
+			i != PRI_INDEX_NONE; i = index->next[i]) {
+			if (!!(pri_state.entries[i].flags & 0x10) != !!scope)
+				continue;
+			if (!entry_path(i, path, PRI_MAX_PATH_UNITS, &path_length))
+				continue;
+			if (CompareStringOrdinal(full, (int)full_length, path, (int)path_length, TRUE) == CSTR_EQUAL) {
+				*entry = i;
+				return TRUE;
+			}
+		}
+		/* a bucket miss falls through to the same scan the unindexed lookups run, so the index cannot change an answer */
+	}
 	for (i = 0; i < pri_state.entry_count; ++i) {
 		if (!!(pri_state.entries[i].flags & 0x10) != !!scope)
 			continue;

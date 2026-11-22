@@ -52,11 +52,6 @@ static struct raven_tracker_manager {
 static HRESULT WINAPI tracker_query(reference_tracker_i *iface, REFIID iid, void **out)
 {
 	struct raven_tracker_part *self = (struct raven_tracker_part *)iface;
-	{
-		char note[80];
-		wsprintfA(note, "raven-tracker: query %08lx-%04lx\n", (unsigned long)iid->Data1, (unsigned long)iid->Data2);
-		OutputDebugStringA(note);
-	}
 	if (!out)
 		return E_POINTER;
 	*out = NULL;

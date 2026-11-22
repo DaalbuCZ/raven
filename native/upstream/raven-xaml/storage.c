@@ -693,6 +693,7 @@ struct file_object {
 	file_i iface;
 	item_i item;
 	__x_ABI_CWindows_CStorage_CStreams_CIInputStreamReference input_reference;
+	__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference ras_reference;
 	LONG refs;
 	WCHAR name[FILE_NAME_MAX];
 	WCHAR path[MAX_PATH];
@@ -729,6 +730,207 @@ static HRESULT WINAPI file_reference_open(input_reference_i *iface,input_operati
 	*out=&operation->iface; return S_OK;
 }
 static const __x_ABI_CWindows_CStorage_CStreams_CIInputStreamReferenceVtbl file_reference_table={file_reference_query,file_reference_addref,file_reference_release,file_reference_iids,file_reference_name,file_reference_trust,file_reference_open};
+
+/* The random-access stream stage: IRandomAccessStreamReference.OpenReadAsync over a StorageFile — the cast the
+ * compiled app makes trusting the winmd's StorageFile interface list, so a refusal leaves the projection
+ * dereferencing the untouched NULL out (the observed texture-load crash). The stream shares the input's handle:
+ * the IRandomAccessStream face seeks it, the IInputStream face reads it, and the content type comes from the
+ * extension the way the file's own FileType derives it. */
+typedef __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType with_type_i;
+typedef __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType ras_operation_i;
+typedef __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType ras_done_i;
+#define ras_done_i_AddRef __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType_AddRef
+#define ras_done_i_Release __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType_Release
+#define ras_done_i_Invoke __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType_Invoke
+
+struct ras_operation { ras_operation_i iface; IAsyncInfo info; struct async_core core; with_type_i *result; };
+static const WCHAR ras_operation_type_name[]=L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.Streams.IRandomAccessStreamWithContentType>";
+static void ras_operation_free(struct ras_operation *self) { if (self->result) self->result->lpVtbl->Release(self->result); }
+STORAGE_ASYNC_LIFETIME(ras_operation,ras_operation_i,&IID___FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType,ras_done_i)
+STORAGE_ASYNC_COMPLETED(ras_operation,ras_operation_i,ras_done_i)
+STORAGE_ASYNC_FINISH(ras_operation,ras_operation_i,ras_done_i)
+static HRESULT WINAPI ras_operation_results(ras_operation_i *iface,with_type_i **out)
+{
+	struct ras_operation *self=(void *)iface;
+	if (!out) return E_POINTER; *out=NULL;
+	if (self->core.closed) return RO_E_CLOSED;
+	if (self->core.status==Started) return E_ILLEGAL_METHOD_CALL;
+	if (FAILED(self->core.error)) return self->core.error;
+	if ((*out=self->result)) (*out)->lpVtbl->AddRef(*out);
+	return S_OK;
+}
+static const __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentTypeVtbl ras_operation_table={ras_operation_query,ras_operation_addref,ras_operation_release,ras_operation_iids,ras_operation_class,ras_operation_trust,ras_operation_put_completed,ras_operation_get_completed,ras_operation_results};
+STORAGE_ASYNC_NEW(ras_operation,ras_operation_i)
+
+struct file_ras {
+	with_type_i with_type;
+	__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream ras;
+	__x_ABI_CWindows_CStorage_CStreams_CIContentTypeProvider content_type;
+	struct file_input *input;
+	LONG refs;
+	const WCHAR *type;
+};
+static struct file_ras *ras_with_owner(with_type_i *iface) { return CONTAINING_RECORD(iface,struct file_ras,with_type); }
+static struct file_ras *ras_stream_owner(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface) { return CONTAINING_RECORD(iface,struct file_ras,ras); }
+static struct file_ras *ras_content_owner(__x_ABI_CWindows_CStorage_CStreams_CIContentTypeProvider *iface) { return CONTAINING_RECORD(iface,struct file_ras,content_type); }
+static HRESULT WINAPI ras_query_core(struct file_ras *self,REFIID iid,void **out)
+{
+	if (!out) return E_POINTER; *out=NULL;
+	if (equal_iid(iid,&IID_IUnknown) || equal_iid(iid,&IID_IInspectable) || equal_iid(iid,&IID_IAgileObject) ||
+		equal_iid(iid,&IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType)) *out=&self->with_type;
+	else if (equal_iid(iid,&IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream)) *out=&self->ras;
+	else if (equal_iid(iid,&IID___x_ABI_CWindows_CStorage_CStreams_CIContentTypeProvider)) *out=&self->content_type;
+	else if (equal_iid(iid,&IID___x_ABI_CWindows_CStorage_CStreams_CIInputStream) || equal_iid(iid,&IID_IClosable))
+		return input_query(&self->input->iface,iid,out);
+	else return E_NOINTERFACE;
+	InterlockedIncrement(&self->refs); return S_OK;
+}
+static HRESULT WINAPI ras_with_query(with_type_i *iface,REFIID iid,void **out) { return ras_query_core(ras_with_owner(iface),iid,out); }
+static ULONG WINAPI ras_with_addref(with_type_i *iface) { return (ULONG)InterlockedIncrement(&ras_with_owner(iface)->refs); }
+static ULONG WINAPI ras_with_release(with_type_i *iface)
+{
+	struct file_ras *self=ras_with_owner(iface); LONG refs=InterlockedDecrement(&self->refs);
+	if (!refs) { input_release(&self->input->iface); FREE(self); InterlockedDecrement(&raven_xaml_objects); }
+	return refs;
+}
+#define RAS_INSPECTABLE(name, iface_type) \
+	static HRESULT WINAPI name##_iids(iface_type *iface,ULONG *count,IID **out) { (void)iface; return inspectable_iids(count,out); } \
+	static HRESULT WINAPI name##_class(iface_type *iface,HSTRING *out) { (void)iface; return create_string(L"Windows.Storage.Streams.FileRandomAccessStream",out); } \
+	static HRESULT WINAPI name##_trust(iface_type *iface,TrustLevel *out) { (void)iface; return inspectable_trust(out); }
+RAS_INSPECTABLE(ras_with, with_type_i)
+RAS_INSPECTABLE(ras_stream, __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream)
+RAS_INSPECTABLE(ras_content, __x_ABI_CWindows_CStorage_CStreams_CIContentTypeProvider)
+static HRESULT WINAPI ras_stream_query(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,REFIID iid,void **out) { return ras_query_core(ras_stream_owner(iface),iid,out); }
+static ULONG WINAPI ras_stream_addref(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface) { return (ULONG)InterlockedIncrement(&ras_stream_owner(iface)->refs); }
+static ULONG WINAPI ras_stream_release(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface) { return ras_with_release(&ras_stream_owner(iface)->with_type); }
+static HRESULT WINAPI ras_get_size(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,UINT64 *value)
+{
+	struct file_ras *self=ras_stream_owner(iface); LARGE_INTEGER size;
+	if (!value) return E_POINTER;
+	if (!GetFileSizeEx(self->input->handle,&size)) return last_error();
+	*value=(UINT64)size.QuadPart; return S_OK;
+}
+static HRESULT WINAPI ras_put_size(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,UINT64 value)
+{ (void)iface; (void)value; { trace_not_implemented(__func__); return E_NOTIMPL; } }
+static HRESULT WINAPI ras_get_input_stream_at(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,UINT64 position,input_i **out)
+{
+	struct file_ras *self=ras_stream_owner(iface); HANDLE dup; LARGE_INTEGER at; struct file_input *input;
+	if (!out) return E_POINTER; *out=NULL;
+	if (!DuplicateHandle(GetCurrentProcess(),self->input->handle,GetCurrentProcess(),&dup,0,FALSE,DUPLICATE_SAME_ACCESS)) return last_error();
+	at.QuadPart=(LONGLONG)position;
+	if (!SetFilePointerEx(dup,at,NULL,FILE_BEGIN)) { HRESULT result=last_error(); CloseHandle(dup); return result; }
+	if (!(input=ALLOC(sizeof *input))) { CloseHandle(dup); return E_OUTOFMEMORY; }
+	input->iface.lpVtbl=&input_table; input->closable.lpVtbl=&input_close_table; input->refs=1; input->handle=dup;
+	InterlockedIncrement(&raven_xaml_objects);
+	*out=&input->iface; return S_OK;
+}
+static HRESULT WINAPI ras_get_output_stream_at(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,UINT64 position,__x_ABI_CWindows_CStorage_CStreams_CIOutputStream **out)
+{ (void)iface; (void)position; if (!out) return E_POINTER; *out=NULL; { trace_not_implemented(__func__); return E_NOTIMPL; } }
+static HRESULT WINAPI ras_get_position(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,UINT64 *value)
+{
+	struct file_ras *self=ras_stream_owner(iface); LARGE_INTEGER at,zero={0};
+	if (!value) return E_POINTER;
+	if (!SetFilePointerEx(self->input->handle,zero,&at,FILE_CURRENT)) return last_error();
+	*value=(UINT64)at.QuadPart; return S_OK;
+}
+static HRESULT WINAPI ras_seek(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,UINT64 position)
+{
+	struct file_ras *self=ras_stream_owner(iface); LARGE_INTEGER at;
+	at.QuadPart=(LONGLONG)position;
+	if (!SetFilePointerEx(self->input->handle,at,NULL,FILE_BEGIN)) return last_error();
+	return S_OK;
+}
+static HRESULT WINAPI ras_clone_stream(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream **out)
+{ (void)iface; if (!out) return E_POINTER; *out=NULL; { trace_not_implemented(__func__); return E_NOTIMPL; } }
+static HRESULT WINAPI ras_get_can_read(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,boolean *value)
+{ (void)iface; if (!value) return E_POINTER; *value=1; return S_OK; }
+static HRESULT WINAPI ras_get_can_write(__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *iface,boolean *value)
+{ (void)iface; if (!value) return E_POINTER; *value=0; return S_OK; }
+static const __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamVtbl ras_stream_table={ras_stream_query,ras_stream_addref,ras_stream_release,ras_stream_iids,ras_stream_class,ras_stream_trust,ras_get_size,ras_put_size,ras_get_input_stream_at,ras_get_output_stream_at,ras_get_position,ras_seek,ras_clone_stream,ras_get_can_read,ras_get_can_write};
+static HRESULT WINAPI ras_content_query(__x_ABI_CWindows_CStorage_CStreams_CIContentTypeProvider *iface,REFIID iid,void **out) { return ras_query_core(ras_content_owner(iface),iid,out); }
+static ULONG WINAPI ras_content_addref(__x_ABI_CWindows_CStorage_CStreams_CIContentTypeProvider *iface) { return (ULONG)InterlockedIncrement(&ras_content_owner(iface)->refs); }
+static ULONG WINAPI ras_content_release(__x_ABI_CWindows_CStorage_CStreams_CIContentTypeProvider *iface) { return ras_with_release(&ras_content_owner(iface)->with_type); }
+static HRESULT WINAPI ras_content_get(__x_ABI_CWindows_CStorage_CStreams_CIContentTypeProvider *iface,HSTRING *value)
+{
+	struct file_ras *self=ras_content_owner(iface);
+	/* the mime names the asset extensions carry; Windows resolves the same through the content associations */
+	static const WCHAR *const mime_ext[]={L".png",L"image/png",L".jpg",L"image/jpeg",L".jpeg",L"image/jpeg",L".bmp",L"image/bmp",L".gif",L"image/gif",NULL,NULL};
+	const WCHAR *const *entry;
+	if (!value) return E_POINTER;
+	for (entry=mime_ext; *entry; entry+=2)
+		if (CompareStringOrdinal(self->type,-1,*entry,-1,TRUE)==CSTR_EQUAL) return create_string(entry[1],value);
+	return create_string(L"",value);
+}
+static const __x_ABI_CWindows_CStorage_CStreams_CIContentTypeProviderVtbl ras_content_table={ras_content_query,ras_content_addref,ras_content_release,ras_content_iids,ras_content_class,ras_content_trust,ras_content_get};
+static const __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentTypeVtbl ras_with_type_table={ras_with_query,ras_with_addref,ras_with_release,ras_with_iids,ras_with_class,ras_with_trust};
+
+typedef __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference ras_reference_i;
+static struct file_object *file_ras_reference_owner(ras_reference_i *iface) { return CONTAINING_RECORD(iface,struct file_object,ras_reference); }
+static HRESULT WINAPI file_ras_reference_query(ras_reference_i *iface,REFIID iid,void **out) { return file_query(&file_ras_reference_owner(iface)->iface,iid,out); }
+static ULONG WINAPI file_ras_reference_addref(ras_reference_i *iface) { return file_addref(&file_ras_reference_owner(iface)->iface); }
+static ULONG WINAPI file_ras_reference_release(ras_reference_i *iface) { return file_release(&file_ras_reference_owner(iface)->iface); }
+static HRESULT WINAPI file_ras_reference_iids(ras_reference_i *iface,ULONG *count,IID **out) { (void)iface; return inspectable_iids(count,out); }
+static HRESULT WINAPI file_ras_reference_name(ras_reference_i *iface,HSTRING *out) { (void)iface; return create_string(file_class_name,out); }
+static HRESULT WINAPI file_ras_reference_trust(ras_reference_i *iface,TrustLevel *out) { (void)iface; return inspectable_trust(out); }
+static HRESULT WINAPI file_ras_reference_open_read(ras_reference_i *iface,ras_operation_i **out)
+{
+	struct file_object *file=file_ras_reference_owner(iface); struct ras_operation *operation; struct file_input *input; struct file_ras *stream;
+	HANDLE handle; HRESULT result;
+	if (!out) return E_POINTER; *out=NULL;
+	handle=CreateFileW(file->path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+	result=handle==INVALID_HANDLE_VALUE ? last_error() : S_OK;
+	if (!(operation=ras_operation_new())) { if (handle!=INVALID_HANDLE_VALUE) CloseHandle(handle); return E_OUTOFMEMORY; }
+	if (SUCCEEDED(result)) {
+		if (!(input=ALLOC(sizeof *input))) { CloseHandle(handle); result=E_OUTOFMEMORY; }
+		else if (!(stream=ALLOC(sizeof *stream))) { CloseHandle(handle); FREE(input); result=E_OUTOFMEMORY; }
+		else {
+			input->iface.lpVtbl=&input_table; input->closable.lpVtbl=&input_close_table; input->refs=1; input->handle=handle;
+			InterlockedIncrement(&raven_xaml_objects);
+			stream->with_type.lpVtbl=&ras_with_type_table; stream->ras.lpVtbl=&ras_stream_table; stream->content_type.lpVtbl=&ras_content_table;
+			stream->input=input; stream->refs=1; stream->type=file->type;
+			InterlockedIncrement(&raven_xaml_objects);
+			operation->result=&stream->with_type;
+		}
+	}
+	ras_operation_finish(&operation->iface,result,SUCCEEDED(result)?Completed:Error);
+	*out=&operation->iface; return S_OK;
+}
+static HRESULT WINAPI file_ras_reference_open_sequential(ras_reference_i *iface,input_operation_i **out)
+{
+	/* OpenSequentialReadAsync: the same file as the forward-only IInputStream the IInputStreamReference face opens */
+	return file_reference_open(&file_ras_reference_owner(iface)->input_reference,out);
+}
+static const __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceVtbl file_ras_reference_table={file_ras_reference_query,file_ras_reference_addref,file_ras_reference_release,file_ras_reference_iids,file_ras_reference_name,file_ras_reference_trust,file_ras_reference_open_read,file_ras_reference_open_sequential};
+
+/* The sibling-component accessor: BitmapDecoder.CreateAsync receives the application's random-access stream, and
+ * the WIC decoder Raven's windowscodecs.dll serves reads from a file handle. The stream that reaches imaging.c is
+ * raven's own file-backed stream, so the accessor duplicates its underlying handle for the caller. Duplicated
+ * handles share one file pointer, exactly as the engine's own GetInputStreamAt duplicates do: the caller reads from
+ * the duplicate and is responsible for restoring the position before it closes it. A stream that is not raven's
+ * file stream answers E_NOINTERFACE and the trace names it. */
+HRESULT raven_xaml_storage_stream_handle(IUnknown *stream, HANDLE *out)
+{
+	__x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *ras=NULL;
+	struct file_ras *ras_stream;
+	HANDLE duplicate;
+	if (!stream || !out) return E_POINTER;
+	*out=INVALID_HANDLE_VALUE;
+	if (FAILED(stream->lpVtbl->QueryInterface(stream,&IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream,(void **)&ras)))
+	{
+		raven_trace_note("raven-storage: stream is not raven's file stream\n");
+		return E_NOINTERFACE;
+	}
+	ras_stream=ras_stream_owner(ras);
+	if (ras_stream->input->handle==INVALID_HANDLE_VALUE || !DuplicateHandle(GetCurrentProcess(),ras_stream->input->handle,
+		GetCurrentProcess(),&duplicate,0,FALSE,DUPLICATE_SAME_ACCESS))
+	{
+		ras->lpVtbl->Release(ras);
+		return last_error();
+	}
+	ras->lpVtbl->Release(ras);
+	*out=duplicate;
+	return S_OK;
+}
 
 /* The item part forwards its lifetime to the object, found the way the dispatcher's IAsyncInfo finds its action. */
 static struct file_object *file_item_owner(item_i *iface)
@@ -1074,6 +1276,8 @@ static HRESULT WINAPI file_query(file_i *iface, REFIID iid, void **out)
 		*out = &((struct file_object *)iface)->item;
 	else if (equal_iid(iid, &IID___x_ABI_CWindows_CStorage_CStreams_CIInputStreamReference))
 		*out = &((struct file_object *)iface)->input_reference;
+	else if (equal_iid(iid, &IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference))
+		*out = &((struct file_object *)iface)->ras_reference;
 	else
 		return E_NOINTERFACE;
 	file_addref(iface);
@@ -1121,6 +1325,7 @@ static HRESULT file_create(const WCHAR *path, BOOL read_only, file_i **out)
 	self->iface.lpVtbl = (void *)&file_table;
 	self->item.lpVtbl = (void *)&file_item_table;
 	self->input_reference.lpVtbl = &file_reference_table;
+	self->ras_reference.lpVtbl = &file_ras_reference_table;
 	self->refs = 1;
 	self->read_only = read_only;
 	lstrcpyW(self->name, name_start);

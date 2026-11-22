@@ -111,8 +111,8 @@ typedef struct __x_ABI_CWindows_CUI_CXaml_CIUIElementVtbl {
 	HRESULT (STDMETHODCALLTYPE *CapturePointer)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2);
 	HRESULT (STDMETHODCALLTYPE *ReleasePointerCapture)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1);
 	HRESULT (STDMETHODCALLTYPE *ReleasePointerCaptures)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This);
-	HRESULT (STDMETHODCALLTYPE *AddHandler)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2, uint64_t a3);
-	HRESULT (STDMETHODCALLTYPE *RemoveHandler)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2);
+	HRESULT (STDMETHODCALLTYPE *AddHandler)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, IInspectable *event, IUnknown *handler, boolean handled_events_too);
+	HRESULT (STDMETHODCALLTYPE *RemoveHandler)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, IInspectable *event, IUnknown *handler);
 	HRESULT (STDMETHODCALLTYPE *TransformToVisual)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This, uint64_t a1, uint64_t a2);
 	HRESULT (STDMETHODCALLTYPE *InvalidateMeasure)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This);
 	HRESULT (STDMETHODCALLTYPE *InvalidateArrange)(__x_ABI_CWindows_CUI_CXaml_CIUIElement *This);

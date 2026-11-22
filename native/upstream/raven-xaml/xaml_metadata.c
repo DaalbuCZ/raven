@@ -14,7 +14,10 @@
 #include "xaml_internal.h"
 #include <roapi.h>
 #include <winstring.h>
+#include <windows.ui.xaml.interop.h>
 #include "windows_ui_xaml_markup.h"
+
+typedef __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName xaml_type_name;
 
 struct metadata_entry {
 	uint32_t stable;
@@ -91,6 +94,9 @@ static const struct metadata_entry entries[] = {
 	{141, L"Window", L"Windows.UI.Xaml.Window"},
 	{509, L"Frame", L"Windows.UI.Xaml.Controls.Frame"},
 	{525, L"Page", L"Windows.UI.Xaml.Controls.Page"},
+	/* The root the UILibrary controls' XBFs bind (TitleBarControl.xbf's CreateTypeBegin UserControl rides the
+	 * stable index, the same convention Page's 525 uses; index from the dumped XBF stable-type table). */
+	{491, L"UserControl", L"Windows.UI.Xaml.Controls.UserControl"},
 	{442, L"Grid", L"Windows.UI.Xaml.Controls.Grid"},
 	{396, L"TextBlock", L"Windows.UI.Xaml.Controls.TextBlock"},
 	{540, L"Button", L"Windows.UI.Xaml.Controls.Button"},
@@ -98,6 +104,14 @@ static const struct metadata_entry entries[] = {
 	{114, L"Style", L"Windows.UI.Xaml.Style"},
 	{106, L"RowDefinition", L"Windows.UI.Xaml.Controls.RowDefinition"},
 	{44, L"ColumnDefinition", L"Windows.UI.Xaml.Controls.ColumnDefinition"},
+	/* The shape elements and the visual-state tree the UILibrary control XBFs declare: the stable indices the
+	 * dumped documents carry (verified against xbf-stable-indices.json), served by the engine's element factories. */
+	{286, L"Border", L"Windows.UI.Xaml.Controls.Border"},
+	{481, L"StackPanel", L"Windows.UI.Xaml.Controls.StackPanel"},
+	{326, L"Image", L"Windows.UI.Xaml.Controls.Image"},
+	{263, L"Setter", L"Windows.UI.Xaml.Setter"},
+	{137, L"VisualState", L"Windows.UI.Xaml.VisualState"},
+	{138, L"VisualStateGroup", L"Windows.UI.Xaml.VisualStateGroup"},
 	/* The template classes a real app XBF names by stable index: the property Control.Template (560) above and these two
 	 * types — the template value and the presenter inside it. ContentPresenter is not in the runtime catalog, so its
 	 * activation falls to the loader's engine-internal factory path, not RoActivateInstance. */
@@ -107,6 +121,10 @@ static const struct metadata_entry entries[] = {
 	 * WinUI namespace), so that is the runtime class the stable index carries; activation lands on the loader's
 	 * create_known, which serves it from the engine (xaml_styles.c). */
 	{265, L"SolidColorBrush", L"Microsoft.UI.Xaml.Media.SolidColorBrush"},
+	/* The shape class a compiled document names by stable index (ConfirmDialog.xbf's Shape_Fill rectangles ride
+	 * stable 470, verified against the generated xbf_type_names table): the catalog carries the class and the
+	 * engine's element factory serves it. */
+	{470, L"Rectangle", L"Windows.UI.Xaml.Shapes.Rectangle"},
 };
 
 const WCHAR *raven_xaml_class_by_stable(uint32_t stable)
@@ -130,40 +148,138 @@ static int same_text(const WCHAR *text, UINT32 length, const WCHAR *name)
 	return text && CompareStringOrdinal(text, (int)length, name, -1, FALSE) == CSTR_EQUAL;
 }
 
-/* A type the framework table does not know is an application type: the XAML compiler generated the provider on the application
- * object, and its by-name GetXamlType overload followed by the type's ActivateInstance is the documented creation path. */
-static HRESULT create_from_provider(const WCHAR *name, UINT32 length, IInspectable **out)
+/* The application's XAML metadata provider: the XamlTypeInfo provider .NET Native generates for every compiled XAML app,
+ * implemented on the Application object's managed side. The object Application.Current hands out is the composition outer's
+ * face, so its QueryInterface reaches the managed CCW the provider rides. */
+static HRESULT provider_from_application(__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider **out)
 {
 	static const IID *provider_iid = &IID__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider;
 	IInspectable *current = NULL;
-	__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider *provider = NULL;
-	__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType *type = NULL;
+	HRESULT result = raven_xaml_application_current(&current);
+	if (FAILED(result))
+		return result;
+	if (!current) {
+		raven_trace_note("raven-xaml: metadata provider: no Application.Current\n");
+		return CLASS_E_CLASSNOTAVAILABLE;
+	}
+	result = current->lpVtbl->QueryInterface(current, provider_iid, (void **)out);
+	current->lpVtbl->Release(current);
+	if (FAILED(result) || !*out) {
+		char note[96];
+		wsprintfA(note, "raven-xaml: metadata provider QI refused 0x%08x\n", (unsigned)result);
+		raven_trace_note(note);
+		return CLASS_E_CLASSNOTAVAILABLE;
+	}
+	return S_OK;
+}
+
+/* Resolve one type name over the provider's documented overloads, stopping at the first that answers a type:
+ * GetXamlType(TypeName) — the primary slot the Windows framework drives with the TypeName exactly as the caller passed it,
+ * whose managed thunk turns the struct back into System.Type — then GetXamlType(String) with the name as carried, and
+ * finally with the plain full name before the assembly qualifier, the key form the generated XamlTypeInfo map stores. */
+static HRESULT provider_type_by_name(__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider *provider,
+	const xaml_type_name *original, const WCHAR *name, UINT32 length,
+	__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType **out)
+{
 	HSTRING full_name = NULL;
 	HRESULT result;
 	*out = NULL;
-	result = raven_xaml_application_current(&current);
+	if (original && original->Name) {
+		result = provider->lpVtbl->GetXamlType(provider, (uint64_t)(uintptr_t)original, (uint64_t)(uintptr_t)out);
+		if (SUCCEEDED(result) && *out)
+			return S_OK;
+	}
+	result = WindowsCreateString(name, length, &full_name);
 	if (FAILED(result))
 		return result;
-	if (!current)
-		return CLASS_E_CLASSNOTAVAILABLE;
-	result = current->lpVtbl->QueryInterface(current, provider_iid, (void **)&provider);
-	current->lpVtbl->Release(current);
-	if (FAILED(result) || !provider)
-		return CLASS_E_CLASSNOTAVAILABLE;
-	result = WindowsCreateString(name, length, &full_name);
-	if (SUCCEEDED(result)) {
-		/* The second GetXamlType slot is the by-full-name overload; the first takes the interop TypeName. */
-		result = provider->lpVtbl->GetXamlType2(provider, (uint64_t)(uintptr_t)full_name, (uint64_t)(uintptr_t)&type);
-		WindowsDeleteString(full_name);
+	result = provider->lpVtbl->GetXamlType2(provider, (uint64_t)(uintptr_t)full_name, (uint64_t)(uintptr_t)out);
+	WindowsDeleteString(full_name);
+	if (SUCCEEDED(result) && *out)
+		return S_OK;
+	UINT32 plain = 0;
+	for (UINT32 index = 0; index < length; ++index) {
+		if (name[index] == L',')
+			break;
+		plain = index + 1;
 	}
-	provider->lpVtbl->Release(provider);
-	if (FAILED(result) || !type)
-		return CLASS_E_CLASSNOTAVAILABLE;
-	result = type->lpVtbl->ActivateInstance(type, (uint64_t)(uintptr_t)out);
-	type->lpVtbl->Release(type);
+	if (!plain || plain == length)
+		return FAILED(result) ? result : CLASS_E_CLASSNOTAVAILABLE;
+	result = WindowsCreateString(name, plain, &full_name);
+	if (FAILED(result))
+		return result;
+	result = provider->lpVtbl->GetXamlType2(provider, (uint64_t)(uintptr_t)full_name, (uint64_t)(uintptr_t)out);
+	WindowsDeleteString(full_name);
+	return result;
+}
+
+/* ActivateInstance: the documented page creation — the managed XamlTypeInfo instantiates the app's page (its constructor
+ * runs the page's InitializeComponent) and hands the managed CCW back as the IInspectable. The type name rides the trace
+ * so a failed activation names the class whose constructor threw. */
+static HRESULT provider_activate(__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType *type,
+	const WCHAR *name, UINT32 length, IInspectable **out)
+{
+	HRESULT result = type->lpVtbl->ActivateInstance(type, (uint64_t)(uintptr_t)out);
+	if (FAILED(result)) {
+		char note[96];
+		if (name) {
+			UINT32 printed = length > 40 ? 40 : length;
+			wsprintfA(note, "raven-xaml: activate %.*ls failed 0x%08x\n", (int)printed, name, (unsigned)result);
+		} else {
+			wsprintfA(note, "raven-xaml: xamltype ActivateInstance failed 0x%08x\n", (unsigned)result);
+		}
+		raven_trace_note(note);
+	}
 	if (FAILED(result) || !*out)
 		return FAILED(result) ? result : CLASS_E_CLASSNOTAVAILABLE;
 	return S_OK;
+}
+
+/* A type the framework table does not know is an application type: the XAML compiler generated the provider on the application
+ * object, and its GetXamlType overloads followed by the type's ActivateInstance are the documented creation path. */
+static HRESULT create_from_provider(const WCHAR *name, UINT32 length, IInspectable **out)
+{
+	__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider *provider = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType *type = NULL;
+	HRESULT result;
+	*out = NULL;
+	result = provider_from_application(&provider);
+	if (FAILED(result))
+		return result;
+	result = provider_type_by_name(provider, NULL, name, length, &type);
+	provider->lpVtbl->Release(provider);
+	if (FAILED(result) || !type)
+		return FAILED(result) ? result : CLASS_E_CLASSNOTAVAILABLE;
+	result = provider_activate(type, name, length, out);
+	type->lpVtbl->Release(type);
+	return result;
+}
+
+/* Frame.Navigate's application types: the TypeName the app passed rides the provider's primary overload unchanged — the
+ * exact shape the Windows framework drives the managed XamlTypeInfo with (the .NET Native Type-to-TypeName marshalling
+ * carries the assembly-qualified name and its kind). */
+HRESULT raven_xaml_create_from_type(const xaml_type_name *type, IInspectable **out)
+{
+	__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlMetadataProvider *provider = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CMarkup_CIXamlType *xaml_type = NULL;
+	const WCHAR *text;
+	UINT32 length = 0;
+	HRESULT result;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!type || !type->Name)
+		return E_INVALIDARG;
+	result = provider_from_application(&provider);
+	if (FAILED(result))
+		return result;
+	text = WindowsGetStringRawBuffer(type->Name, &length);
+	result = provider_type_by_name(provider, type, text, length, &xaml_type);
+	provider->lpVtbl->Release(provider);
+	if (FAILED(result) || !xaml_type)
+		return FAILED(result) ? result : CLASS_E_CLASSNOTAVAILABLE;
+	result = provider_activate(xaml_type, text, length, out);
+	xaml_type->lpVtbl->Release(xaml_type);
+	return result;
 }
 
 HRESULT raven_xaml_create_named(const WCHAR *name, UINT32 length, IInspectable **out)

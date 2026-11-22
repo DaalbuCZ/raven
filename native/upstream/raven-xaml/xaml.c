@@ -100,6 +100,32 @@ static HRESULT inspectable_trust(TrustLevel *level)
 	return S_OK;
 }
 
+/* The core-family refused QI: the identifier the caller asked for and the object kind that refused it, traced so the
+ * casts the .NET projection drives name the faces still to serve. RAVEN_TRACE_CORE_QI=1 in the guest enables it;
+ * the note rides raven-shell's RavenTrace host call, which the trace carries without the debugger play. */
+void raven_xaml_qi_refuse(const char *face, REFIID iid)
+{
+	static int qi_gate = -1;
+	if (qi_gate < 0) {
+		char flag[8] = "";
+		qi_gate = GetEnvironmentVariableA("RAVEN_TRACE_CORE_QI", flag, sizeof flag) ? 1 : 0;
+	}
+	if (!qi_gate)
+		return;
+	{
+		static void (WINAPI *host_trace)(const char *);
+		if (!host_trace)
+			host_trace = (void (WINAPI *)(const char *))GetProcAddress(LoadLibraryW(L"ravenhost.dll"), "RavenTrace");
+		if (host_trace) {
+			char line[160];
+			wsprintfA(line, "raven-core: %s refused QI %08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+				face, (unsigned long)iid->Data1, iid->Data2, iid->Data3, iid->Data4[0], iid->Data4[1],
+				iid->Data4[2], iid->Data4[3], iid->Data4[4], iid->Data4[5], iid->Data4[6], iid->Data4[7]);
+			host_trace(line);
+		}
+	}
+}
+
 /* Work posted to a dispatcher waits here until the dispatcher processes events. */
 struct queued {
 	struct queued *next;
@@ -2065,11 +2091,24 @@ HRESULT raven_property_set_factory(HSTRING name, IActivationFactory **out);
 
 /* PropertyValue lives in property_value.c; declared here so the manifest-driven activation chain can route to it. */
 HRESULT raven_colors_factory(HSTRING name, IActivationFactory **out);
+/* ColorHelper lives in color_helper.c beside colors.c; the guest's material pipeline turns its SVG fill
+ * strings into Windows.UI.Color values through it. */
+HRESULT raven_color_helper_factory(HSTRING name, IActivationFactory **out);
+/* HashAlgorithmProvider lives in data_writer.c beside the IBuffer machinery its digests read and write. */
+HRESULT raven_crypto_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_cryptobuffer_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_focus_manager_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_application_view_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_display_information_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_system_support_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_property_value_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_uri_factory(HSTRING name, IActivationFactory **out);
+/* CodecQuery lives in codec_query.c; the app's media path asks for the class before any method is on record. */
+HRESULT raven_codec_query_factory(HSTRING name, IActivationFactory **out);
+/* The thread pool lives in thread_pool.c; Win2D's async machinery schedules work through it. */
+HRESULT raven_thread_pool_factory(HSTRING name, IActivationFactory **out);
+/* DeviceInformation lives in device_information.c; the app's setup path asks for the class at the graphics stage. */
+HRESULT raven_xaml_device_information_factory(HSTRING name, IActivationFactory **out);
 
 /* Manifest-driven activation: a packaged app's manifest names an Applications/Application@EntryPoint runtime class — the
  * guest application's own XAML Application subclass (e.g. "Shapr3D.App"), derived from the class an app's
@@ -2095,11 +2134,19 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 		CompareStringOrdinal(text, (int)length, window_name, -1, FALSE) != CSTR_EQUAL)
 	{
 		/* the real ApiInformation factory answers before the synthesized-attribute family, whose prefix match would take it */
-	HRESULT result = raven_colors_factory(name, out);
+		HRESULT result = raven_colors_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_color_helper_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_crypto_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_cryptobuffer_factory(name, out);
 	if (result == CLASS_E_CLASSNOTAVAILABLE)
 		result = raven_focus_manager_factory(name, out);
 	if (result == CLASS_E_CLASSNOTAVAILABLE)
 		result = raven_application_view_factory(name, out);
+	if (result == CLASS_E_CLASSNOTAVAILABLE)
+		result = raven_display_information_factory(name, out);
 	if (result == CLASS_E_CLASSNOTAVAILABLE)
 		result = raven_system_support_factory(name, out);
 	if (result == CLASS_E_CLASSNOTAVAILABLE)
@@ -2131,6 +2178,12 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_xaml_memory_manager_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_xaml_system_diagnostics_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_xaml_imaging_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_xaml_display_monitor_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_storage_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_style_factory(name, out);
@@ -2160,6 +2213,25 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 			result = raven_package_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_dispatcher_queue_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_codec_query_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_thread_pool_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_xaml_device_information_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE) {
+			/* TEMPORARY env-gated diagnosis: the direct DllGetActivationFactory refusals bypass the traced
+			 * raven-shell path, so a class a guest fail-fasts on would be anonymous. Removed after the round. */
+			static int refusal_trace = -1;
+			char flag[8] = "";
+			if (refusal_trace < 0)
+				refusal_trace = GetEnvironmentVariableA("RAVEN_TRACE_ACT_REFUSAL", flag, sizeof flag) ? 1 : 0;
+			if (refusal_trace) {
+				char note[120];
+				wsprintfA(note, "raven-xaml: no factory for '%ls'\n", text);
+				raven_trace_note(note);
+			}
+		}
 		return result;
 	}
 	InterlockedIncrement(&factory_instance.refs);

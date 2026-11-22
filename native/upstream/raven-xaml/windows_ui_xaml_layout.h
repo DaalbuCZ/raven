@@ -39,9 +39,9 @@ typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinitionVtbl {
 	HRESULT (STDMETHODCALLTYPE *get_Height)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, __x_ABI_CWindows_CUI_CXaml_CGridLength *value);
 	HRESULT (STDMETHODCALLTYPE *put_Height)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, __x_ABI_CWindows_CUI_CXaml_CGridLength value);
 	HRESULT (STDMETHODCALLTYPE *get_MaxHeight)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *put_MaxHeight)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, uint64_t a1);
+	HRESULT (STDMETHODCALLTYPE *put_MaxHeight)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, double value);
 	HRESULT (STDMETHODCALLTYPE *get_MinHeight)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *put_MinHeight)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, uint64_t a1);
+	HRESULT (STDMETHODCALLTYPE *put_MinHeight)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, double value);
 	HRESULT (STDMETHODCALLTYPE *get_ActualHeight)(__x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinition *This, uint64_t a1);
 	END_INTERFACE
 } __x_ABI_CWindows_CUI_CXaml_CControls_CIRowDefinitionVtbl;
@@ -69,9 +69,9 @@ typedef struct __x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinitionVtbl {
 	HRESULT (STDMETHODCALLTYPE *get_Width)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, __x_ABI_CWindows_CUI_CXaml_CGridLength *value);
 	HRESULT (STDMETHODCALLTYPE *put_Width)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, __x_ABI_CWindows_CUI_CXaml_CGridLength value);
 	HRESULT (STDMETHODCALLTYPE *get_MaxWidth)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *put_MaxWidth)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, uint64_t a1);
+	HRESULT (STDMETHODCALLTYPE *put_MaxWidth)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, double value);
 	HRESULT (STDMETHODCALLTYPE *get_MinWidth)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, uint64_t a1);
-	HRESULT (STDMETHODCALLTYPE *put_MinWidth)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, uint64_t a1);
+	HRESULT (STDMETHODCALLTYPE *put_MinWidth)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, double value);
 	HRESULT (STDMETHODCALLTYPE *get_ActualWidth)(__x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinition *This, uint64_t a1);
 	END_INTERFACE
 } __x_ABI_CWindows_CUI_CXaml_CControls_CIColumnDefinitionVtbl;

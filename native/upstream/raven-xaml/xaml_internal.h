@@ -89,6 +89,10 @@ const WCHAR *raven_xaml_class_by_stable(uint32_t stable);
 const WCHAR *raven_xaml_property_by_stable(uint32_t stable);
 HRESULT raven_xaml_create_named(const WCHAR *name, UINT32 length, IInspectable **out);
 HRESULT raven_xaml_create_stable(uint32_t stable, IInspectable **out);
+/* Frame.Navigate's application page types: the TypeName the app passed rides the Application object's managed
+ * IXamlMetadataProvider (GetXamlType(TypeName) with the struct unchanged, then ActivateInstance). */
+struct __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName;
+HRESULT raven_xaml_create_from_type(const struct __x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName *type, IInspectable **out);
 void raven_xaml_page_set_frame(IInspectable *page, IInspectable *frame);
 HRESULT raven_xaml_element_set_name(IInspectable *object, const WCHAR *text, UINT32 length);
 HRESULT raven_xaml_element_set_integer(IInspectable *object, const WCHAR *name, UINT32 length, int64_t value);
@@ -103,6 +107,11 @@ IInspectable *raven_xaml_element_resources_existing(IInspectable *object);
 HRESULT raven_xaml_dictionary_lookup(IInspectable *dictionary, const WCHAR *text, UINT32 length, IInspectable **out);
 HRESULT raven_xaml_dictionary_lookup_theme(IInspectable *dictionary, const WCHAR *text, UINT32 length,
 	const WCHAR *theme, UINT32 theme_length, IInspectable **out);
+/* The framework theme dictionary: the WinUI framework package's own theme documents (the ones XamlControlsResources
+ * merges on Windows), consulted once as the shared fallback behind every dictionary read that misses — the framework
+ * styles an application looks up by key live there, not in the application's own documents. */
+HRESULT raven_xaml_dictionary_lookup_framework(const WCHAR *text, UINT32 length, IInspectable **out);
+BOOL raven_xaml_dictionary_framework_contains(const WCHAR *text, UINT32 length);
 /* The deferred resource value ProvideStaticResourceValue/ProvideThemeResourceValue install: the entry names another
  * resource, and the loader follows the reference when it reads the entry (xaml_dictionary.c). */
 HRESULT raven_xaml_resource_reference_create(const WCHAR *key, UINT32 length, BOOL theme, IInspectable **out);
@@ -116,6 +125,23 @@ HRESULT raven_xaml_application_languages_factory(HSTRING name, IActivationFactor
 HRESULT raven_xaml_globalization_preferences_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_resource_context_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_memory_manager_factory(HSTRING name, IActivationFactory **out);
+/* SystemDiagnosticInfo lives in system_diagnostics.c beside the usage and report objects its statics hand out. */
+HRESULT raven_xaml_system_diagnostics_factory(HSTRING name, IActivationFactory **out);
+/* BitmapTransform lives in imaging.c with the transform object its factory activates. */
+HRESULT raven_xaml_imaging_factory(HSTRING name, IActivationFactory **out);
+/* DisplayMonitor lives in display_monitor.c beside the monitor object its statics resolve and the boxed size
+ * PhysicalSizeInInches hands out. */
+HRESULT raven_xaml_display_monitor_factory(HSTRING name, IActivationFactory **out);
+/* DeviceInformation lives in device_information.c beside the empty-set enumeration operation its statics hand out. */
+HRESULT raven_xaml_device_information_factory(HSTRING name, IActivationFactory **out);
+/* The refused QI on a core-family object (the property-value boxes, the dispatcher wrappers, the device faces the
+ * casts still miss), traced with the full identifier under RAVEN_TRACE_CORE_QI — the note rides raven-shell's
+ * RavenTrace host call, which the traced launch carries without the debugger play. */
+void raven_xaml_qi_refuse(const char *face, REFIID iid);
+/* The stream accessor storage.c serves imaging.c: the underlying file handle of a stream raven's storage face
+ * created, duplicated for independent reading. */
+HRESULT raven_xaml_storage_stream_handle(IUnknown *stream, HANDLE *out);
+HRESULT raven_xaml_buffer_create(UINT32 capacity, struct __x_ABI_CWindows_CStorage_CStreams_CIBuffer **out);
 HRESULT raven_xaml_xml_dom_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_api_information_factory(HSTRING name, IActivationFactory **out);
 struct __x_ABI_CWindows_CStorage_CIStorageFolder;
@@ -131,6 +157,9 @@ HRESULT raven_mrt_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_package_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_elements_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_elements_set_name(IInspectable *object, const WCHAR *text, UINT32 length);
+/* The named collections the shape elements and the visual-state tree carry (VisualStateGroups, States, Setters):
+ * S_FALSE when the object has no such collection, S_OK with the live vector when it does. */
+HRESULT raven_xaml_elements_named_collection(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable **out);
 HRESULT raven_xaml_elements_set_text(IInspectable *object, const WCHAR *name, UINT32 length, const WCHAR *text, UINT32 text_length);
 HRESULT raven_xaml_elements_set_object(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
 /* The engine's SolidColorBrush (xaml_styles.c) and its colour reader: the loader creates the class the compiled theme
@@ -182,6 +211,10 @@ HRESULT raven_xaml_package_dependency_path(UINT32 index, WCHAR *path, UINT32 cap
  * reference; the caller releases through IInspectable. */
 HRESULT raven_xaml_uri_create(const WCHAR *text, UINT32 length, IInspectable **out);
 IInspectable *raven_xaml_boxed_string(const WCHAR *text, UINT32 length);
+/* A non-owning read of a string box's stored handle, for the dictionary's hashing and key comparison: the caller keeps
+ * the box alive for the duration of the call, so no duplicate get_Value hands out is needed. Anything that is not this
+ * component's string box (a PropertyValue string, say) answers E_NOINTERFACE and the caller keeps the copy path. */
+HRESULT raven_xaml_string_box_handle(IInspectable *object, HSTRING *handle);
 HRESULT raven_dispatcher_queue_current(__x_ABI_CWindows_CSystem_CIDispatcherQueue **out);
 HRESULT raven_window_post(__x_ABI_CWindows_CUI_CCore_CICoreWindow *window,
 	__x_ABI_CWindows_CUI_CCore_CIDispatchedHandler *callback, LONG priority, boolean *accepted);

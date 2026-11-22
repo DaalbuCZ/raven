@@ -15,15 +15,16 @@
  * and hands out immutable IDependencyProperty objects (the real single-member interface plus the engine-internal
  * raven_dependency_property_interop metadata readers), and ISetter.put_Property takes one — the DP's registered name
  * becomes the stored (property-name string, value IInspectable) pair, so a DP setter applies through the same pair store
- * the name-string setters use. RegisterAttached records the same metadata; GetMetadata and attached-value storage remain unimplemented; the class is statics-only and its factory's ActivateInstance faults. The
+ * the name-string setters use. RegisterAttached records the same metadata; Frame stores local attached values, while
+ * GetMetadata remains unimplemented. The class is statics-only and its factory's ActivateInstance faults. The
  * Value property is real: put_Value takes the value as an IInspectable and get_Value hands it back, so a Setter created
  * through the factory already round-trips its value.
  *
  * PropertyMetadata is implemented here too, because it is the metadata type Register takes: the real activatable class
  * with both constructors (IPropertyMetadataFactory), the four PropertyMetadata.Create statics
  * (IPropertyMetadataStatics), IPropertyMetadata's DefaultValue/CreateDefaultValueCallback readings, and the held
- * property-changed callback — which, like the real class, has no public getter and is never invoked because the engine
- * has no dependency-property change notification. Register reads a metadata default through the real get_DefaultValue
+ * property-changed callback, which has no public getter. Frame invokes a registered callback when a local value changes.
+ * Register reads a metadata default through the real get_DefaultValue
  * and, for the engine's factory-backed metadata, through the internal create-default-value reader. A registration with a
  * foreign IPropertyMetadata still reads only the real ABI.
  *
@@ -54,6 +55,7 @@
 #include "xaml_internal.h"
 #include <string.h>
 #include <stddef.h>
+#include <windows.ui.xaml.interop.h>
 #include "windows_ui_xaml_style.h"
 #include "windows_ui_xaml_dictionary.h" /* the boxed string __FIReference_1_HSTRING; mingw precomputes no instantiation */
 #include "windows_ui_xaml_elements.h" /* the CITextBlock and CIButton IIDs the default attach dispatches on */
@@ -136,7 +138,7 @@ static void store_name(HSTRING *slot, const WCHAR *text, UINT32 length)
  * same (name, value) pair store the name-string setters use.
  *
  * What still does not: GetMetadata answers E_NOTIMPL at its exact signature — per-object metadata means an IPropertyMetadata
- * the engine has no property system to attach to; attached values still have no DependencyObject storage; a DP's owner is recorded but NOT checked at application (the name drives the setter, TargetType
+ * the engine does not expose per-type metadata; local dependency-property storage is implemented on Frame only. A DP's owner is recorded but NOT checked at application (the name drives the setter, TargetType
  * checking stays unimplemented), so a Button-owned DP set on a text block applies to the name the same way. */
 
 static const WCHAR dependency_property_class[] = L"Windows.UI.Xaml.DependencyProperty";
@@ -154,6 +156,7 @@ struct dp_object {
 	HSTRING owner_name;
 	INT32 owner_kind;
 	IInspectable *default_value;
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *changed;
 };
 
 static ULONG dp_addref_any(struct dp_object *self)
@@ -173,6 +176,8 @@ static ULONG dp_release_any(struct dp_object *self)
 			WindowsDeleteString(self->owner_name);
 		if (self->default_value)
 			self->default_value->lpVtbl->Release(self->default_value);
+		if (self->changed)
+			self->changed->lpVtbl->Release(self->changed);
 		FREE(self);
 		InterlockedDecrement(&raven_xaml_objects);
 	}
@@ -316,9 +321,19 @@ static HRESULT WINAPI dp_interop_default(struct raven_dependency_property_intero
 	return S_OK;
 }
 
+static HRESULT WINAPI dp_interop_changed(struct raven_dependency_property_interop *This,
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback **value)
+{
+	struct dp_object *self = (struct dp_object *)((char *)This - offsetof(struct dp_object, interop));
+	if (!value) return E_POINTER;
+	*value = self->changed;
+	if (*value) (*value)->lpVtbl->AddRef(*value);
+	return S_OK;
+}
+
 static const struct raven_dependency_property_interop_vtbl dp_interop_table = {
 	dp_interop_query, dp_interop_addref, dp_interop_release,
-	dp_interop_name, dp_interop_type, dp_interop_owner, dp_interop_default,
+	dp_interop_name, dp_interop_type, dp_interop_owner, dp_interop_default, dp_interop_changed,
 };
 
 /* The object behind an IInspectable reference, when it is an engine DependencyProperty: the QI reaches the one part and
@@ -355,9 +370,8 @@ static struct dp_object *dp_of(IInspectable *object)
  *  - [marshaling_behavior(agile)], [threading(both)]: the factory and every metadata answer IAgileObject. That is
  *    load-bearing for WinUI 2.8, which QIs the factory it activates for the agile marker before it uses it.
  *
- * The property-changed callback (IPropertyChangedCallback, 5a9f8a25-d142-44a4-8231-fd676724f29b) is held, not invoked:
- * only the dependency-property system invokes it, and the engine has no property-change notification for dependency
- * properties yet (GetMetadata stays E_NOTIMPL for the same reason). Microsoft's own contract says a PropertyMetadata
+ * The property-changed callback (IPropertyChangedCallback, 5a9f8a25-d142-44a4-8231-fd676724f29b) is retained at
+ * registration and invoked by Frame's local-value store. Microsoft's own contract says a PropertyMetadata
  * deliberately offers no getter for the callback, so the engine-internal interop part (xaml_styles.h) carries the
  * reader the fixture uses; nothing on the real IPropertyMetadata surface is invented.
  *
@@ -381,7 +395,7 @@ struct metadata_object {
 	LONG refs;
 	IInspectable *default_value; /* the fixed default; NULL for factory-backed metadata */
 	__x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback *default_factory; /* lazy default creator; NULL otherwise */
-	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *changed; /* held for the property system; never invoked */
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *changed;
 };
 
 static ULONG metadata_addref_any(struct metadata_object *self)
@@ -655,6 +669,7 @@ static struct dp_object *dp_create(const WCHAR *name, UINT32 name_length, const 
 	self->lpVtbl = &dp_property_table;
 	self->interop.lpVtbl = &dp_interop_table;
 	self->refs = 1;
+	InterlockedIncrement(&raven_xaml_objects);
 	if (WindowsCreateString(name, name_length, &self->name) != S_OK ||
 		WindowsCreateString(type, type_length, &self->type_name) != S_OK ||
 		WindowsCreateString(owner, owner_length, &self->owner_name) != S_OK) {
@@ -667,7 +682,6 @@ static struct dp_object *dp_create(const WCHAR *name, UINT32 name_length, const 
 		default_value->lpVtbl->AddRef(default_value);
 		self->default_value = default_value;
 	}
-	InterlockedIncrement(&raven_xaml_objects);
 	return self;
 }
 
@@ -695,22 +709,33 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 			continue;
 		text = WindowsGetStringRawBuffer(registered->owner_name, &length);
 		if (length == owner_length &&
-			CompareStringOrdinal(text, (int)length, owner_text, (int)owner_length, FALSE) == CSTR_EQUAL)
-			OutputDebugStringA("raven-xaml: duplicate style entry\n"); return E_INVALIDARG; /* the real (owner, name) duplicate contract */
+			CompareStringOrdinal(text, (int)length, owner_text, (int)owner_length, FALSE) == CSTR_EQUAL) {
+			OutputDebugStringA("raven-xaml: duplicate style entry\n");
+			return E_INVALIDARG;
+		}
 	}
 	/* The default value comes from the metadata's real DefaultValue, or — for the engine's own factory-backed
 	 * PropertyMetadata — from its create-default-value callback (see metadata_registration_default); metadata that does
 	 * not answer IPropertyMetadata is not PropertyMetadata and is refused rather than silently defaulted. */
 	IInspectable *default_value = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *changed = NULL;
 	if (metadata) {
 		if (metadata->lpVtbl->QueryInterface(metadata, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata,
 			(void **)&metadata) != S_OK)
 			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:708\n"); return E_INVALIDARG; }
 		HRESULT result = metadata_registration_default(metadata, &default_value);
+		if (SUCCEEDED(result)) {
+			raven_property_metadata_interop *interop = NULL;
+			if (metadata->lpVtbl->QueryInterface(metadata, &raven_property_metadata_interop_iid, (void **)&interop) == S_OK && interop) {
+				result = interop->lpVtbl->get_PropertyChangedCallback(interop, &changed);
+				interop->lpVtbl->Release(interop);
+			}
+		}
 		metadata->lpVtbl->Release(metadata);
 		if (FAILED(result)) {
 			if (default_value)
 				default_value->lpVtbl->Release(default_value);
+			if (changed) changed->lpVtbl->Release(changed);
 			return result;
 		}
 	}
@@ -718,8 +743,11 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 		(INT32)property_type.Kind, owner_text, owner_length, (INT32)owner_type.Kind, default_value);
 	if (default_value)
 		default_value->lpVtbl->Release(default_value);
-	if (!self)
+	if (!self) {
+		if (changed) changed->lpVtbl->Release(changed);
 		return E_OUTOFMEMORY;
+	}
+	self->changed = changed;
 	if (dp_registry_count == dp_registry_capacity) {
 		const UINT32 capacity = dp_registry_capacity ? dp_registry_capacity * 2 : 4;
 		struct dp_object **entries = ALLOC((size_t)capacity * sizeof *entries);
@@ -792,6 +820,90 @@ static const IInspectableVtbl dp_unset_table = {
 };
 
 static struct { const IInspectableVtbl *lpVtbl; } dp_unset_instance = {&dp_unset_table};
+
+HRESULT raven_dependency_unset_value(IInspectable **value)
+{
+	if (!value) return E_POINTER;
+	*value = (IInspectable *)&dp_unset_instance;
+	dp_unset_addref(*value);
+	return S_OK;
+}
+
+/* DependencyPropertyChangedEventArgs uses the WinRT IInspectable prefix followed by Property, OldValue, NewValue. */
+static const IID property_changed_args_iid = {0x81212c2b, 0x24d0, 0x4957, {0xab, 0xc3, 0x22, 0x44, 0x70, 0xa9, 0x3a, 0x4e}};
+struct property_changed_args;
+struct property_changed_args_vtbl {
+	HRESULT (WINAPI *QueryInterface)(struct property_changed_args *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(struct property_changed_args *);
+	ULONG (WINAPI *Release)(struct property_changed_args *);
+	HRESULT (WINAPI *GetIids)(struct property_changed_args *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(struct property_changed_args *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(struct property_changed_args *, TrustLevel *);
+	HRESULT (WINAPI *get_Property)(struct property_changed_args *, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty **);
+	HRESULT (WINAPI *get_OldValue)(struct property_changed_args *, IInspectable **);
+	HRESULT (WINAPI *get_NewValue)(struct property_changed_args *, IInspectable **);
+};
+struct property_changed_args {
+	const struct property_changed_args_vtbl *lpVtbl;
+	LONG refs;
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *property;
+	IInspectable *old_value, *new_value;
+};
+static ULONG WINAPI changed_args_addref(struct property_changed_args *self) { return (ULONG)InterlockedIncrement(&self->refs); }
+static ULONG WINAPI changed_args_release(struct property_changed_args *self)
+{
+	LONG refs = InterlockedDecrement(&self->refs);
+	if (!refs) {
+		self->property->lpVtbl->Release(self->property);
+		if (self->old_value) self->old_value->lpVtbl->Release(self->old_value);
+		if (self->new_value) self->new_value->lpVtbl->Release(self->new_value);
+		FREE(self);
+	}
+	return (ULONG)refs;
+}
+static HRESULT WINAPI changed_args_query(struct property_changed_args *self, REFIID iid, void **out)
+{
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (!equal_iid(iid, &IID_IUnknown) && !equal_iid(iid, &IID_IInspectable) && !equal_iid(iid, &property_changed_args_iid)) return E_NOINTERFACE;
+	*out = self; changed_args_addref(self); return S_OK;
+}
+static HRESULT WINAPI changed_args_iids(struct property_changed_args *self, ULONG *count, IID **iids)
+{ (void)self; return inspectable_iids(count, iids); }
+static HRESULT WINAPI changed_args_name(struct property_changed_args *self, HSTRING *name)
+{ static const WCHAR text[] = L"Windows.UI.Xaml.DependencyPropertyChangedEventArgs"; (void)self; return WindowsCreateString(text, ARRAYSIZE(text) - 1, name); }
+static HRESULT WINAPI changed_args_trust(struct property_changed_args *self, TrustLevel *level)
+{ (void)self; return inspectable_trust(level); }
+static HRESULT WINAPI changed_args_property(struct property_changed_args *self, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty **value)
+{ if (!value) return E_POINTER; *value = self->property; self->property->lpVtbl->AddRef(self->property); return S_OK; }
+static HRESULT WINAPI changed_args_old(struct property_changed_args *self, IInspectable **value)
+{ if (!value) return E_POINTER; *value = self->old_value; if (*value) (*value)->lpVtbl->AddRef(*value); return S_OK; }
+static HRESULT WINAPI changed_args_new(struct property_changed_args *self, IInspectable **value)
+{ if (!value) return E_POINTER; *value = self->new_value; if (*value) (*value)->lpVtbl->AddRef(*value); return S_OK; }
+static const struct property_changed_args_vtbl changed_args_table = { changed_args_query, changed_args_addref, changed_args_release,
+	changed_args_iids, changed_args_name, changed_args_trust, changed_args_property, changed_args_old, changed_args_new };
+
+HRESULT raven_dependency_notify(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *property,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *sender, IInspectable *old_value, IInspectable *new_value)
+{
+	raven_dependency_property_interop *interop = NULL;
+	__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *callback = NULL;
+	HRESULT result = property->lpVtbl->QueryInterface(property, &raven_dependency_property_interop_iid, (void **)&interop);
+	if (FAILED(result)) return result;
+	result = interop->lpVtbl->get_PropertyChangedCallback(interop, &callback);
+	interop->lpVtbl->Release(interop);
+	if (FAILED(result)) { if (callback) callback->lpVtbl->Release(callback); return result; }
+	if (!callback) return S_OK;
+	struct property_changed_args *args = ALLOC(sizeof *args);
+	if (!args) { callback->lpVtbl->Release(callback); return E_OUTOFMEMORY; }
+	args->lpVtbl = &changed_args_table; args->refs = 1; args->property = property;
+	property->lpVtbl->AddRef(property);
+	args->old_value = old_value; if (old_value) old_value->lpVtbl->AddRef(old_value);
+	args->new_value = new_value; if (new_value) new_value->lpVtbl->AddRef(new_value);
+	result = callback->lpVtbl->Invoke(callback, sender, (__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyChangedEventArgs *)args);
+	changed_args_release(args); callback->lpVtbl->Release(callback);
+	return result;
+}
 
 /* The statics: the factory-shaped object the activation chain hands out for the class name. DependencyProperty is a
  * statics-only class — the real runtimeclass carries no activatable attribute and no factory interface — so the object
@@ -928,6 +1040,14 @@ __declspec(dllexport) HRESULT raven_xaml_dependency_statics(
 	*out = (__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics *)&dp_factory_instance.statics;
 	dp_statics_addref(*out);
 	return S_OK;
+}
+
+/* The DependencyProperty.UnsetValue singleton, AddRef'd: a dependency read with no stored value and no metadata
+ * default answers this marker — the real runtime's GetValue never returns a null reference, and the application's
+ * generated getters unbox the read directly (a null derefs, the traced TitleBarControl c0000005). */
+__declspec(dllexport) HRESULT raven_xaml_dependency_unset_value(IInspectable **out)
+{
+	return dp_statics_unset((void *)&dp_factory_instance.statics, out);
 }
 
 /* The PropertyMetadata factory singleton: one COM identity carrying the IActivationFactory part the activation plumbing
@@ -2098,6 +2218,39 @@ static const __x_ABI_CWindows_CUI_CXaml_CISetterFactoryVtbl setter_factory_table
 
 static struct setter_factory setter_factory_instance = {{&setter_activation_table}, {&setter_factory_table}, 1};
 
+static HRESULT solid_brush_factory(IActivationFactory **out);
+
+/* The Microsoft.UI.Xaml.Media.SolidColorBrush class the WinUI 2.8 dependency's metadata carries: the same
+ * brush storage as the public Windows class, but the object names itself the Microsoft class. */
+static const WCHAR solid_brush_class_name[] = L"Microsoft.UI.Xaml.Media.SolidColorBrush";
+/* The Microsoft.UI.Xaml.Media.SolidColorBrush factory the WinUI 2.8 dependency activates for its own theme
+ * resources (the traced Shapr3D run asks "Microsoft.UI.Xaml.Media.SolidColorBrush" with IActivationFactory when
+ * it resolves TextFillColorPrimary): the same brush storage, but the object names itself the Microsoft class the
+ * dependency's metadata carries rather than the public Windows one. */
+static IActivationFactory media_solid_activation;
+static LONG media_solid_factory_refs;
+static HRESULT WINAPI media_solid_factory_activate(IActivationFactory *iface, IInspectable **out)
+{
+	(void)iface;
+	return raven_solid_brush_create(out);
+}
+static HRESULT WINAPI media_solid_factory_query(IActivationFactory *iface, REFIID iid, void **out)
+{
+	(void)iface; if (!out) return E_POINTER; *out = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IActivationFactory))
+		*out = &media_solid_activation;
+	else return E_NOINTERFACE;
+	return S_OK;
+}
+static ULONG WINAPI media_solid_factory_addref(IActivationFactory *iface) { (void)iface; return 2; }
+static ULONG WINAPI media_solid_factory_release(IActivationFactory *iface) { (void)iface; return 1; }
+static HRESULT WINAPI media_solid_factory_iids(IActivationFactory *iface, ULONG *count, IID **iids) { (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI media_solid_factory_name(IActivationFactory *iface, HSTRING *name)
+{ (void)iface; return name ? WindowsCreateString(L"Microsoft.UI.Xaml.Media.SolidColorBrush", (UINT32)(ARRAYSIZE(L"Microsoft.UI.Xaml.Media.SolidColorBrush") - 1), name) : E_POINTER; }
+static HRESULT WINAPI media_solid_factory_trust(IActivationFactory *iface, TrustLevel *level) { (void)iface; return inspectable_trust(level); }
+static const IActivationFactoryVtbl media_solid_activation_table = {media_solid_factory_query, media_solid_factory_addref, media_solid_factory_release, media_solid_factory_iids, media_solid_factory_name, media_solid_factory_trust, media_solid_factory_activate};
+static IActivationFactory media_solid_activation = {(IActivationFactoryVtbl *)&media_solid_activation_table};
+
 HRESULT raven_style_factory(HSTRING name, IActivationFactory **out)
 {
 	UINT32 length = 0;
@@ -2106,6 +2259,13 @@ HRESULT raven_style_factory(HSTRING name, IActivationFactory **out)
 		return E_POINTER;
 	*out = NULL;
 	text = WindowsGetStringRawBuffer(name, &length);
+	if (same_text(text, length, L"Windows.UI.Xaml.Media.SolidColorBrush"))
+		return solid_brush_factory(out);
+	if (same_text(text, length, solid_brush_class_name)) {
+		InterlockedIncrement(&media_solid_factory_refs);
+		*out = &media_solid_activation;
+		return S_OK;
+	}
 	if (same_text(text, length, style_class)) {
 		InterlockedIncrement(&factory_instance.refs);
 		*out = (IActivationFactory *)&factory_instance;
@@ -2516,6 +2676,28 @@ IInspectable *raven_xaml_boxed_string(const WCHAR *text, UINT32 length)
 	return (IInspectable *)create_boxed_string_length(text, length);
 }
 
+/* A non-owning read of a string box's stored handle, for the dictionary's hashing and key comparison: the caller keeps the
+ * box alive for the duration of the call (a probe it created, or a key the store owns), so the duplicate get_Value hands
+ * out is unnecessary work there. The vtable check pins the answer to this component's string box — any other
+ * Reference`1<HSTRING> (a PropertyValue string, say) answers E_NOINTERFACE and the caller keeps the copy path, because a
+ * borrowed handle of an unknown layout would read a foreign object. */
+HRESULT raven_xaml_string_box_handle(IInspectable *object, HSTRING *handle)
+{
+	__FIReference_1_HSTRING *reference = NULL;
+	if (!object || !handle)
+		return E_POINTER;
+	*handle = NULL;
+	if (FAILED(object->lpVtbl->QueryInterface(object, &IID___FIReference_1_HSTRING, (void **)&reference)) || !reference)
+		return E_NOINTERFACE;
+	if (reference->lpVtbl != &string_box_reference_table) {
+		reference->lpVtbl->Release(reference);
+		return E_NOINTERFACE;
+	}
+	*handle = ((struct boxed_string *)((char *)reference - offsetof(struct boxed_string, reference)))->value;
+	reference->lpVtbl->Release(reference);
+	return S_OK;
+}
+
 static struct boxed_number *create_boxed_number(double value)
 {
 	struct boxed_number *box = ALLOC(sizeof *box);
@@ -2687,12 +2869,22 @@ __declspec(dllexport) HRESULT raven_xaml_platform_resource(const WCHAR *key, UIN
 /* SolidColorBrush: the media brush the theme dictionaries build. The class surface the engine serves is the one the
  * compiled documents name — the XBFs' media namespace is Microsoft.UI.Xaml.Media, so that is the runtime class the
  * object answers with — and its Color the loader applies from a kind-8 constant. The engine's own readers
- * (raven_solid_brush_put_color / raven_solid_brush_get_color) stand in for ISolidColorBrush, whose instantiation IID no
- * header in tree carries, the way the DependencyProperty interop above does; the element side reads the colour back
- * through the same reader so a dictionary brush lands where a composition colour brush would. */
-static const WCHAR solid_brush_class_name[] = L"Microsoft.UI.Xaml.Media.SolidColorBrush";
-struct solid_brush { IInspectable inspectable; LONG refs; __x_ABI_CWindows_CUI_CColor color; };
-static const IInspectableVtbl solid_brush_table;
+ * (raven_solid_brush_put_color / raven_solid_brush_get_color) share storage with the public Windows SolidColorBrush
+ * interface. The element side reads the same colour so a dictionary brush lands where a composition brush would. */
+struct solid_brush { IInspectable inspectable; LONG refs; __x_ABI_CWindows_CUI_CColor color; BOOL windows_class; };
+struct solid_brush_vtbl {
+ HRESULT (WINAPI *QueryInterface)(IInspectable *, REFIID, void **);
+ ULONG (WINAPI *AddRef)(IInspectable *);
+ ULONG (WINAPI *Release)(IInspectable *);
+ HRESULT (WINAPI *GetIids)(IInspectable *, ULONG *, IID **);
+ HRESULT (WINAPI *GetRuntimeClassName)(IInspectable *, HSTRING *);
+ HRESULT (WINAPI *GetTrustLevel)(IInspectable *, TrustLevel *);
+ HRESULT (WINAPI *get_Color)(IInspectable *, __x_ABI_CWindows_CUI_CColor *);
+ HRESULT (WINAPI *put_Color)(IInspectable *, __x_ABI_CWindows_CUI_CColor);
+};
+static const struct solid_brush_vtbl solid_brush_table;
+DEFINE_GUID(IID_solid_brush, 0x9d850850, 0x66f3, 0x48df, 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf);
+DEFINE_GUID(IID_solid_brush_factory, 0xd935ce0c, 0x86f5, 0x4da6, 0x8a, 0x27, 0xb1, 0x61, 0x9e, 0xf7, 0xf9, 0x2b);
 static const IInspectableVtbl acrylic_brush_table;
 struct acrylic_brush {
 	IInspectable inspectable;
@@ -2708,7 +2900,8 @@ static HRESULT WINAPI solid_brush_query(IInspectable *self, REFIID iid, void **o
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject))
+	if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject) ||
+		(self->lpVtbl == (const IInspectableVtbl *)&solid_brush_table && ((struct solid_brush *)self)->windows_class && IsEqualIID(iid, &IID_solid_brush)))
 		*out = self;
 	else
 		return E_NOINTERFACE;
@@ -2729,11 +2922,17 @@ static HRESULT WINAPI solid_brush_name(IInspectable *self, HSTRING *out)
 	(void)self;
 	if (!out)
 		return E_POINTER;
-	return WindowsCreateString(solid_brush_class_name, (UINT32)(ARRAYSIZE(solid_brush_class_name) - 1), out);
+	const WCHAR *name = ((struct solid_brush *)self)->windows_class ? L"Windows.UI.Xaml.Media.SolidColorBrush" : solid_brush_class_name;
+	return WindowsCreateString(name, (UINT32)lstrlenW(name), out);
 }
 static HRESULT WINAPI solid_brush_trust(IInspectable *self, TrustLevel *out) { (void)self; if (!out) return E_POINTER; *out = BaseTrust; return S_OK; }
-static const IInspectableVtbl solid_brush_table = {
-	solid_brush_query, solid_brush_addref, solid_brush_release, solid_brush_iids, solid_brush_name, solid_brush_trust,
+static HRESULT WINAPI solid_brush_color(IInspectable *self, __x_ABI_CWindows_CUI_CColor *out)
+{ if (!out) return E_POINTER; *out = ((struct solid_brush *)self)->color; return S_OK; }
+static HRESULT WINAPI solid_brush_set_color(IInspectable *self, __x_ABI_CWindows_CUI_CColor value)
+{ ((struct solid_brush *)self)->color = value; return S_OK; }
+static const struct solid_brush_vtbl solid_brush_table = {
+ solid_brush_query, solid_brush_addref, solid_brush_release, solid_brush_iids, solid_brush_name, solid_brush_trust,
+ solid_brush_color, solid_brush_set_color
 };
 
 HRESULT raven_solid_brush_create(IInspectable **out)
@@ -2745,7 +2944,7 @@ HRESULT raven_solid_brush_create(IInspectable **out)
 	brush = ALLOC(sizeof *brush);
 	if (!brush)
 		return E_OUTOFMEMORY;
-	brush->inspectable.lpVtbl = &solid_brush_table;
+	brush->inspectable.lpVtbl = (const IInspectableVtbl *)&solid_brush_table;
 	brush->refs = 1;
 	memset(&brush->color, 0, sizeof brush->color);
 	*out = &brush->inspectable;
@@ -2757,7 +2956,7 @@ HRESULT raven_solid_brush_put_color(IInspectable *brush, const __x_ABI_CWindows_
 	struct solid_brush *self = (struct solid_brush *)brush;
 	if (!brush || !color)
 		return E_POINTER;
-	if (brush->lpVtbl != &solid_brush_table)
+	if (brush->lpVtbl != (const IInspectableVtbl *)&solid_brush_table)
 		return S_FALSE;
 	self->color = *color;
 	return S_OK;
@@ -2768,11 +2967,62 @@ HRESULT raven_solid_brush_get_color(IInspectable *brush, __x_ABI_CWindows_CUI_CC
 	struct solid_brush *self = (struct solid_brush *)brush;
 	if (!brush || !color)
 		return E_POINTER;
-	if (brush->lpVtbl == &solid_brush_table) *color = self->color;
+	if (brush->lpVtbl == (const IInspectableVtbl *)&solid_brush_table) *color = self->color;
 	else if (brush->lpVtbl == &acrylic_brush_table) *color = ((struct acrylic_brush *)brush)->fallback;
 	else return S_FALSE;
 	return S_OK;
 }
+
+/* Factory and activation faces share identity; the final class accepts a color by value. */
+struct solid_factory_iface;
+struct solid_factory_vtbl {
+ HRESULT (WINAPI *QueryInterface)(struct solid_factory_iface *, REFIID, void **);
+ ULONG (WINAPI *AddRef)(struct solid_factory_iface *);
+ ULONG (WINAPI *Release)(struct solid_factory_iface *);
+ HRESULT (WINAPI *GetIids)(struct solid_factory_iface *, ULONG *, IID **);
+ HRESULT (WINAPI *GetRuntimeClassName)(struct solid_factory_iface *, HSTRING *);
+ HRESULT (WINAPI *GetTrustLevel)(struct solid_factory_iface *, TrustLevel *);
+ HRESULT (WINAPI *CreateInstanceWithColor)(struct solid_factory_iface *, __x_ABI_CWindows_CUI_CColor, IInspectable **);
+};
+struct solid_factory_iface { const struct solid_factory_vtbl *lpVtbl; };
+static IActivationFactory solid_activation;
+static struct solid_factory_iface solid_factory_part;
+static HRESULT WINAPI solid_factory_query(IActivationFactory *iface, REFIID iid, void **out)
+{
+ (void)iface; if (!out) return E_POINTER; *out = NULL;
+ if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IInspectable) || IsEqualIID(iid, &IID_IAgileObject) || IsEqualIID(iid, &IID_IActivationFactory)) *out = &solid_activation;
+ else if (IsEqualIID(iid, &IID_solid_brush_factory)) *out = &solid_factory_part;
+ else return E_NOINTERFACE;
+ return S_OK;
+}
+static ULONG WINAPI solid_factory_addref(IActivationFactory *iface) { (void)iface; return 2; }
+static ULONG WINAPI solid_factory_release(IActivationFactory *iface) { (void)iface; return 1; }
+static HRESULT WINAPI solid_factory_iids(IActivationFactory *iface, ULONG *count, IID **iids) { (void)iface; return inspectable_iids(count, iids); }
+static HRESULT WINAPI solid_factory_name(IActivationFactory *iface, HSTRING *name)
+{ static const WCHAR text[] = L"Windows.UI.Xaml.Media.SolidColorBrush"; (void)iface; return name ? WindowsCreateString(text, ARRAYSIZE(text)-1, name) : E_POINTER; }
+static HRESULT WINAPI solid_factory_trust(IActivationFactory *iface, TrustLevel *level) { (void)iface; return inspectable_trust(level); }
+static HRESULT WINAPI solid_factory_activate(IActivationFactory *iface, IInspectable **out)
+{
+ (void)iface; HRESULT hr = raven_solid_brush_create(out);
+ if (SUCCEEDED(hr)) ((struct solid_brush *)*out)->windows_class = TRUE;
+ return hr;
+}
+static HRESULT WINAPI solid_factory_create(struct solid_factory_iface *iface, __x_ABI_CWindows_CUI_CColor color, IInspectable **out)
+{
+ (void)iface; HRESULT hr = solid_factory_activate(NULL, out);
+ if (SUCCEEDED(hr)) ((struct solid_brush *)*out)->color = color;
+ return hr;
+}
+static const IActivationFactoryVtbl solid_activation_table = {solid_factory_query, solid_factory_addref, solid_factory_release, solid_factory_iids, solid_factory_name, solid_factory_trust, solid_factory_activate};
+static const struct solid_factory_vtbl solid_factory_table = {
+ (void *)solid_factory_query, (void *)solid_factory_addref, (void *)solid_factory_release, (void *)solid_factory_iids,
+ (void *)solid_factory_name, (void *)solid_factory_trust, solid_factory_create
+};
+static IActivationFactory solid_activation = {(IActivationFactoryVtbl *)&solid_activation_table};
+static struct solid_factory_iface solid_factory_part = {&solid_factory_table};
+static HRESULT solid_brush_factory(IActivationFactory **out) { *out = &solid_activation; return S_OK; }
+
+
 
 static HRESULT WINAPI acrylic_brush_name(IInspectable *self, HSTRING *out)
 {
@@ -2890,4 +3140,33 @@ __declspec(dllexport) HRESULT raven_xaml_solid_brush_color(IInspectable *brush, 
 __declspec(dllexport) IInspectable *raven_xaml_boxed_string_create(const WCHAR *text, UINT32 length)
 {
 	return raven_xaml_boxed_string(text, length);
+}
+
+/* The framework-property registration the engine's own statics serve (xaml_controls.c's Control properties): the
+ * application-visible Register path with the metadata absent, so the property's default is the engine's. */
+HRESULT raven_xaml_property_register(const WCHAR *name, UINT32 name_length, const WCHAR *type_name,
+	UINT32 type_length, const WCHAR *owner_name, UINT32 owner_length, IInspectable **out)
+{
+	HSTRING name_h = NULL, type_h = NULL, owner_h = NULL;
+	HRESULT result;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (!name || !name_length || !type_name || !type_length || !owner_name || !owner_length)
+		return E_INVALIDARG;
+	result = WindowsCreateString(name, name_length, &name_h);
+	if (SUCCEEDED(result))
+		result = WindowsCreateString(type_name, type_length, &type_h);
+	if (SUCCEEDED(result))
+		result = WindowsCreateString(owner_name, owner_length, &owner_h);
+	if (SUCCEEDED(result)) {
+		__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName property_type = {type_h, TypeKind_Metadata};
+		__x_ABI_CWindows_CUI_CXaml_CInterop_CTypeName owner_type = {owner_h, TypeKind_Metadata};
+		result = dp_register(name_h, property_type, owner_type, NULL,
+			(__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty **)out);
+	}
+	WindowsDeleteString(name_h);
+	WindowsDeleteString(type_h);
+	WindowsDeleteString(owner_h);
+	return result;
 }

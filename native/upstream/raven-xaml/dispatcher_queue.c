@@ -325,7 +325,10 @@ static HRESULT WINAPI work_query(IDispatchedHandler *iface, REFIID iid, void **o
 {
 	if (!out) return E_POINTER;
 	*out = NULL;
-	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IDispatchedHandler)) return E_NOINTERFACE;
+	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IDispatchedHandler)) {
+		raven_xaml_qi_refuse("dispatched-handler", iid);
+		return E_NOINTERFACE;
+	}
 	*out = iface;
 	InterlockedIncrement(&((struct work *)iface)->refs);
 	return S_OK;
@@ -863,7 +866,10 @@ static HRESULT WINAPI shutdown_work_query(IDispatchedHandler *iface, REFIID iid,
 {
 	if (!out) return E_POINTER;
 	*out = NULL;
-	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IDispatchedHandler)) return E_NOINTERFACE;
+	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_IDispatchedHandler)) {
+		raven_xaml_qi_refuse("shutdown-handler", iid);
+		return E_NOINTERFACE;
+	}
 	*out = iface;
 	InterlockedIncrement(&((struct shutdown_work *)iface)->refs);
 	return S_OK;

@@ -39,10 +39,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include "xaml_internal.h"
 #include "windows_ui_xaml_dictionary.h"
+#include "windows_ui_xaml_application.h"
 #include <windows.foundation.h>
 
 #define ALLOC(size) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size))
 #define FREE(block) HeapFree(GetProcessHeap(), 0, (block))
+
+typedef __x_ABI_CWindows_CUI_CXaml_CIApplication application_i;
 
 typedef __x_ABI_CWindows_CUI_CXaml_CIResourceDictionary resource1;
 typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClass uri1;
@@ -108,6 +111,7 @@ struct dictionary_entry {
 	IInspectable *key;
 	IInspectable *value;
 	UINT32 string_hash;
+	UINT32 next; /* the next entry of its hash bucket, when the store's bucket index is built */
 	void *deferred;
 	UINT32 token;
 	raven_resource_realize_fn realize;
@@ -115,10 +119,17 @@ struct dictionary_entry {
 };
 
 /* One map's storage. The dictionary owns two: its own contents — the IMap it derives from — and ThemeDictionaries, whose
- * keys ("Default", "Dark", "Light", "HighContrast") select the dictionary a theme stage reads. */
+ * keys ("Default", "Dark", "Light", "HighContrast") select the dictionary a theme stage reads. The flat entry array stays
+ * the storage and the iteration order; a bucket index over it, built once a store outgrows the linear-scan threshold,
+ * makes each find walk only the entries its hash names instead of the whole store. */
+#define STORE_INDEX_NONE 0xFFFFFFFFu
+#define STORE_INDEX_MIN 64 /* the entry count the first bucket table is built at */
 struct dictionary_store {
 	struct dictionary_entry *entries;
 	UINT32 count, capacity;
+	UINT32 *bucket_heads; /* each bucket's first entry, STORE_INDEX_NONE when empty; NULL until the index is built */
+	UINT32 *bucket_tails; /* each bucket's last entry, so entries link in insertion order */
+	UINT32 bucket_count;  /* a power of two, or 0 while the store scans flat */
 };
 
 /* The merged dictionaries: the vector IResourceDictionary.MergedDictionaries hands out, appended to by the compiled App.xaml
@@ -154,68 +165,160 @@ static ULONG dictionary_release(struct dictionary *self);
 ULONG merged_release(struct merged_vector *self);
 
 /* Two boxed strings compare by their content; anything else compares by IUnknown identity, since one object can arrive through
- * different interfaces. A boxed string never matches a non-string key by content. */
+ * different interfaces. A boxed string never matches a non-string key by content. This component's own string boxes compare
+ * through their stored handle — the keys stay alive for the duration of the call, so the duplicate get_Value hands out is
+ * unnecessary here — while any other Reference`1<HSTRING> keeps the copy path with the same comparison. */
 static int key_matches(IInspectable *stored, IInspectable *probe)
 {
-	boxed_string *left = NULL, *right = NULL;
-	const int left_string = SUCCEEDED(stored->lpVtbl->QueryInterface(stored, &IID___FIReference_1_HSTRING,
-		(void **)&left)) && left;
+	HSTRING borrowed_one = NULL, borrowed_other = NULL;
 	int matches = 0;
-	if (left_string &&
-		SUCCEEDED(probe->lpVtbl->QueryInterface(probe, &IID___FIReference_1_HSTRING, (void **)&right)) && right) {
-		HSTRING one = NULL, other = NULL;
+	const int left_borrowed = SUCCEEDED(raven_xaml_string_box_handle(stored, &borrowed_one)) && borrowed_one;
+	const int right_borrowed = left_borrowed &&
+		SUCCEEDED(raven_xaml_string_box_handle(probe, &borrowed_other)) && borrowed_other;
+	if (left_borrowed && right_borrowed) {
 		INT32 order = 1;
-		if (left->lpVtbl->get_Value(left, &one) == S_OK && right->lpVtbl->get_Value(right, &other) == S_OK &&
-			WindowsCompareStringOrdinal(one, other, &order) == S_OK)
+		if (WindowsCompareStringOrdinal(borrowed_one, borrowed_other, &order) == S_OK)
 			matches = order == 0;
-		if (one)
-			WindowsDeleteString(one);
-		if (other)
-			WindowsDeleteString(other);
-	} else {
-		IUnknown *one = NULL, *other = NULL;
-		if (SUCCEEDED(stored->lpVtbl->QueryInterface(stored, &IID_IUnknown, (void **)&one)) && one &&
-			SUCCEEDED(probe->lpVtbl->QueryInterface(probe, &IID_IUnknown, (void **)&other)) && other)
-			matches = one == other;
-		if (one)
-			one->lpVtbl->Release(one);
-		if (other)
-			other->lpVtbl->Release(other);
+		return matches;
 	}
-	if (left)
-		left->lpVtbl->Release(left);
-	if (right)
-		right->lpVtbl->Release(right);
+	{
+		boxed_string *left = NULL, *right = NULL;
+		const int left_string = SUCCEEDED(stored->lpVtbl->QueryInterface(stored, &IID___FIReference_1_HSTRING,
+			(void **)&left)) && left;
+		if (left_string &&
+			SUCCEEDED(probe->lpVtbl->QueryInterface(probe, &IID___FIReference_1_HSTRING, (void **)&right)) && right) {
+			HSTRING one = NULL, other = NULL;
+			INT32 order = 1;
+			if (left->lpVtbl->get_Value(left, &one) == S_OK && right->lpVtbl->get_Value(right, &other) == S_OK &&
+				WindowsCompareStringOrdinal(one, other, &order) == S_OK)
+				matches = order == 0;
+			if (one)
+				WindowsDeleteString(one);
+			if (other)
+				WindowsDeleteString(other);
+		} else {
+			IUnknown *one = NULL, *other = NULL;
+			if (SUCCEEDED(stored->lpVtbl->QueryInterface(stored, &IID_IUnknown, (void **)&one)) && one &&
+				SUCCEEDED(probe->lpVtbl->QueryInterface(probe, &IID_IUnknown, (void **)&other)) && other)
+				matches = one == other;
+			if (one)
+				one->lpVtbl->Release(one);
+			if (other)
+				other->lpVtbl->Release(other);
+		}
+		if (left)
+			left->lpVtbl->Release(left);
+		if (right)
+			right->lpVtbl->Release(right);
+	}
 	return matches;
 }
 
-/* Avoid COM string comparisons for unequal resource keys while retaining full equality checks for collisions. */
+/* Avoid COM string comparisons for unequal resource keys while retaining full equality checks for collisions. This
+ * component's own string boxes hash their stored handle's buffer; any other Reference`1<HSTRING> hashes the duplicate
+ * get_Value hands out. Both paths read the same buffer, so the value does not depend on the box's kind. */
 static UINT32 key_string_hash(IInspectable *key)
 {
-	boxed_string *reference = NULL;
-	HSTRING value = NULL;
+	HSTRING handle = NULL;
 	UINT32 hash = 0;
-	if (key && SUCCEEDED(key->lpVtbl->QueryInterface(key, &IID___FIReference_1_HSTRING, (void **)&reference)) && reference) {
-		if (SUCCEEDED(reference->lpVtbl->get_Value(reference, &value))) {
-			UINT32 length = 0;
-			const WCHAR *text = WindowsGetStringRawBuffer(value, &length);
-			hash = 2166136261u;
-			for (UINT32 i = 0; i < length; ++i) hash = (hash ^ text[i]) * 16777619u;
+	if (!key)
+		return 0;
+	if (SUCCEEDED(raven_xaml_string_box_handle(key, &handle)) && handle) {
+		UINT32 length = 0;
+		const WCHAR *text = WindowsGetStringRawBuffer(handle, &length);
+		hash = 2166136261u;
+		for (UINT32 i = 0; i < length; ++i) hash = (hash ^ text[i]) * 16777619u;
+		return hash;
+	}
+	{
+		__FIReference_1_HSTRING *reference = NULL;
+		if (SUCCEEDED(key->lpVtbl->QueryInterface(key, &IID___FIReference_1_HSTRING, (void **)&reference)) && reference) {
+			HSTRING value = NULL;
+			if (SUCCEEDED(reference->lpVtbl->get_Value(reference, &value))) {
+				UINT32 length = 0;
+				const WCHAR *text = WindowsGetStringRawBuffer(value, &length);
+				hash = 2166136261u;
+				for (UINT32 i = 0; i < length; ++i) hash = (hash ^ text[i]) * 16777619u;
+			}
+			WindowsDeleteString(value);
+			reference->lpVtbl->Release(reference);
 		}
-		WindowsDeleteString(value);
-		reference->lpVtbl->Release(reference);
 	}
 	return hash;
 }
 
-static struct dictionary_entry *store_find(struct dictionary_store *store, IInspectable *key)
+/* The bucket index over one store's entries: every entry whose key hashed non-zero (a string key; a non-string key
+ * hashes zero and can only match another identity-equal non-string key, which hashes zero too) links into the bucket its
+ * stored hash names, at the tail, so a bucket's chain walks in insertion order — the order the flat scan answers in. The
+ * table is built once the store outgrows the flat-scan threshold and rehashed at twice its size; any mutation that moves
+ * entries (a Remove) drops it, and the next insert rebuilds it whole. */
+static void store_index_link(struct dictionary_store *store, UINT32 index)
 {
-	const UINT32 hash = key_string_hash(key);
+	const UINT32 bucket = store->entries[index].string_hash & (store->bucket_count - 1);
+	store->entries[index].next = STORE_INDEX_NONE;
+	if (store->bucket_tails[bucket] != STORE_INDEX_NONE)
+		store->entries[store->bucket_tails[bucket]].next = index;
+	else
+		store->bucket_heads[bucket] = index;
+	store->bucket_tails[bucket] = index;
+}
+
+static void store_index_drop(struct dictionary_store *store)
+{
+	if (store->bucket_heads) {
+		FREE(store->bucket_heads);
+		store->bucket_heads = NULL;
+	}
+	if (store->bucket_tails) {
+		FREE(store->bucket_tails);
+		store->bucket_tails = NULL;
+	}
+	store->bucket_count = 0;
+}
+
+static void store_index_build(struct dictionary_store *store, UINT32 bucket_count)
+{
+	store_index_drop(store);
+	if (!(store->bucket_heads = ALLOC(sizeof(UINT32) * (SIZE_T)bucket_count)) ||
+		!(store->bucket_tails = ALLOC(sizeof(UINT32) * (SIZE_T)bucket_count))) {
+		store_index_drop(store);
+		return; /* the store keeps the flat scan it ran before the index existed */
+	}
+	store->bucket_count = bucket_count;
+	for (UINT32 bucket = 0; bucket < bucket_count; ++bucket) {
+		store->bucket_heads[bucket] = STORE_INDEX_NONE;
+		store->bucket_tails[bucket] = STORE_INDEX_NONE;
+	}
+	for (UINT32 index = 0; index < store->count; ++index)
+		if (store->entries[index].string_hash)
+			store_index_link(store, index);
+}
+
+/* A store scan: with a bucket table and a hash-carrying probe (a string key), the walk visits only the entries whose
+ * stored hash names the probe's bucket, and the full-hash check — the flat scan's filter — leaves key_matches for the
+ * entries whose whole stored hash equals the probe's, so a mask collision costs a word compare instead of a string
+ * comparison and the walk answers the same entry the flat scan would, in the same order (a bucket chain walks in
+ * insertion order). A probe without a hash (a non-string key) and a store without a table keep the flat scan. */
+static struct dictionary_entry *store_find_hash(struct dictionary_store *store, IInspectable *key, UINT32 hash)
+{
+	if (hash && store->bucket_count) {
+		for (UINT32 index = store->bucket_heads[hash & (store->bucket_count - 1)]; index != STORE_INDEX_NONE;
+			index = store->entries[index].next)
+			if (store->entries[index].string_hash == hash &&
+				key_matches(store->entries[index].key, key))
+				return &store->entries[index];
+		return NULL;
+	}
 	for (UINT32 index = 0; index < store->count; ++index)
 		if ((!hash || !store->entries[index].string_hash || hash == store->entries[index].string_hash) &&
 			key_matches(store->entries[index].key, key))
 			return &store->entries[index];
 	return NULL;
+}
+
+static struct dictionary_entry *store_find(struct dictionary_store *store, IInspectable *key)
+{
+	return store_find_hash(store, key, key_string_hash(key));
 }
 
 static void entry_release_deferred(struct dictionary_entry *entry)
@@ -227,9 +330,8 @@ static void entry_release_deferred(struct dictionary_entry *entry)
 }
 
 static HRESULT entry_read(struct dictionary *owner, struct dictionary_store *store, IInspectable *key,
-	IInspectable **out)
+	struct dictionary_entry *entry, IInspectable **out)
 {
-	struct dictionary_entry *entry = store_find(store, key);
 	*out = NULL;
 	if (!entry) return E_BOUNDS;
 	if (entry->realize) {
@@ -256,6 +358,7 @@ static void store_clear(struct dictionary_store *store)
 	}
 	if (store->entries)
 		FREE(store->entries);
+	store_index_drop(store);
 	store->entries = NULL;
 	store->count = 0;
 	store->capacity = 0;
@@ -269,6 +372,9 @@ static void store_adopt(struct dictionary_store *into, struct dictionary_store *
 	from->entries = NULL;
 	from->count = 0;
 	from->capacity = 0;
+	from->bucket_heads = NULL; /* the bucket index moves with the entries it indexes */
+	from->bucket_tails = NULL;
+	from->bucket_count = 0;
 }
 
 static ULONG dictionary_addref(struct dictionary *self)
@@ -661,7 +767,7 @@ static HRESULT store_lookup(struct dictionary *owner, struct dictionary_store *s
 	if (!key)
 		return E_OUTOFMEMORY;
 	entry = store_find(store, key);
-	if (entry && (entry->value || entry->realize)) result = entry_read(owner, store, key, out);
+	if (entry && (entry->value || entry->realize)) result = entry_read(owner, store, key, entry, out);
 	key->lpVtbl->Release(key);
 	return result;
 }
@@ -773,10 +879,127 @@ static int key_is_string(IInspectable *key, HSTRING *text)
  * merged entries compare by string content; writes, Size and Remove stay on the own store, because a merged dictionary is
  * read through the one that merged it and never mutated by it. The theme map shares this code but reads the theme store,
  * which never falls through. */
+
+/* The framework theme dictionary. The WinUI framework package the application itself depends on carries the theme
+ * documents Windows serves behind every ResourceDictionary lookup — the named styles and theme resources
+ * ("AccentButtonStyle", the ButtonStyle family, the system colours) that live in the framework's generic.xaml and
+ * ThemeDictionaries, not in the application's own documents. This engine serves exactly those documents: the same
+ * construction XamlControlsResources performs (the package's own index, the theme XBFs it registers), built once as a
+ * process-wide dictionary and consulted after an application dictionary's own chain misses. A key the framework
+ * documents do not define still misses — the fallback answers only what the shipped documents genuinely carry. */
+static IInspectable *g_framework_dictionary;
+static LONG g_framework_ready;
+static DWORD g_framework_builder;
+
+/* The application's requested theme name, the way the loader's resource resolution reads it: Light for the default 0,
+ * Dark for 1. The framework documents keep their theme resources under these dictionary names. */
+static void requested_theme_name(const WCHAR **name, UINT32 *length)
+{
+	static const WCHAR light[] = L"Light";
+	static const WCHAR dark[] = L"Dark";
+	IInspectable *current = NULL;
+	application_i *app = NULL;
+	INT32 theme = 0;
+	*name = light;
+	*length = ARRAYSIZE(light) - 1;
+	if (FAILED(raven_xaml_application_current(&current)) || !current)
+		return;
+	if (SUCCEEDED(IInspectable_QueryInterface(current, &IID__x_ABI_CWindows_CUI_CXaml_CIApplication, (void **)&app)) && app) {
+		if (FAILED(app->lpVtbl->get_RequestedTheme(app, &theme)))
+			theme = 0;
+		app->lpVtbl->Release(app);
+	}
+	IInspectable_Release(current);
+	/* ApplicationTheme: Light is 0, Dark is 1. */
+	if (theme == 1) {
+		*name = dark;
+		*length = ARRAYSIZE(dark) - 1;
+	}
+}
+
+static struct dictionary *framework_dictionary_data(void)
+{
+	if (InterlockedCompareExchange(&g_framework_ready, 1, 0) == 0) {
+		IInspectable *object = NULL;
+		g_framework_builder = GetCurrentThreadId();
+		if (raven_xaml_dictionary_create_controls_resources(&object) == S_OK && object) {
+			struct dictionary *built = dictionary_of(object);
+			/* keep the built dictionary for the process lifetime — the fallback backs every read — but only when the
+			 * framework package actually contributed content; without one the dictionary stays unbuilt (an
+			 * environment with no framework package keeps the component unloadable exactly as before) */
+			if (built && (built->store.count || (built->merged && built->merged->count))) {
+				g_framework_dictionary = object;
+				object = NULL;
+			}
+		}
+		if (object)
+			object->lpVtbl->Release(object);
+		g_framework_builder = 0;
+		InterlockedExchange(&g_framework_ready, 2);
+	} else if (g_framework_builder == GetCurrentThreadId()) {
+		/* the build itself consults dictionaries (the merge's Source loads resolve resources) and must not fall
+		 * through the half-built fallback it is constructing: answer nothing this early */
+		return NULL;
+	} else {
+		while (InterlockedCompareExchange(&g_framework_ready, 2, 2) != 2)
+			Sleep(0);
+	}
+	return g_framework_dictionary ? dictionary_of(g_framework_dictionary) : NULL;
+}
+
+static HRESULT framework_dictionary_lookup(const WCHAR *text, UINT32 length, IInspectable **out)
+{
+	struct dictionary *framework = framework_dictionary_data();
+	const WCHAR *theme = NULL;
+	UINT32 theme_length = 0;
+	HRESULT result;
+	if (!framework)
+		return E_BOUNDS;
+	/* Theme-aware: the framework documents keep the colour and brush resources in their ThemeDictionaries, selected
+	 * by the application's requested theme the way the loader's ThemeResource resolution selects. */
+	requested_theme_name(&theme, &theme_length);
+	result = dictionary_lookup_theme_depth(framework, text, length, theme, theme_length, out, 0);
+	if (SUCCEEDED(result))
+		return result;
+	/* The framework level continues below the WinUI documents exactly as the loader's resolution does: the OS's
+	 * system colours, then the platform's named default styles. A key none of them define still misses. */
+	result = raven_xaml_system_color(text, length, theme, theme_length, out);
+	if (result != S_FALSE)
+		return result;
+	result = raven_xaml_platform_resource(text, length, out);
+	return result == S_FALSE ? E_BOUNDS : result;
+}
+
+static BOOL framework_dictionary_contains(const WCHAR *text, UINT32 length)
+{
+	/* The contains check goes through the same lookup the map face serves, so an absent key and a present-but-deferred
+	 * one behave identically to Lookup. */
+	IInspectable *found = NULL;
+	const BOOL present = SUCCEEDED(framework_dictionary_lookup(text, length, &found)) && found;
+	if (found)
+		found->lpVtbl->Release(found);
+	return present;
+}
+
+HRESULT raven_xaml_dictionary_lookup_framework(const WCHAR *text, UINT32 length, IInspectable **out)
+{
+	if (!text || !out)
+		return E_POINTER;
+	*out = NULL;
+	return framework_dictionary_lookup(text, length, out);
+}
+
+BOOL raven_xaml_dictionary_framework_contains(const WCHAR *text, UINT32 length)
+{
+	if (!text)
+		return FALSE;
+	return framework_dictionary_contains(text, length);
+}
+
 static HRESULT map_read(struct map_part *part, IInspectable *key, IInspectable **value)
 {
 	struct dictionary_entry *entry = store_find(part->store, key);
-	if (entry) return entry_read(part->owner, part->store, key, value);
+	if (entry) return entry_read(part->owner, part->store, key, entry, value);
 	*value = NULL;
 	if (part->store == &part->owner->store) {
 		HSTRING text = NULL;
@@ -785,9 +1008,25 @@ static HRESULT map_read(struct map_part *part, IInspectable *key, IInspectable *
 			const WCHAR *raw = WindowsGetStringRawBuffer(text, &length);
 			HRESULT result;
 			result = dictionary_lookup_depth(part->owner, raw, length, value, 0);
+			if (FAILED(result)) {
+				/* The application dictionary's chain missed: the framework theme dictionary gets one read before the
+				 * miss is answered, the way Windows serves the framework's theme resources behind every dictionary. */
+				result = framework_dictionary_lookup(raw, length, value);
+			}
+			if (FAILED(result)) {
+				char note[192];
+				wsprintfA(note, "raven-xaml: map Lookup E_BOUNDS key=<%.*S> size=%u merged=%u\n", length < 80 ? (int)length : 80,
+					raw, part->owner->store.count, part->owner->merged ? part->owner->merged->count : 0);
+				raven_trace_note(note);
+			}
 			WindowsDeleteString(text);
 			return result;
 		}
+	}
+	{
+		char note[192];
+		wsprintfA(note, "raven-xaml: map Lookup E_BOUNDS key=<non-string %p>\n", (void *)(uintptr_t)key);
+		raven_trace_note(note);
 	}
 	return E_BOUNDS;
 }
@@ -831,7 +1070,12 @@ static HRESULT WINAPI map_has_key(__FIMap_2_IInspectable_IInspectable *iface, II
 	if (!key) return E_POINTER;
 	if (store_find(part->store, key)) *found = TRUE;
 	else if (part->store == &part->owner->store && key_is_string(key, &text)) {
-		*found = dictionary_contains(part->owner, key, 0);
+		UINT32 length = 0;
+		const WCHAR *raw = WindowsGetStringRawBuffer(text, &length);
+		if (dictionary_contains(part->owner, key, 0))
+			*found = TRUE;
+		else
+			*found = framework_dictionary_contains(raw, length) ? TRUE : FALSE;
 		WindowsDeleteString(text);
 	}
 	return S_OK;
@@ -840,51 +1084,81 @@ static HRESULT WINAPI map_has_key(__FIMap_2_IInspectable_IInspectable *iface, II
 static HRESULT WINAPI map_get_view(__FIMap_2_IInspectable_IInspectable *iface,
 	__FIMapView_2_IInspectable_IInspectable **view);
 
+/* One insert pass: the entry whose key matches is replaced, otherwise the key appends; either way the caller receives the
+ * entry and the key's hash is computed once for the scan and the record both. The scan answers the same entry store_find
+ * would, so a caller that continues to use the entry (the deferred loads) needs no second find. */
+static struct dictionary_entry *map_insert_entry(struct dictionary_store *store, IInspectable *key,
+	IInspectable *value, boolean *replaced, HRESULT *result)
+{
+	struct dictionary_entry *entry = NULL;
+	*result = S_OK;
+	if (replaced)
+		*replaced = FALSE;
+	if (!key) {
+		*result = E_POINTER;
+		return NULL;
+	}
+	{
+		const UINT32 hash = key_string_hash(key);
+		entry = store_find_hash(store, key, hash);
+		if (entry) {
+			if (replaced)
+				*replaced = TRUE;
+			if (value)
+				value->lpVtbl->AddRef(value);
+			if (entry->value)
+				entry->value->lpVtbl->Release(entry->value);
+			entry_release_deferred(entry);
+			entry->value = value;
+			return entry;
+		}
+		if (store->count == store->capacity) {
+			const UINT32 capacity = store->capacity ? store->capacity * 2 : 4;
+			struct dictionary_entry *entries =
+				HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)capacity * sizeof *entries);
+			if (!entries) {
+				*result = E_OUTOFMEMORY;
+				return NULL;
+			}
+			if (store->entries) {
+				for (UINT32 index = 0; index < store->count; ++index)
+					entries[index] = store->entries[index];
+				FREE(store->entries);
+			}
+			store->entries = entries;
+			store->capacity = capacity;
+		}
+		{
+			const UINT32 appended = store->count;
+			memset(&store->entries[appended], 0, sizeof store->entries[appended]);
+			store->entries[appended].string_hash = hash;
+			store->entries[appended].key = key;
+			store->entries[appended].value = value;
+			key->lpVtbl->AddRef(key);
+			if (value)
+				value->lpVtbl->AddRef(value);
+			++store->count;
+			/* the bucket index follows the append: built once the store is worth indexing, rehashed at twice its
+			 * size, otherwise — a table existing — the new entry joins its bucket at the tail (a key without a
+			 * string hash joins no bucket; nothing with a hash can match it) */
+			if (!store->bucket_count && store->count >= STORE_INDEX_MIN)
+				store_index_build(store, STORE_INDEX_MIN);
+			else if (store->bucket_count && store->count > store->bucket_count * 2)
+				store_index_build(store, store->bucket_count * 2);
+			else if (hash && store->bucket_count)
+				store_index_link(store, appended);
+			return &store->entries[appended];
+		}
+	}
+}
+
 static HRESULT WINAPI map_insert(__FIMap_2_IInspectable_IInspectable *iface, IInspectable *key, IInspectable *value,
 	boolean *replaced)
 {
 	struct map_part *part = (struct map_part *)iface;
-	struct dictionary_store *store = part->store;
-	struct dictionary_entry *entry;
-	if (replaced)
-		*replaced = FALSE;
-	if (!key)
-		return E_POINTER;
-	entry = store_find(store, key);
-	if (entry) {
-		if (replaced)
-			*replaced = TRUE;
-		if (value)
-			value->lpVtbl->AddRef(value);
-		if (entry->value)
-			entry->value->lpVtbl->Release(entry->value);
-		entry_release_deferred(entry);
-		entry->value = value;
-		return S_OK;
-	}
-	if (store->count == store->capacity) {
-		const UINT32 capacity = store->capacity ? store->capacity * 2 : 4;
-		struct dictionary_entry *entries =
-			HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)capacity * sizeof *entries);
-		if (!entries)
-			return E_OUTOFMEMORY;
-		if (store->entries) {
-			for (UINT32 index = 0; index < store->count; ++index)
-				entries[index] = store->entries[index];
-			FREE(store->entries);
-		}
-		store->entries = entries;
-		store->capacity = capacity;
-	}
-	memset(&store->entries[store->count], 0, sizeof store->entries[store->count]);
-	store->entries[store->count].string_hash = key_string_hash(key);
-	store->entries[store->count].key = key;
-	store->entries[store->count].value = value;
-	key->lpVtbl->AddRef(key);
-	if (value)
-		value->lpVtbl->AddRef(value);
-	++store->count;
-	return S_OK;
+	HRESULT result;
+	map_insert_entry(part->store, key, value, replaced, &result);
+	return result;
 }
 
 HRESULT raven_xaml_dictionary_defer(IInspectable *object, const WCHAR *text, UINT32 length, void *context,
@@ -892,13 +1166,15 @@ HRESULT raven_xaml_dictionary_defer(IInspectable *object, const WCHAR *text, UIN
 {
 	struct dictionary *self = dictionary_of(object);
 	IInspectable *key;
+	struct dictionary_entry *entry;
 	HRESULT result;
 	if (!self || !realize || !release) return E_INVALIDARG;
 	key = raven_xaml_boxed_string(text, length);
 	if (!key) return E_OUTOFMEMORY;
-	result = map_insert((__FIMap_2_IInspectable_IInspectable *)&self->map, key, NULL, NULL);
-	if (SUCCEEDED(result)) {
-		struct dictionary_entry *entry = store_find(&self->store, key);
+	/* The insert pass hands back the entry it found or appended, so the deferred state lands on it directly — the second
+	 * find the old shape ran answered exactly this entry, with the whole store scanned twice for it. */
+	entry = map_insert_entry(&self->store, key, NULL, NULL, &result);
+	if (SUCCEEDED(result) && entry) {
 		entry->deferred = context; entry->token = token; entry->realize = realize; entry->release = release;
 	}
 	key->lpVtbl->Release(key);
@@ -920,6 +1196,9 @@ static HRESULT WINAPI map_remove(__FIMap_2_IInspectable_IInspectable *iface, IIn
 		for (UINT32 rest = index; rest + 1 < store->count; ++rest)
 			store->entries[rest] = store->entries[rest + 1];
 		--store->count;
+		/* the shift moves every entry above the removed one; the chains name the old positions, so the index is
+		 * dropped and the next insert rebuilds it whole */
+		store_index_drop(store);
 		return S_OK;
 	}
 	return E_BOUNDS;
@@ -935,6 +1214,7 @@ static HRESULT WINAPI map_clear(__FIMap_2_IInspectable_IInspectable *iface)
 			store->entries[index].value->lpVtbl->Release(store->entries[index].value);
 	}
 	store->count = 0;
+	store_index_drop(store);
 	return S_OK;
 }
 
@@ -1057,9 +1337,21 @@ static HRESULT WINAPI view_lookup(__FIMapView_2_IInspectable_IInspectable *iface
 	if (!key)
 		return E_POINTER;
 	entry = store_find(store, key);
-	if (!entry)
+	if (!entry) {
+		char note[192];
+		HSTRING text = NULL;
+		if (key_is_string(key, &text)) {
+			UINT32 length = 0;
+			const WCHAR *raw = WindowsGetStringRawBuffer(text, &length);
+			wsprintfA(note, "raven-xaml: map view Lookup E_BOUNDS key=<%.*S>\n", length < 96 ? (int)length : 96, raw);
+			WindowsDeleteString(text);
+		} else {
+			wsprintfA(note, "raven-xaml: map view Lookup E_BOUNDS key=<non-string %p>\n", (void *)(uintptr_t)key);
+		}
+		raven_trace_note(note);
 		return E_BOUNDS;
-	return entry_read(((struct map_view *)iface)->owner, store, key, value);
+	}
+	return entry_read(((struct map_view *)iface)->owner, store, key, entry, value);
 }
 
 static HRESULT WINAPI view_size(__FIMapView_2_IInspectable_IInspectable *iface, UINT32 *value)

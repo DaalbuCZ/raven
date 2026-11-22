@@ -1396,12 +1396,12 @@ __declspec(dllexport) HRESULT raven_xaml_package_dependency(UINT32 index, const 
  * a deps directory holding the extracted packages inside or beside the application package, or the package directory
  * named after the dependency itself in either place. S_FALSE answers when none exists — the dependency's resources
  * then resolve nowhere, which a lookup reports as any other miss. */
-static BOOL dependency_path(UINT32 form, const WCHAR *directory, const WCHAR *name, BOOL parent, WCHAR *path, UINT32 capacity)
+static BOOL dependency_path(UINT32 form, const WCHAR *directory, const WCHAR *name, BOOL parent, const WCHAR *leaf, WCHAR *path, UINT32 capacity)
 {
 	/* form 0 puts the package in a deps directory, form 1 beside it; parent steps out of the application package first. */
 	static const WCHAR *separators[2] = {L"\\deps\\", L"\\"};
 	const UINT32 directory_length = (UINT32)lstrlenW(directory), name_length = (UINT32)lstrlenW(name);
-	const UINT32 fixed = (parent ? 3u : 0u) + (UINT32)lstrlenW(separators[form]) + (UINT32)lstrlenW(L"\\resources.pri");
+	const UINT32 fixed = (parent ? 3u : 0u) + (UINT32)lstrlenW(separators[form]) + 1u + (UINT32)lstrlenW(leaf);
 	if (directory_length + fixed + name_length + 1 >= capacity)
 		return FALSE;
 	lstrcpyW(path, directory);
@@ -1409,7 +1409,8 @@ static BOOL dependency_path(UINT32 form, const WCHAR *directory, const WCHAR *na
 		lstrcatW(path, L"\\..");
 	lstrcatW(path, separators[form]);
 	lstrcatW(path, name);
-	lstrcatW(path, L"\\resources.pri");
+	lstrcatW(path, L"\\");
+	lstrcatW(path, leaf);
 	return TRUE;
 }
 
@@ -1442,7 +1443,7 @@ __declspec(dllexport) HRESULT raven_xaml_package_dependency_path(UINT32 index, W
 			cut = (UINT32)i;
 	directory[cut] = 0;
 	for (UINT32 form = 0; form < ARRAYSIZE(inside); ++form) {
-		if (!dependency_path(form, directory, dependency->name, FALSE, path, capacity))
+		if (!dependency_path(form, directory, dependency->name, FALSE, L"resources.pri", path, capacity))
 			continue;
 		HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
 		if (file != INVALID_HANDLE_VALUE) {
@@ -1451,7 +1452,7 @@ __declspec(dllexport) HRESULT raven_xaml_package_dependency_path(UINT32 index, W
 		}
 	}
 	for (UINT32 form = 0; form < ARRAYSIZE(beside); ++form) {
-		if (!dependency_path(form, directory, dependency->name, TRUE, path, capacity))
+		if (!dependency_path(form, directory, dependency->name, TRUE, L"resources.pri", path, capacity))
 			continue;
 		HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
 		if (file != INVALID_HANDLE_VALUE) {
@@ -1669,8 +1670,7 @@ __declspec(dllexport) HRESULT raven_package_manifest_application_entry_point(con
 	return create_string(manifest.entry_point, out);
 }
 
-/* shortcut: only the current package's unprefixed in-process declarations are searched; include framework dependencies
- * and XML namespace prefixes when package graph activation is implemented. */
+/* Search the app before its declared dependencies; prefixed manifest elements are not supported yet. */
 __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id, HSTRING *out)
 {
 	WCHAR manifest_path[MAX_PATH], path[MAX_PATH];
@@ -1685,7 +1685,48 @@ __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id
 	manifest.requested_class = WindowsGetStringRawBuffer(class_id, NULL);
 	parse_manifest(data, length, &manifest);
 	FREE(data);
-	if (!manifest.server_path[0]) return S_FALSE;
+	if (!manifest.server_path[0]) {
+		struct package_manifest dependency_manifest;
+		WCHAR root[MAX_PATH], candidate[MAX_PATH];
+		WCHAR *slash;
+		lstrcpyW(root, manifest_path);
+		slash = root + lstrlenW(root);
+		while (slash > root && *slash != L'\\') --slash;
+		if (*slash != L'\\') return E_INVALIDARG;
+		*slash = 0;
+		for (UINT32 i = 0; i < manifest.dependency_count && !manifest.server_path[0]; ++i) {
+			const struct package_dependency *dependency = &manifest.dependencies[i];
+			BOOL safe = dependency->name[0] != 0;
+			for (const WCHAR *c = dependency->name; *c; ++c)
+				if (!( (*c >= L'A' && *c <= L'Z') || (*c >= L'a' && *c <= L'z') ||
+					(*c >= L'0' && *c <= L'9') || *c == L'.' || *c == L'_' || *c == L'-')) safe = FALSE;
+			if (!safe || !lstrcmpW(dependency->name, L".") || !lstrcmpW(dependency->name, L"..")) continue;
+			for (UINT32 parent = 0; parent < 2 && !manifest.server_path[0]; ++parent) {
+				for (UINT32 form = 0; form < 2 && !manifest.server_path[0]; ++form) {
+					if (!dependency_path(form, root, dependency->name, parent, L"AppxManifest.xml", candidate, MAX_PATH) ||
+						!read_file(candidate, &data, &length)) continue;
+					memset(&dependency_manifest, 0, sizeof dependency_manifest);
+					dependency_manifest.requested_class = manifest.requested_class;
+					parse_manifest(data, length, &dependency_manifest);
+					FREE(data);
+					if (dependency_manifest.has_identity && dependency_manifest.server_path[0] &&
+						!lstrcmpW(dependency_manifest.name, dependency->name) &&
+						!lstrcmpW(dependency_manifest.publisher, dependency->publisher)) {
+						package_version installed, minimum;
+						parse_version(dependency_manifest.version_text, &installed);
+						parse_version(dependency->min_version, &minimum);
+						ULONGLONG have = ((ULONGLONG)installed.Major << 48) | ((ULONGLONG)installed.Minor << 32) | ((ULONGLONG)installed.Build << 16) | installed.Revision;
+						ULONGLONG need = ((ULONGLONG)minimum.Major << 48) | ((ULONGLONG)minimum.Minor << 32) | ((ULONGLONG)minimum.Build << 16) | minimum.Revision;
+						if (have >= need) {
+							lstrcpyW(manifest.server_path, dependency_manifest.server_path);
+							lstrcpyW(manifest_path, candidate);
+						}
+					}
+				}
+			}
+		}
+		if (!manifest.server_path[0]) return S_FALSE;
+	}
 	/* Package paths are relative and cannot escape their root or select another drive. */
 	const WCHAR *p = manifest.server_path, *part = p;
 	for (;;) {

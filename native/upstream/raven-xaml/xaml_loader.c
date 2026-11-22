@@ -29,8 +29,11 @@
 #include "windows_ui_xaml_application.h"
 #include "windows_ui_xaml_dictionary.h"
 #include "windows_ui_xaml_style.h"
+#include "windows_ui_xaml_controls.h"
+#include "windows_ui_xaml_elements.h"
 #include <stdint.h>
 #include <winstring.h>
+#include <roapi.h>
 #include "xbf_type_names.h"
 static const WCHAR *g_current_effective_theme;
 static UINT32 g_current_effective_theme_length;
@@ -342,11 +345,19 @@ static HRESULT metadata_property_name(const struct metadata *m, uint32_t id, con
 static HRESULT property_reference(const struct metadata *m, uint16_t reference, const WCHAR **name, UINT32 *length)
 {
 	if (reference & 0x8000) {
-		const WCHAR *stable = raven_xaml_property_by_stable(reference & 0x7FFF);
-		if (!stable)
-			return CLASS_E_CLASSNOTAVAILABLE;
-		*name = stable;
-		*length = (UINT32)lstrlenW(stable);
+		const uint16_t stable = reference & 0x7FFF;
+		const WCHAR *resolved = raven_xaml_property_by_stable(stable);
+		if (!resolved) {
+			/* The curated table answers the properties the engine stores; the compiled documents name every
+			 * property by its stable index, so the full generated table is the fallback (the same source the
+			 * inspection tools decode with). A name the element machinery does not model answers the S_FALSE
+			 * skip, the convention the without-target walk already gives unknown properties. */
+			if (stable >= ARRAYSIZE(xbf_property_names) || !xbf_property_names[stable])
+				return CLASS_E_CLASSNOTAVAILABLE;
+			resolved = xbf_property_names[stable];
+		}
+		*name = resolved;
+		*length = (UINT32)lstrlenW(resolved);
 		return S_OK;
 	}
 	return metadata_property_name(m, reference, name, length);
@@ -503,6 +514,10 @@ static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 lengt
 	static const WCHAR source_property[] = L"Source";
 	__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
 
+	/* A scope whose object was skipped (a struct the runtime does not activate) still walks its property
+	 * assignments; there is nothing to apply them to, the skip convention. */
+	if (!object)
+		return S_FALSE;
 	if (length == ARRAYSIZE(name_property) - 1 && CompareStringOrdinal(name, (int)length, name_property, -1, FALSE) == CSTR_EQUAL) {
 		if (value->kind == value_string)
 			return raven_xaml_element_set_name(object, value->text, value->length);
@@ -582,13 +597,87 @@ static HRESULT use_target(const struct metadata *m, uint16_t reference, IInspect
 			if (FAILED(result)) return result;
 			expected = buffer;
 		}
+		if (reference == (0x8000 | 525)) {
+			/* The compiled page binds its root by the stable Page entry while the instance is the app's derived
+			 * class, and the managed CCW's runtime class name is not a usable class name (the traced Shapr3D page
+			 * answers "Windows.UI.Xaml.IDependencyObject"). The IPage face is the binding the document needs: a
+			 * target that answers it is the page the document was compiled for. */
+			__x_ABI_CWindows_CUI_CXaml_CControls_CIPage *page_face = NULL;
+			result = IInspectable_QueryInterface(target, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPage, (void **)&page_face);
+			if (SUCCEEDED(result) && page_face) {
+				page_face->lpVtbl->Release(page_face);
+				IInspectable_AddRef(target);
+				*out = target;
+				return S_OK;
+			}
+		}
+		if (reference == (0x8000 | 491)) {
+			/* The same derivation for the UserControl roots the UILibrary controls' XBFs bind: the derived class's
+			 * runtime class name does not carry the base segment, but the instance the framework created derives
+			 * from UserControl, so the IUserControl face is the binding the document needs (the IID is the winmd's
+			 * A7A69EC9-EA35-4679-BF29-F4F09286D314, the one xaml_controls.c's factory composes). */
+			static const IID IID_loader_usercontrol = {0xa7a69ec9, 0xea35, 0x4679,
+				{0xbf, 0x29, 0xf4, 0xf0, 0x92, 0x86, 0xd3, 0x14}};
+			IUnknown *usercontrol_face = NULL;
+			result = IInspectable_QueryInterface(target, &IID_loader_usercontrol, (void **)&usercontrol_face);
+			if (SUCCEEDED(result) && usercontrol_face) {
+				IUnknown_Release(usercontrol_face);
+				IInspectable_AddRef(target);
+				*out = target;
+				return S_OK;
+			}
+		}
 		result = IInspectable_GetRuntimeClassName(target, &actual);
 		if (FAILED(result)) return result;
 		UINT32 actual_length = 0;
 		const WCHAR *actual_text = WindowsGetStringRawBuffer(actual, &actual_length);
 		BOOL matches = actual_length == length && CompareStringOrdinal(actual_text, (int)actual_length, expected, (int)length, FALSE) == CSTR_EQUAL;
+		if (!matches) {
+			/* A compiled page binds its root by the base class the stable table carries ("Page" for the app's
+			 * WelcomePage) while the instance is the derived class, whose runtime class name the CCW reports
+			 * most-derived. Windows binds the document to the instance it created for it, so the derived name
+			 * satisfies the base reference when its final segment carries the expected segment as a suffix. */
+			const WCHAR *expected_short = expected + length;
+			while (expected_short > expected && expected_short[-1] != L'.') --expected_short;
+			UINT32 expected_short_length = length - (UINT32)(expected_short - expected);
+			const WCHAR *actual_short = actual_text + actual_length;
+			while (actual_short > actual_text && actual_short[-1] != L'.') --actual_short;
+			UINT32 actual_short_length = actual_length - (UINT32)(actual_short - actual_text);
+			matches = actual_short_length >= expected_short_length &&
+				CompareStringOrdinal(actual_short + actual_short_length - expected_short_length,
+					(int)expected_short_length, expected_short, (int)expected_short_length, FALSE) == CSTR_EQUAL;
+			if (matches) {
+				char note[96];
+				wsprintfA(note, "raven-xaml: target bound by derived name (%ls)\n", actual_short);
+				raven_trace_note(note);
+			} else if (length < 8 || CompareStringOrdinal(expected, 8, L"Windows.", 8, FALSE) != CSTR_EQUAL) {
+				/* A root can also name an app type the document's xmlns binds (`using:Shapr3D.AppCommon` roots
+				 * like ConfirmDialogBase — the type table carries the namespaced name, so the Windows.-namespace
+				 * guard is what separates system roots from app roots). The managed CCW cannot name its class at
+				 * all — it answers the documented IDependencyObject placeholder — and Windows binds the document
+				 * to the instance the caller created for it, the very object LoadComponent received. A
+				 * non-Windows expected name against that placeholder is the identity binding, not a mismatch. */
+				static const WCHAR placeholder[] = L"Windows.UI.Xaml.IDependencyObject";
+				matches = actual_length == ARRAYSIZE(placeholder) - 1 &&
+					CompareStringOrdinal(actual_text, (int)actual_length, placeholder, -1, FALSE) == CSTR_EQUAL;
+				if (matches) {
+					char note[96];
+					wsprintfA(note, "raven-xaml: target bound by identity for the app root (%ls)\n", expected_short);
+					raven_trace_note(note);
+				}
+			}
+		}
 		WindowsDeleteString(actual);
-		if (!matches) return E_INVALIDARG;
+		if (!matches) {
+			char note[128];
+			UINT32 shown = actual_length < 90 ? actual_length : 90;
+			wsprintfA(note, "raven-xaml: target runtime class '");
+			for (UINT32 index = 0; index < shown; ++index)
+				note[32 + index] = (char)actual_text[index];
+			lstrcpyA(note + 32 + shown, "' refused the documented root type\n");
+			raven_trace_note(note);
+			return E_INVALIDARG;
+		}
 	}
 	IInspectable_AddRef(target);
 	*out = target;
@@ -779,6 +868,12 @@ static HRESULT resolve_resource(const struct scope *stack, size_t depth, int the
 		if (result == S_OK && *out)
 			return resolve_follow(stack, depth, *out, out, hops, effective_theme, effective_theme_length);
 	}
+	/* Below the application's own chain: the framework theme dictionary, the WinUI package's theme documents — the
+	 * styles and theme resources an application looks up by key live there when its own dictionaries do not carry
+	 * them (the same fallback the map face serves). */
+	result = raven_xaml_dictionary_lookup_framework(key, length, out);
+	if (SUCCEEDED(result) && *out)
+		return resolve_follow(stack, depth, *out, out, hops, effective_theme, effective_theme_length);
 	if (!effective_theme) requested_theme_name(&effective_theme, &effective_theme_length);
 	result = raven_xaml_system_color(key, length, effective_theme, effective_theme_length, out);
 	if (result != S_FALSE)
@@ -826,6 +921,60 @@ static HRESULT get_theme_dictionaries(IInspectable *object, IInspectable **out)
 	dictionary->lpVtbl->Release(dictionary);
 	return result;
 }
+
+/* The element collection a panel or grid owns: Children on the panel face, the layout tracks on the grid. */
+static HRESULT element_collection_property(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable **out)
+{
+	if (!object || !out) return E_POINTER;
+	*out = NULL;
+	/* The visual-state tree's collections (VisualStateManager.VisualStateGroups, a group's States, a state's
+	 * Setters) before the panel and grid faces: the shape elements and the visual-state objects answer them. */
+	if ((length == 17 && !memcmp(name, L"VisualStateGroups", 17 * sizeof(WCHAR))) ||
+		(length == 6 && !memcmp(name, L"States", 6 * sizeof(WCHAR))) ||
+		(length == 7 && !memcmp(name, L"Setters", 7 * sizeof(WCHAR)))) {
+		HRESULT result = raven_xaml_elements_named_collection(object, name, length, out);
+		if (result != S_FALSE)
+			return result;
+		*out = NULL;
+	}
+	if (length == 8 && !memcmp(name, L"Children", 8 * sizeof(WCHAR))) {
+		__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel *panel = NULL;
+		HRESULT result = IInspectable_QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel, (void **)&panel);
+		if (FAILED(result)) return result;
+		result = panel->lpVtbl->get_Children(panel, (uint64_t)(uintptr_t)out);
+		panel->lpVtbl->Release(panel);
+		return result;
+	}
+	{
+		__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid *grid = NULL;
+		HRESULT result = IInspectable_QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIGrid, (void **)&grid);
+		if (FAILED(result)) return result;
+		result = length == 14 ? grid->lpVtbl->get_RowDefinitions(grid, (uint64_t)(uintptr_t)out) :
+			grid->lpVtbl->get_ColumnDefinitions(grid, (uint64_t)(uintptr_t)out);
+		grid->lpVtbl->Release(grid);
+		return result;
+	}
+}
+/* The engine's interface faces live inside raven-xaml.dll's image; a face answering from outside it is freed
+ * memory reused by another allocation. The module range comes from this translation unit's own address. */
+static HRESULT append_dictionary(IInspectable *collection, IInspectable *item);
+static int vector_face_plausible(const void *face)
+{
+	if ((uintptr_t)face <= 0x10000 || ((uintptr_t)face & 7) != 0)
+		return 0;
+	const void *const vtable = *(const void *const *)face;
+	if ((uintptr_t)vtable <= 0x10000 || ((uintptr_t)vtable & 7) != 0)
+		return 0;
+	HMODULE module = NULL;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		(LPCWSTR)append_dictionary, &module) || !module)
+		return 0;
+	MEMORY_BASIC_INFORMATION info;
+	if (!VirtualQuery(vtable, &info, sizeof info))
+		return 0;
+	return info.AllocationBase == module;
+}
+
 static HRESULT append_dictionary(IInspectable *collection, IInspectable *item)
 {
 	dictionary_vector_i *vector = NULL;
@@ -837,6 +986,58 @@ static HRESULT append_dictionary(IInspectable *collection, IInspectable *item)
 	if (SUCCEEDED(result)) result = vector->lpVtbl->Append(vector, dictionary);
 	if (dictionary) dictionary->lpVtbl->Release(dictionary);
 	if (vector) vector->lpVtbl->Release(vector);
+	if (SUCCEEDED(result)) return result;
+	/* The element collections a compiled page pushes (Children, RowDefinitions, ColumnDefinitions): the
+	 * parameterized IVector`1 instances the engine's panels and grids hand out. The GUIDs are the instantiations
+	 * xaml_elements.c derives and validates; the vtable is the twelve IVector`1 methods after the IInspectable
+	 * six and the loader only appends. */
+	{
+		static const IID vector_ui_element_iid = {0x393d6210, 0xfa21, 0x573a, {0xa2, 0x38, 0xf0, 0xe8, 0x73, 0x3b, 0x3c, 0x94}};
+		static const IID vector_row_definition_iid = {0x2a17524a, 0x48ef, 0x579b, {0x9e, 0x63, 0xe1, 0xce, 0x52, 0xad, 0xca, 0xe2}};
+		static const IID vector_column_definition_iid = {0xcaf7c66c, 0x1ccb, 0x5ada, {0xaf, 0xce, 0xfc, 0x62, 0xd2, 0xdb, 0x2c, 0x66}};
+		struct element_vector_vtbl {
+			HRESULT (STDMETHODCALLTYPE *QueryInterface)(IInspectable *, REFIID, void **);
+			ULONG (STDMETHODCALLTYPE *AddRef)(IInspectable *);
+			ULONG (STDMETHODCALLTYPE *Release)(IInspectable *);
+			HRESULT (STDMETHODCALLTYPE *GetIids)(IInspectable *, ULONG *, IID **);
+			HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IInspectable *, HSTRING *);
+			HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IInspectable *, TrustLevel *);
+			HRESULT (STDMETHODCALLTYPE *GetAt)(IInspectable *, UINT32, void **);
+			HRESULT (STDMETHODCALLTYPE *get_Size)(IInspectable *, UINT32 *);
+			HRESULT (STDMETHODCALLTYPE *GetView)(IInspectable *, void **);
+			HRESULT (STDMETHODCALLTYPE *IndexOf)(IInspectable *, void *, UINT32 *, boolean *);
+			HRESULT (STDMETHODCALLTYPE *SetAt)(IInspectable *, UINT32, void *);
+			HRESULT (STDMETHODCALLTYPE *InsertAt)(IInspectable *, UINT32, void *);
+			HRESULT (STDMETHODCALLTYPE *RemoveAt)(IInspectable *, UINT32);
+			HRESULT (STDMETHODCALLTYPE *Append)(IInspectable *, void *);
+		};
+		struct element_vector { const struct element_vector_vtbl *lpVtbl; } *vector2 = NULL;
+		const IID element_iids[3] = {vector_ui_element_iid, vector_row_definition_iid, vector_column_definition_iid};
+		for (int attempt = 0; attempt < 3; ++attempt) {
+			result = IInspectable_QueryInterface(collection, &element_iids[attempt], (void **)&vector2);
+			if (FAILED(result) || !vector2) continue;
+			/* A face whose vtable leaves this module means the collection was freed and its memory reused —
+			 * the engine's vectors live in raven-xaml.dll's image, so a call through such a face is a jump
+			 * into foreign memory. The element-face guards in xaml_elements.c cover delivery; the append
+			 * path needs its own. */
+			if (!vector_face_plausible(vector2)) {
+				char line[130];
+				wsprintfA(line, "raven-xaml: append into %p answered %p with foreign vtable %p; freed, append skipped\n",
+					(void *)collection, (void *)vector2, vector2 ? vector2->lpVtbl : NULL);
+				raven_trace_note(line);
+				IInspectable_Release((IInspectable *)vector2);
+				vector2 = NULL;
+				result = E_NOINTERFACE;
+				continue;
+			}
+			/* The vtbl-typed alias must go through the face's lpVtbl: reading the member off the object
+			 * itself walks past the engine's 56-byte children_vector into heap reuse (the wild call the
+			 * traced Shapr3D launch died in). */
+			result = vector2->lpVtbl->Append((IInspectable *)vector2, item);
+			IInspectable_Release((IInspectable *)vector2);
+			if (SUCCEEDED(result)) return result;
+		}
+	}
 	return result;
 }
 
@@ -1223,6 +1424,15 @@ static HRESULT read_custom_runtime_data(struct reader *r, const struct metadata 
 		break;
 	case 8: /* Style_v2 */
 		complete = skip_style_v2_setters(r, m);
+		break;
+	case 9: /* ElementContent: the DeferredElement payload the traced Shapr3D pages carry — the four vints observed
+			 * beside the substream index (token, two zeros, a flag) carry no field the engine reads; the content
+			 * is the substream the SetCustomRuntimeData node itself named. */
+		next_vint(r);
+		next_vint(r);
+		next_vint(r);
+		next_vint(r);
+		complete = !r->invalid;
 		break;
 	default:
 		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
@@ -1629,12 +1839,24 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				 * assignment lands on the scope the pop closes — the application dictionary through the application's
 				 * own property when the pair is that shape. */
 				if (pending_name && scope->object) {
-					const HRESULT applied = !completed_value ? S_FALSE :
-						is_application_dictionary(scope->object, completed_value) ?
-						set_application_resources(scope->object, completed_value) :
-						raven_xaml_element_apply_value(scope->object, pending_name, pending_length, completed_value);
+					/* The value the assignment takes is the one the previous scope completed; an object the
+					 * just-closed scope attached (last_object, the compiled page's SetContentProperty form) is
+					 * the same choreography with the value built before the property node. */
+					IInspectable *value = completed_value;
+					if (!value && last_object)
+						value = last_object;
+					const HRESULT applied = !value ? S_FALSE :
+						is_application_dictionary(scope->object, value) ?
+						set_application_resources(scope->object, value) :
+						raven_xaml_element_apply_value(scope->object, pending_name, pending_length, value);
+					if (value && value == last_object && SUCCEEDED(applied)) {
+						IInspectable_Release(last_object);
+						last_object = NULL;
+					}
 					pending_name = NULL;
-					if (target && applied != S_OK && !context->tolerant) {
+					/* S_FALSE skips the way set_object's contract defines it: a property the engine does not
+					 * model (an application-defined member) takes no value here and the document stands. */
+					if (target && applied != S_OK && applied != S_FALSE && !context->tolerant) {
 						if (scope->object)
 							IInspectable_Release(scope->object);
 						status = FAILED(applied) ? applied : E_NOTIMPL;
@@ -1713,6 +1935,40 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (r.invalid || depth == LOADER_DEPTH) {
 				status = E_INVALIDARG;
 				goto done;
+			}
+			if (reference == (0x8000 | 746) && kind == 20) {
+				/* DeferredElement: the placeholder whose content the SetCustomRuntimeData node that follows names.
+				 * The engine has no lazily-realized element, so the scope opens object-less under the target too,
+				 * and the runtime-data handler fills it from the named substream. RAVEN_XAML_SKIP_DEFERRED_CONTENT
+				 * (a temporary diagnostic) substitutes an empty engine Grid instead of realizing the substream —
+				 * the deferred subtrees build through the WinUI dependency's own control composition, which has
+				 * its own unimplemented surface; the diagnostic isolates the navigation path from it. */
+				IInspectable *placeholder = NULL;
+				static int skip_deferred = -1;
+				if (skip_deferred < 0)
+					skip_deferred = GetEnvironmentVariableA("RAVEN_XAML_SKIP_DEFERRED_CONTENT", NULL, 0) > 0 ? 1 : 0;
+				if (skip_deferred) {
+					static const WCHAR grid_name[] = L"Windows.UI.Xaml.Controls.Grid";
+					HSTRING name_h = NULL;
+					if (SUCCEEDED(WindowsCreateString(grid_name, (UINT32)lstrlenW(grid_name), &name_h))) {
+						const HRESULT made = RoActivateInstance(name_h, &placeholder);
+						WindowsDeleteString(name_h);
+						if (FAILED(made))
+							placeholder = NULL;
+					}
+					if (placeholder)
+						raven_trace_note("raven-xaml: deferred element replaced with the skip placeholder\n");
+				}
+				if (depth < LOADER_DEPTH) {
+					stack[depth].object = placeholder; /* the scope owns the placeholder reference */
+					stack[depth].kind = 0;
+					stack[depth].deferred_target = NULL;
+					stack[depth].deferred_name = NULL;
+					stack[depth].deferred_length = 0;
+					++depth;
+				}
+				pending_name = NULL;
+				break;
 			}
 			if (kind != 20) {
 				status = read_constant(&r, m, &value);
@@ -1799,14 +2055,17 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					BOOL application_resources = depth && stack[depth - 1].object &&
 						(!pending_name || (pending_length == 9 && !memcmp(pending_name, L"Resources", 9 * sizeof(WCHAR)))) &&
 						is_application_dictionary(stack[depth - 1].object, object);
-					if (pending_name && depth && !application_resources) {
-						const HRESULT applied = raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
-						if (FAILED(applied) || (target && applied != S_OK)) {
-							IInspectable_Release(object);
-							status = FAILED(applied) ? applied : E_NOTIMPL;
-							goto done;
-						}
+				if (pending_name && depth && !application_resources) {
+					const HRESULT applied = raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
+					/* S_FALSE is the setter contract's "the element has no such property": the compiled documents
+					 * set application-defined members the engine does not model, and the Windows loader stores
+					 * nothing for them — only a wrong-kind rejection (a FAILED status) is a document error. */
+					if (FAILED(applied) || (target && applied != S_OK && applied != S_FALSE && !context->tolerant)) {
+						IInspectable_Release(object);
+						status = FAILED(applied) ? applied : E_NOTIMPL;
+						goto done;
 					}
+				}
 					pending_name = NULL;
 					if (!*root) {
 						*root = object;
@@ -1873,7 +2132,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				} else {
 					if (pending_name && depth) {
 						HRESULT applied = raven_xaml_element_set_object(stack[depth - 1].object, pending_name, pending_length, object);
-						if (target && applied != S_OK && !context->tolerant) {
+						if (target && applied != S_OK && applied != S_FALSE && !context->tolerant) {
 							IInspectable_Release(object);
 							status = FAILED(applied) ? applied : E_NOTIMPL;
 							goto done;
@@ -1952,7 +2211,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						slot = (slot + 1) & (resource_map->capacity - 1);
 					}
 				}
-				if (target && applied != S_OK && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+				if (target && applied != S_OK && applied != S_FALSE && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
 			} else if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		}
@@ -1963,6 +2222,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			pending_name = NULL;
 			status = property_reference(m, reference, &name, &length);
 			if (FAILED(status)) {
+				if (status != CLASS_E_CLASSNOTAVAILABLE || (target && !context->tolerant)) goto done;
 				if (status != CLASS_E_CLASSNOTAVAILABLE || (target && !context->tolerant)) goto done;
 				status = S_OK;
 				if (kind != 19) break;
@@ -1995,6 +2255,25 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					if (FAILED(status)) goto done;
 					memset(&stack[depth], 0, sizeof stack[depth]);
 					stack[depth].object = collection; stack[depth].kind = 5; ++depth;
+			} else if ((length == 8 && !memcmp(name, L"Children", 8 * sizeof(WCHAR))) ||
+				(length == 14 && !memcmp(name, L"RowDefinitions", 14 * sizeof(WCHAR))) ||
+				(length == 17 && !memcmp(name, L"ColumnDefinitions", 17 * sizeof(WCHAR))) ||
+				(length == 17 && !memcmp(name, L"VisualStateGroups", 17 * sizeof(WCHAR))) ||
+				(length == 6 && !memcmp(name, L"States", 6 * sizeof(WCHAR))) ||
+				(length == 7 && !memcmp(name, L"Setters", 7 * sizeof(WCHAR)))) {
+					/* The element collections a compiled page pushes: the panel's children and the grid's layout
+					 * tracks. The scope takes the live vector the element owns, and the AddToCollection after each
+					 * child's scope pops appends through the parameterized IVector`1. */
+					if (!stack[depth - 1].object) {
+						if (depth == LOADER_DEPTH) { status = E_INVALIDARG; goto done; }
+						memset(&stack[depth], 0, sizeof stack[depth]);
+						stack[depth].kind = 3; ++depth;
+						break;
+					}
+					status = element_collection_property(stack[depth - 1].object, name, length, &collection);
+					if (FAILED(status)) goto done;
+					memset(&stack[depth], 0, sizeof stack[depth]);
+					stack[depth].object = collection; stack[depth].kind = 3; ++depth;
 				} else {
 					if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 					/* An unsupported collection still owns a scope; its children must not pop the dictionary. */
@@ -2034,7 +2313,56 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				pending_token = (uint32_t)(node_at - stream_begin) + 1;
 				break;
 			}
-			if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
+			if (target && !context->tolerant) {
+				/* Kinds 12 and 14 are SetConnectionId: the compiled page's hook into the generated
+				 * IComponentConnector. The node rides the element scope it sits in (the traced
+				 * TitleBarControl.xbf stream: id 1 the control, 2 the SystemButtonsColumn ColumnDefinition,
+				 * 3 the DraggableBorder, 5/6 the Image and TextBlock inside it, 4 a ContentPresenter), and
+				 * the generated Connect(connectionId, target) binds the control's named fields and event
+				 * handlers — skipping it is why the traced constructor read a null SystemButtonsColumn field
+				 * (shapr3d.dll+282c07f, the c0000005 reading this->[0x60] when the field was never bound).
+				 * The binding connector the projected IComponentConnector2 may return takes precedence, the
+				 * way the runtime reads it. */
+				static const GUID IID_IComponentConnector = {0xf6790987, 0xe6e5, 0x47f2,
+					{0x92, 0xc6, 0xec, 0xcc, 0xe4, 0xba, 0x15, 0x9a}};
+				static const GUID IID_IComponentConnector2 = {0xdc8f368b, 0xeccc, 0x498e,
+					{0xb1, 0x39, 0x91, 0x14, 0x22, 0x54, 0xd7, 0xae}};
+				typedef HRESULT (WINAPI *connect_invoke)(void *, INT32, void *);
+				typedef HRESULT (WINAPI *binding_invoke)(void *, INT32, void *, void **);
+				IInspectable *connect_target = depth ? stack[depth - 1].object : target;
+				if (value.kind != value_integer) { status = E_NOTIMPL; goto done; }
+				if (connect_target) {
+					IInspectable *connector_object = NULL;
+					HRESULT held = IInspectable_QueryInterface(target, &IID_IComponentConnector, (void **)&connector_object);
+					if (SUCCEEDED(held)) {
+						/* The projected IComponentConnector2, when the object carries it, hands the binding
+						 * connector the connection's bindings live on; a null answer keeps the object's own
+						 * Connect. */
+						void *as_connector2 = NULL;
+						void *connector = connector_object;
+						if (SUCCEEDED(IInspectable_QueryInterface(target, &IID_IComponentConnector2, &as_connector2)) && as_connector2) {
+							void *binding_connector = NULL;
+							const HRESULT answered = ((binding_invoke)(*(void ***)as_connector2)[6])(as_connector2,
+								(INT32)value.integer, connect_target, &binding_connector);
+							if (SUCCEEDED(answered) && binding_connector) {
+								IUnknown_Release((IUnknown *)as_connector2);
+								IUnknown_Release((IUnknown *)connector_object);
+								connector_object = (IInspectable *)binding_connector;
+								connector = binding_connector;
+							} else {
+								IUnknown_Release((IUnknown *)as_connector2);
+							}
+						}
+						const HRESULT called = ((connect_invoke)(*(void ***)connector)[6])(connector,
+							(INT32)value.integer, connect_target);
+						IUnknown_Release((IUnknown *)connector_object);
+						if (FAILED(called)) { status = called; goto done; }
+					}
+					/* A target with no connector face keeps the skip: a dictionary target carries connection
+					 * ids it never binds. */
+				}
+				break;
+			}
 			break;
 		}
 		case 10: {
@@ -2142,6 +2470,26 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					HRESULT loaded = S_OK;
 					const int dictionary_content = runtime_type == 371 || runtime_type == 7 ||
 						runtime_type == 10 || runtime_type == 12;
+					if (runtime_type == 9) {
+						/* ElementContent: the DeferredElement the create node pushed the scope for takes the named
+						 * substream's root as its object, so the pop and AddToCollection that follow append the
+						 * built subtree exactly the way an inline element would ride. */
+						if (stack[depth - 1].kind == 0 && !stack[depth - 1].object) {
+							BOOL used = FALSE;
+							loaded = load_nodes(m, deferred_begin, deferred_end, &deferred, NULL, &used, context,
+								deferral_depth + 1, effective_theme, effective_theme_length, 0, r.end, NULL);
+							if (SUCCEEDED(loaded) && deferred) {
+								stack[depth - 1].object = deferred;
+								deferred = NULL;
+							}
+						}
+						if (target && FAILED(loaded) && !context->tolerant) {
+							nested_failed = TRUE;
+							status = loaded;
+							goto done;
+						}
+						break;
+					}
 					/* Theme dictionary content is keyed immediately after its scope closes; defer it until that key is known. */
 					if (dictionary_content && depth >= 2 && stack[depth - 2].kind == 5 && stack[depth - 1].object) {
 						if (pending_theme_dictionary) { status = E_INVALIDARG; goto done; }
@@ -2191,14 +2539,43 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const int32_t substream = (next_u16(&r), next_vint(&r));
 			const int32_t statics = next_vint(&r);
 			const int32_t themes = next_vint(&r);
-			(void)substream;
 			if (r.invalid || (uint64_t)statics + (uint64_t)themes > (r.end - r.at) / 2) {
 				status = E_INVALIDARG;
 				goto done;
 			}
 			for (uint64_t index = 0; index < (uint64_t)statics + (uint64_t)themes; ++index)
 				next_u16(&r);
-			if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
+			/* The deferred property the compiled control templates carry (ThemedImage.xbf's
+			 * FrameworkTemplate_Template): the named substream is the template's content tree. The scope's
+			 * object is the engine's ControlTemplate, and the substream builds its root the same way a
+			 * deferred ElementContent substream builds its element; the template owns it for the attach that
+			 * instantiates it later. */
+			if (target && !context->tolerant) {
+				size_t deferred_begin = 0, deferred_end = 0;
+				IInspectable *root = NULL;
+				BOOL used = FALSE;
+				HRESULT loaded;
+				if (!depth || !stack[depth - 1].object || !raven_xaml_object_is_control_template(stack[depth - 1].object)) {
+					status = E_NOTIMPL;
+					goto done;
+				}
+				if (!substream_range(context, substream, &deferred_begin, &deferred_end) || deferred_begin >= deferred_end) {
+					status = E_INVALIDARG;
+					goto done;
+				}
+				loaded = load_nodes(m, deferred_begin, deferred_end, &root, NULL, &used, context,
+					deferral_depth + 1, effective_theme, effective_theme_length, 0, r.end, NULL);
+				if (FAILED(loaded)) {
+					/* the nested load recorded its own node; the outer record must not overwrite it */
+					nested_failed = TRUE;
+					status = loaded;
+					goto done;
+				}
+				if (root) {
+					raven_xaml_control_template_put_root(stack[depth - 1].object, root);
+					IInspectable_Release(root);
+				}
+			}
 			break;
 		}
 		case 26: case 27: case 30: case 36: {
@@ -2228,12 +2605,15 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						effective_theme, effective_theme_length);
 					if (FAILED(resolved_status) && resolved_status != E_BOUNDS) { status = resolved_status; goto done; }
 					if (SUCCEEDED(resolved_status) && resolved) {
-						applied = raven_xaml_element_apply_value(stack[depth - 1].object, name, length, resolved);
+						/* A skipped scope has no object to receive the resource; the skip convention, not a miss. */
+						applied = stack[depth - 1].object
+							? raven_xaml_element_apply_value(stack[depth - 1].object, name, length, resolved)
+							: S_FALSE;
 						if (target && !context->tolerant && applied != S_OK) trace_resource_failure(value.text, value.length, resolved);
 						IInspectable_Release(resolved);
 					} else if (target && !context->tolerant) trace_resource_failure(value.text, value.length, NULL);
 				}
-				if (target && applied != S_OK && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+				if (target && applied != S_OK && applied != S_FALSE && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
 			} else if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		}
@@ -2248,7 +2628,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length)) &&
 				SUCCEEDED(type_reference_name(m, type_reference, &type_name, &type_length))) {
 				HRESULT applied = raven_xaml_element_set_type(stack[depth - 1].object, name, length, type_name, type_length);
-				if (target && applied != S_OK && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
+				if (target && applied != S_OK && applied != S_FALSE && !context->tolerant) { status = FAILED(applied) ? applied : E_NOTIMPL; goto done; }
 			} else if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		}
@@ -2290,6 +2670,34 @@ done:
 	 * would overwrite it with the outer node. */
 	if (SUCCEEDED(status) && target && !entry_frame && resource_map->remaining && !context->tolerant) {
 		status = E_NOTIMPL;
+		{
+			/* Env-gated loader diagnostic (RAVEN_TRACE_XBF_KEYS): name the deferred entries the load
+			 * executed but never inserted into their dictionary, so the failing resource keys are
+			 * visible. */
+			static int key_trace = -1;
+			char trace_flag[8] = "";
+			if (key_trace < 0)
+				key_trace = GetEnvironmentVariableA("RAVEN_TRACE_XBF_KEYS", trace_flag, sizeof trace_flag) ? 1 : 0;
+			if (key_trace) {
+				char message[160];
+				for (uint32_t i = 0; i < resource_map->capacity && i < 8; ++i) {
+					const struct resource_map_entry *entry = &resource_map->entries[i];
+					const WCHAR *text = NULL;
+					UINT32 text_length = 0;
+					WCHAR truncated[41];
+					if (!entry->token) continue;
+					metadata_string(m, entry->key, &text, &text_length);
+					if (text && text_length) {
+						UINT32 copy = text_length > 40 ? 40 : text_length;
+						memcpy(truncated, text, copy * sizeof(WCHAR));
+						truncated[copy] = 0;
+					} else truncated[0] = 0;
+					wsprintfA(message, "raven-xaml: unconsumed resource '%ls' seen=%u applied=%u\n",
+						truncated[0] ? truncated : L"?", entry->seen, entry->applied);
+					OutputDebugStringA(message);
+				}
+			}
+		}
 		for (uint32_t i = 0; i < resource_map->capacity; ++i)
 			if (resource_map->entries[i].token && !resource_map->entries[i].seen) { status = E_INVALIDARG; break; }
 	}
