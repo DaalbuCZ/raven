@@ -24,13 +24,14 @@ def main():
     link_extra = ["-Wl,--kill-at"] if x86 else []
     bases = dict(comctl32=0x1f000000, user32=0x1f400000, shell=0x1f800000, crt=0x1fc00000) if x86 else dict(
         comctl32=0x1f0000000, user32=0x1f4000000, shell=0x1f8000000, crt=0x1fc000000)
-    wanted = {"comctl32", "user32", "shell", "crt", "dwrite", "d2d1", "uianimation"} if args.components == "all" else set(args.components.split(","))
+    wanted = {"comctl32", "user32", "shell", "crt", "dwrite", "d2d1", "uianimation", "d3d11interop"} if args.components == "all" else set(args.components.split(","))
     if x86:
         # The 32-bit C runtime component is built by the main build; the others are described here.
         wanted.discard("crt")
         wanted.discard("dwrite")
         wanted.discard("d2d1")
         wanted.discard("uianimation")
+        wanted.discard("d3d11interop")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, TMPDIR=str(output), TMP=str(output), TEMP=str(output))
@@ -207,13 +208,32 @@ def main():
                       f"-ffile-prefix-map={repo}=raven"]
         run([triple + "-gcc", "-c", *d2d1_flags, "-I" + str(d2d1_support), d2d1_support / "d2d1.c", "-o", d2d1_objects[0]])
         run([triple + "-gcc", "-c", *d2d1_flags, repo / "native/guest/raven-dwrite/crt.c", "-o", d2d1_objects[1]])
-        # Office binds D2D1CreateFactory by number, as ordinal 1 of the system library.
-        (output / "raven-d2d1.def").write_text("NAME raven-d2d1.dll\nEXPORTS\nD2D1CreateFactory @1\n" + "".join(name + "\n" for name in (
-            "D2D1ComputeMaximumScaleFactor", "D2D1ConvertColorSpace", "D2D1CreateDevice", "D2D1CreateDeviceContext",
-            "D2D1InvertMatrix", "D2D1IsMatrixInvertible", "D2D1MakeRotateMatrix", "D2D1MakeSkewMatrix", "D2D1SinCos", "D2D1Tan", "D2D1Vec3Length")))
+        # The system d2d1.dll exports these by number alone, and its table is not the alphabetical one: Office binds
+        # D2D1CreateFactory as ordinal 1 and Microsoft.Graphics.Canvas.dll binds #5 as D2D1InvertMatrix and #13 as the Coons
+        # patch helper, so the component carries the system library's own ordinals.
+        (output / "raven-d2d1.def").write_text("NAME raven-d2d1.dll\nEXPORTS\n" + "".join(
+            f"{name} @{ordinal}\n" for ordinal, name in enumerate((
+                "D2D1CreateFactory", "D2D1MakeRotateMatrix", "D2D1MakeSkewMatrix", "D2D1IsMatrixInvertible", "D2D1InvertMatrix",
+                "D2D1ConvertColorSpace", "D2D1CreateDevice", "D2D1CreateDeviceContext", "D2D1SinCos", "D2D1Tan", "D2D1Vec3Length",
+                "D2D1ComputeMaximumScaleFactor", "D2D1GetGradientMeshInteriorPointsFromCoonsPatch"), 1)))
         run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,0x1fa000000,--no-insert-timestamp", *link_extra,
              "-o", output / "raven-d2d1.dll", *d2d1_objects, output / "raven-d2d1.def", "-L" + str(output), "-lravenhost", "-ldwrite",
              "-lwindowscodecs", "-luser32", "-lgdi32", "-lkernel32", "-lgcc"])
+    if "d3d11interop" in wanted:
+        # The Direct3D interop component: the two constructors Windows' d3d11.dll exports for handing a COM device or surface to
+        # WinRT (CreateDirect3D11DeviceFromDXGIDevice, CreateDirect3D11SurfaceFromDXGISurface), which the Direct3D library the
+        # runtime provides (DXVK) does not carry. The loader serves a guest's import of them from here when the Direct3D library
+        # lacks them; the wrappers are the runtime objects Windows provides, unwrappable again through IDirect3DDxgiInterfaceAccess.
+        interop_support = repo / "native/guest/raven-d3d11interop"
+        interop_objects = [objects / "d3d11interop.o", objects / "d3d11interop_crt.o"]
+        interop_flags = ["-O2", "-Wall", "-Wno-unused-function", "-Wno-unused-variable", "-ffreestanding", "-fno-builtin",
+                         f"-ffile-prefix-map={repo}=raven"]
+        run([triple + "-gcc", "-c", *interop_flags, "-I" + str(interop_support), interop_support / "d3d11interop.c", "-o", interop_objects[0]])
+        run([triple + "-gcc", "-c", *interop_flags, repo / "native/guest/raven-dwrite/crt.c", "-o", interop_objects[1]])
+        (output / "raven-d3d11interop.def").write_text("NAME raven-d3d11interop.dll\nEXPORTS\nCreateDirect3D11DeviceFromDXGIDevice\nCreateDirect3D11SurfaceFromDXGISurface\n")
+        run([triple + "-gcc", "-shared", "-nostdlib", f"-Wl,--entry,{entry_point},--image-base,0x1f8500000,--no-insert-timestamp", *link_extra,
+             "-o", output / "raven-d3d11interop.dll", *interop_objects, output / "raven-d3d11interop.def", "-L" + str(output),
+             "-lravenhost", "-lwindowsapp", "-lkernel32", "-lgcc"])
     if "uianimation" in wanted:
         # The Windows Animation component: Raven code on the public headers, the classes UIAnimation.dll registers.
         animation_support = repo / "native/guest/raven-uianimation"
@@ -236,7 +256,7 @@ def main():
     result = dict(commands=records,
                   component_sha256={name: hashlib.sha256((output / name).read_bytes()).hexdigest()
                                     for name in ("comctl32.dll", "raven-user32.dll", "raven-shell.dll", "raven-dwrite.dll", "raven-d2d1.dll", "raven-uianimation.dll",
-                                                 "ucrtbase.dll")
+                                                 "raven-d3d11interop.dll", "ucrtbase.dll")
                                     if (output / name).exists()},
                   user32_exports=exported)
     (output / "provenance.json").write_text(json.dumps(result, indent=2) + "\n")

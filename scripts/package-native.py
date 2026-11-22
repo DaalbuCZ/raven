@@ -52,7 +52,7 @@ def runtime_paths(build):
     native = build / "native"
     files = [native / "raven", native / "raven-bootstrap"]
     names = """comctl32.dll raven-user32.dll raven-shell.dll raven-dwrite.dll raven-d2d1.dll
-        raven-uianimation.dll ucrtbase.dll raven-rtl.dll raven-text.dll raven-storage.dll raven-accprop.dll raven-deployment.dll raven-netlist.dll raven-xaml.dll coremessaging.dll d3dcompiler_47.dll libxslt.dll
+        raven-d3d11interop.dll raven-uianimation.dll ucrtbase.dll raven-rtl.dll raven-text.dll raven-storage.dll raven-accprop.dll raven-deployment.dll raven-netlist.dll raven-xaml.dll coremessaging.dll d3dcompiler_47.dll libxslt.dll
         msi.dll cabinet.dll sxs.dll rpcrt4.dll msxml3.dll atl100.dll oleaut32.dll
         libjpeg.dll libtiff.dll propsys.dll mlang.dll windowscodecs.dll gdiplus.dll
         urlmon.dll riched20.dll msftedit.dll msvfw32.dll advpack.dll mspatcha.dll vbscript.dll scrrun.dll wshom.ocx jscript.dll raven-setupapi.dll xmllite.dll winsqlite3.dll raven-web.dll raven-appx.dll raven-wmi.dll raven-ieframe.dll raven-webengine.dll raven-twinapi.dll
