@@ -25,6 +25,14 @@ static std::string module_name(std::string name)
 	return name;
 }
 
+// A few of the system libraries' exports are the runtime's own work rather than the libraries': the Direct3D library the runtime
+// provides (DXVK) does not carry the two Direct3D-WinRT interop constructors Windows' d3d11.dll exports, and the runtime's
+// interop component beside itself does. A guest's import of them resolves through that component once the loader has started it.
+static const std::map<std::pair<std::string_view, std::string_view>, std::string_view> served_exports{
+	{{"d3d11.dll", "createdirect3d11devicefromdxgidevice"}, "raven-d3d11interop.dll"},
+	{{"d3d11.dll", "createdirect3d11surfacefromdxgisurface"}, "raven-d3d11interop.dll"},
+};
+
 std::optional<ModuleBytes> ModuleBytes::map(const std::filesystem::path &path)
 {
 	const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -194,6 +202,21 @@ void ModuleSet::remove(const PEModule &module)
 	modules.erase(found);
 }
 
+std::string_view ModuleSet::serving_module(std::string_view module, std::string_view name)
+{
+	std::string lowered(module);
+	for (auto &character : lowered)
+		if (character >= 'A' && character <= 'Z')
+			character = static_cast<char>(character + ('a' - 'A'));
+	std::string lowered_name(name);
+	for (auto &character : lowered_name)
+		if (character >= 'A' && character <= 'Z')
+			character = static_cast<char>(character + ('a' - 'A'));
+	if (const auto found = served_exports.find({lowered, lowered_name}); found != served_exports.end())
+		return found->second;
+	return {};
+}
+
 uint64_t ModuleSet::resolve(const PEImport &symbol) const
 {
 	std::set<std::pair<std::string, uint32_t>> chain;
@@ -235,8 +258,21 @@ uint64_t ModuleSet::resolve(std::string module, std::string name, uint32_t ordin
 		exported = std::find_if(target.exports.begin(), target.exports.end(), [&](const auto &entry) {
 			return std::find(entry.names.begin(), entry.names.end(), name) != entry.names.end();
 		});
-	if (exported == target.exports.end() || !exported->address)
+	if (exported == target.exports.end() || !exported->address) {
+		// An export a system library lacks here may be one the runtime serves from its own component, started when a program's
+		// import needed it: d3d11.dll's Direct3D-WinRT interop constructors are the Direct3D library's gap and the interop
+		// component's work, and the guest imports them from d3d11.dll all the same.
+		if (!by_ordinal)
+			if (const auto serving = serving_module(module, name); !serving.empty()) {
+				if (const auto found = modules.find(std::string(serving)); found != modules.end()) {
+					// The import keeps the name of the library it names, so the path records the library before the component.
+					if (path)
+						path->push_back(&target);
+					return resolve(std::string(serving), name, 0, false, chain, path);
+				}
+			}
 		throw std::runtime_error("missing PE export: " + module + "!" + (by_ordinal ? "#" + std::to_string(ordinal) : name));
+	}
 	if (!chain.emplace(module, exported->ordinal).second || chain.size() > 256)
 		throw std::runtime_error("cyclic or excessive PE forwarder chain");
 	if (exported->forwarder.empty())

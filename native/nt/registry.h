@@ -94,6 +94,8 @@ private:
 	void register_animation_classes();
 	void register_event_logs();
 	void register_system_environment();
+	// The device registry key of the synthetic monitor with its EDID, where display configuration callers read display metadata from.
+	void register_monitor_edid();
 	bool seeding = false;
 };
 

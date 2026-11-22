@@ -167,11 +167,18 @@ struct WaylandPresentation::State {
 	uint64_t selection_counter=0;
 	std::map<uint64_t,std::unique_ptr<Surface>> surfaces;
 	// A surface a graphics driver renders to for one window of the program: a subsurface of the host window of its root, stacked over it
-	// while the window shows and under it while hidden, where the compositor still paces the driver's frames; without a role while the
-	// root has no host window, so that the driver keeps a valid surface while nothing shows it.
+	// while the window shows and under it while hidden, where the compositor still paces the driver's frames; a surface with no host
+	// window keeps an unmapped xdg toplevel of its own, so the driver keeps a valid, configured surface while nothing shows it.
 	struct Hosted {
 		wl_surface *proxy=nullptr;
 		wl_subsurface *role=nullptr;
+		// The surface's own role while it belongs to no presented window: a composition swap chain's driver renders into a window the
+		// program never shows (DXVK's dummy window for CreateSwapChainForComposition), and Mesa's Wayland WSI answers every surface
+		// query for a roleless surface with VK_ERROR_SURFACE_LOST, so it stands as an xdg toplevel of its own, which never maps because
+		// nothing shows the window. A role of the window's own is dropped again when a presented host window appears to attach to.
+		xdg_surface *own_shell=nullptr;
+		xdg_toplevel *own_role=nullptr;
+		bool own_configured=false;
 		uint64_t parent=0;
 		int32_t x=0,y=0;
 		bool placed=false,above=false;
@@ -182,8 +189,14 @@ struct WaylandPresentation::State {
 		wp_viewport *viewport=nullptr;
 #endif
 		void drop_role() { if (role) wl_subsurface_destroy(role); role=nullptr; parent=0; placed=false; }
+		void drop_own() {
+			if (own_role) xdg_toplevel_destroy(own_role);
+			if (own_shell) xdg_surface_destroy(own_shell);
+			own_role=nullptr; own_shell=nullptr; own_configured=false;
+		}
 		~Hosted() {
 			drop_role();
+			drop_own();
 #ifdef RAVEN_WAYLAND_VIEWPORTER
 			if (viewport) wp_viewport_destroy(viewport);
 #endif
@@ -849,11 +862,37 @@ struct WaylandPresentation::State {
 		const bool moved=entry->role && (!parent || entry->parent!=parent->serial);
 		if (moved) entry->drop_role();
 		bool changed=moved;
+		// A surface that stood alone takes the window's role when its host window presents; a surface with no host window keeps one of
+		// its own, configured before this returns, for a driver may attach its first buffer as soon as the surface reaches it.
+		if (parent && entry->own_shell)
+			entry->drop_own();
 		if (parent && !entry->role) {
 			entry->role=wl_subcompositor_get_subsurface(subcompositor,entry->proxy,parent->proxy);
 			wl_subsurface_set_desync(entry->role);
 			entry->parent=parent->serial;
 			entry->above=true;
+		}
+		if (!parent && !entry->role && shell && !entry->own_shell) {
+			static const bool trace=std::getenv("RAVEN_TRACE_API");
+			if (trace) std::fprintf(stderr,"wayland: hosted surface %llu of window %llu has no host window; giving it its own xdg role\n",
+				(unsigned long long)window,(unsigned long long)handle);
+			entry->own_shell=xdg_wm_base_get_xdg_surface(shell,entry->proxy);
+			static const xdg_surface_listener own_surface_listener{[](void *data,xdg_surface *surface,uint32_t serial) {
+				xdg_surface_ack_configure(surface,serial);
+				static_cast<Hosted *>(data)->own_configured=true;
+			}};
+			static const xdg_toplevel_listener own_toplevel_listener{
+				[](void *,xdg_toplevel *,int32_t,int32_t,wl_array *) {},
+				[](void *,xdg_toplevel *) {}};
+			xdg_surface_add_listener(entry->own_shell,&own_surface_listener,entry.get());
+			entry->own_role=xdg_surface_get_toplevel(entry->own_shell);
+			xdg_toplevel_add_listener(entry->own_role,&own_toplevel_listener,entry.get());
+			wl_surface_commit(entry->proxy);
+			// The compositor's first configure makes attaching a buffer legal; the surface stays unmapped until a buffer comes.
+			const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+			while (!entry->own_configured && std::chrono::steady_clock::now()<end) events(std::chrono::milliseconds(20));
+			if (trace) std::fprintf(stderr,"wayland: hosted surface %llu own role configured=%d\n",(unsigned long long)window,entry->own_configured);
+			if (!entry->own_configured) entry->drop_own();
 		}
 		if (parent && (!entry->placed || entry->x!=x || entry->y!=y)) {
 			wl_subsurface_set_position(entry->role,x,y);

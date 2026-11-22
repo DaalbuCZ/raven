@@ -3,8 +3,11 @@
 #include "heap.h"
 #include "memory.h"
 
+#include <algorithm>
 #include <array>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -14,6 +17,10 @@ namespace raven {
 // Blocks come from the process heap when the RTL component provides one. Otherwise blocks up to 4 KB share 64 KB chunks of private pages,
 // cut in sizes that are powers of two from 16 bytes, the freed ones of each size kept for the next request of that size; a larger block
 // has pages of its own. A reservation per small block would spend 64 KB of address space on each, which a 32-bit program runs out of.
+//
+// Guest threads reach this class from concurrent API dispatch, so every call runs under one guard. A movable handle carries Windows'
+// GlobalLock lock count: a nonzero count makes the handle's GlobalReAlloc fail, and the resize of an unlocked handle (allocate, copy,
+// re-point, release the moved block) runs as one guarded step, so a lock that lands during it resolves the new pointer whole.
 class GuestAllocator {
 public:
 	GuestAllocator(NativeMemory &memory, NativeHeap &heap) : memory(memory), heap(heap) {}
@@ -27,14 +34,27 @@ public:
 	// reads a handle as a pointer keeps working until the block first moves; the first block then stays behind as the handle's anchor.
 	uint64_t allocate_movable(uint64_t size, bool zero);
 	void make_movable(uint64_t address);
-	bool movable(uint64_t handle) const { return movable_blocks.contains(handle); }
+	bool movable(uint64_t handle) const;
 	// The block a handle stands for, and the handle of a block; anything else maps to itself.
 	uint64_t data(uint64_t handle) const;
 	uint64_t handle(uint64_t block) const;
 	// The block of a movable handle is now `block`; the one it had is released.
 	void move(uint64_t handle, uint64_t block);
 	// A block asked for with no bytes reports size zero, whatever the allocator set aside for it.
-	void mark_empty(uint64_t block) { empty.insert(block); }
+	void mark_empty(uint64_t block);
+	// GlobalLock: resolves the handle and counts the lock in one step, so a resize can neither slip between the
+	// resolution and the count nor move the block under the pointer it returns. UINT64_MAX when the handle is not a
+	// block of this allocator; zero when a movable handle's object is discarded (nothing to lock).
+	uint64_t acquire(uint64_t handle, bool *discarded);
+	// GlobalUnlock: lowers the count of a movable handle. `still` answers whether a count remains, `was_locked`
+	// whether the handle had one at all; the return says what GlobalLock's counterpart reports.
+	bool unlock_movable(uint64_t handle, bool *was_locked, bool *still);
+	// GlobalReAlloc of a movable handle, as one guarded step against the handle's other calls: false in `locked` —
+	// the caller fails the realloc, as Windows reallocates nothing of a locked object — otherwise the handle back
+	// (or zero on exhaustion) with the new block allocated, the old bytes carried by `copy` and the moved block
+	// released while the handle's lock, size and free calls wait on the guard for the whole of it.
+	uint64_t reallocate_movable(uint64_t handle, uint64_t size, bool zero, bool *locked,
+		const std::function<void (uint64_t, uint64_t, uint64_t)> &copy);
 
 private:
 	static constexpr size_t size_classes = 9;
@@ -46,9 +66,13 @@ private:
 	std::array<std::vector<uint64_t>, size_classes> free_blocks;
 	std::array<std::pair<uint64_t, uint64_t>, size_classes> cutting{};
 	std::map<uint64_t, uint64_t> movable_blocks, moved_blocks;
+	std::map<uint64_t, uint32_t> lock_counts;
+	mutable std::recursive_mutex guard;
 	std::set<uint64_t> empty;
 	bool release_block(uint64_t address);
 	void forget(uint64_t address);
+	uint64_t size_of(uint64_t address);
+	uint64_t allocate_impl(uint64_t size, bool zero);
 };
 
 }

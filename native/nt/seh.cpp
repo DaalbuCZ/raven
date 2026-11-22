@@ -345,6 +345,33 @@ public:
 						const auto text = context.process.read_memory(message, 200);
 						std::fprintf(stderr, "raven:   what %s\n", std::string(reinterpret_cast<const char *>(text.data()), strnlen(reinterpret_cast<const char *>(text.data()), text.size())).c_str());
 					}
+					// The throwing thread's stack, its pointer-like values resolved to modules — the
+					// managed call chain that raised the C++ exception, which names the throwing site's
+					// callers. Gated on RAVEN_DUMP_THROW_STACK.
+					if (std::getenv("RAVEN_DUMP_THROW_STACK")) {
+						uint64_t throw_rsp = 0;
+						std::memcpy(&throw_rsp, origin.data() + 0x98, 8);
+						std::fprintf(stderr, "raven:   throw stack scan (rsp %llx):", (unsigned long long)throw_rsp);
+						for (uint64_t page = throw_rsp & ~0xfffULL; page < (throw_rsp & ~0xfffULL) + 0x8000; page += 0x1000) {
+							std::vector<uint8_t> page_bytes;
+							try {
+								page_bytes = context.process.read_memory(page, 0x1000);
+							} catch (const std::exception &) {
+								break;
+							}
+							for (size_t at = (page == (throw_rsp & ~0xfffULL) ? throw_rsp & 0xfff : 0); at + 8 <= page_bytes.size(); at += 8) {
+								uint64_t value = 0;
+								std::memcpy(&value, page_bytes.data() + at, 8);
+								if (value < 0x10000)
+									continue;
+								const auto *owner = unwinder.module_at(value);
+								std::fprintf(stderr, "\nraven:     %llx %llx", (unsigned long long)(page + at), (unsigned long long)value);
+								if (owner)
+									std::fprintf(stderr, " (%s+%llx)", owner->name.c_str(), (unsigned long long)(value - owner->loaded.base()));
+							}
+						}
+						std::fprintf(stderr, "\n");
+					}
 					// A program's own error object names its message too: any field pointing at narrow or wide text shows it.
 					for (size_t at = 8; at < bytes.size(); at += 8) {
 						uint64_t field = 0;

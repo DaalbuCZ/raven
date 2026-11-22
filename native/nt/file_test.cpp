@@ -69,6 +69,9 @@ int main(int argc,char **argv)
 			check(result.stop==raven::NativeStop::returned,"file API did not return");return result.value;
 		};
 		check(invoke("GetStdHandle",{uint32_t(-11)})==live.value,"standard handle is not the owned file");
+		// The UINT64_MAX slots mean the launch supplied no standard handle; Windows answers NULL for those, not INVALID_HANDLE_VALUE.
+		check(!invoke("GetStdHandle",{uint32_t(-10)}) && !invoke("GetStdHandle",{uint32_t(-12)}),
+			"absent standard handle is not answered as NULL");
 		const auto memory=process.map_memory(8192,PROT_READ | PROT_WRITE);
 		process.write_memory(memory,marker);process.protect_memory(memory+4096,4096,PROT_NONE);
 		const auto position=lseek(fd,0,SEEK_CUR);

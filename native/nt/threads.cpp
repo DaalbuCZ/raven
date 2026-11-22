@@ -5,6 +5,7 @@
 #include <iostream>
 
 #include "api.h"
+#include "kernel_context.h"
 #include "shared_file.h"
 #include "inherit.h"
 
@@ -208,6 +209,37 @@ void NativeThreads::thread_main(GuestThread &thread)
 				throw;
 			} catch (const std::exception &error) {
 				std::cerr << "raven: guest thread " << thread.id << " failed in " << api_in_progress << ": " << error.what() << "\n";
+			} catch (const ProcessExit &exit) {
+				// An exit the guest itself called (the CRT's abort path ends as exit(3), for one) reaches this thread first: name it,
+				// for a wall of the program's own deciding is not a runtime stop.
+				std::cerr << "raven: guest thread " << thread.id << " ended the process with exit code " << exit.code << " (the guest's own "
+					<< (exit.terminated ? "terminate" : "exit") << " call, last API " << api_in_progress << ")\n";
+			} catch (const NativeResult &result) {
+				// A stop the runtime did not answer: name its kind and instruction, for a bare stop hides which of the seven ends it was.
+				std::cerr << "raven: guest thread " << thread.id << " ended with a stop";
+				switch (result.stop) {
+				case NativeStop::exited:
+					std::cerr << ": exit code " << result.value;
+					break;
+				case NativeStop::fault:
+					std::cerr << ": fault signal " << result.signal << " at 0x" << std::hex << result.instruction << std::dec;
+					if (result.fault_address)
+						std::cerr << " (address 0x" << std::hex << result.fault_address << ')' << std::dec;
+					break;
+				case NativeStop::syscall:
+					std::cerr << ": unsupported syscall " << result.value << " at 0x" << std::hex << result.instruction << std::dec;
+					break;
+				case NativeStop::api:
+					std::cerr << ": unimplemented API at 0x" << std::hex << result.instruction << std::dec;
+					break;
+				case NativeStop::exception:
+					std::cerr << ": structured exception 0x" << std::hex << result.value << " at 0x" << result.instruction << std::dec;
+					break;
+				default:
+					std::cerr << ' ' << int(result.stop) << " value " << result.value;
+					break;
+				}
+				std::cerr << " (last API " << api_in_progress << ")\n";
 			} catch (...) {
 				std::cerr << "raven: guest thread " << thread.id << " ended with a stop\n";
 			}

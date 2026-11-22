@@ -1083,6 +1083,18 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 	}
 	(void)error_no_more_items;
 	(void)error_file_not_found;
+	// The device registry key SetupDiOpenDevRegKey opens for the synthetic monitor: the display instance's device parameters,
+	// whose EDID value is where display configuration callers read the monitor's metadata from. The key handle joins the same
+	// handle space as the program's own keys, so the RegQueryValueEx the caller follows with reads the EDID through it.
+	registry.add("SetupDiOpenDevRegKey", 6, [&hive](ApiCall &call) {
+		uint64_t key = 0;
+		const auto status = hive.open(0x80000002ULL, u"SYSTEM\\CurrentControlSet\\Enum\\DISPLAY\\RAVEN0000\\5&2f5f805e&0&UID256\\Device Parameters", key);
+		if (status) {
+			call.fail(status, UINT64_MAX);
+			return;
+		}
+		call.ret(key);
+	});
 }
 
 }

@@ -1256,16 +1256,160 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 	registry.add("SetProcessDPIAware", 0, [](ApiCall &call) { call.ret(1); });
 	registry.add("IsProcessDPIAware", 0, [](ApiCall &call) { call.ret(1); });
 	registry.add("SetProcessDpiAwarenessContext", 1, [](ApiCall &call) { call.ret(1); });
-	// There is no display topology to report: callers fall back to their single-monitor behavior.
-	registry.add("GetDisplayConfigBufferSizes", 3, [](ApiCall &call) {
-		if (call[1]) call.store<uint32_t>(call[1], 0);
-		if (call[2]) call.store<uint32_t>(call[2], 0);
-		call.ret(50);
+	// The one display is one active topology path: callers of the display configuration API are told of one source and one
+	// target, with the desktop's one mode described once as a source mode and once as a target mode. Only the request flags
+	// Windows itself rejects (unknown bits, or mutually exclusive scope choices) answer ERROR_INVALID_PARAMETER here too.
+	const auto display_config_flags_valid = [](uint32_t flags) {
+		const uint32_t all_paths = 1, active_only = 2, database_current = 4, virtual_mode_aware = 0x10, include_hmd = 0x20,
+			virtual_refresh_aware = 0x40, include_monitors = 0x80, include_accessible = 0x100;
+		if (flags & ~(all_paths | active_only | database_current | virtual_mode_aware | include_hmd | virtual_refresh_aware | include_monitors | include_accessible))
+			return false;
+		return !(flags & all_paths) || !(flags & (active_only | database_current));
+	};
+	registry.add("GetDisplayConfigBufferSizes", 3, [display_config_flags_valid](ApiCall &call) {
+		if (!display_config_flags_valid(call.u32(0))) {
+			call.fail(87);
+			return;
+		}
+		if (call[1]) call.store<uint32_t>(call[1], 1);
+		if (call[2]) call.store<uint32_t>(call[2], 2);
+		call.ret(0);
 	});
-	registry.add("QueryDisplayConfig", 6, [](ApiCall &call) {
-		if (call[1]) call.store<uint32_t>(call[1], 0);
-		if (call[3]) call.store<uint32_t>(call[3], 0);
-		call.ret(50);
+	// DISPLAYCONFIG_PATH_INFO is one source and one target info over the path flags; DISPLAYCONFIG_MODE_INFO is a header and
+	// the union of a source and a target mode. Both layouts hold for either caller width.
+	registry.add("QueryDisplayConfig", 6, [this, display_config_flags_valid](ApiCall &call) {
+		const auto &metrics = objects.nonclient_metrics();
+		if (!display_config_flags_valid(call.u32(0)) || !call[1] || !call[3]) {
+			call.fail(87);
+			return;
+		}
+		const uint32_t path_count = 1, mode_count = 2;
+		if (call.u32(1) < path_count || call.u32(3) < mode_count) {
+			if (call[1]) call.store<uint32_t>(call[1], path_count);
+			if (call[3]) call.store<uint32_t>(call[3], mode_count);
+			call.fail(122);
+			return;
+		}
+		if (call[2]) {
+			std::vector<uint8_t> path(72, 0);
+			const auto put = [&](size_t at, uint64_t value, size_t width) {
+				for (size_t byte = 0; byte < width; ++byte) path[at + byte] = uint8_t(value >> (byte * 8));
+			};
+			put(0, 1, 8);                    // the one adapter every part of the topology hangs off
+			put(20, 1, 8);                   // the same adapter owns the target
+			put(12, 0xffff, 4);              // source mode index 0, and no clone group
+			put(16, 1, 4);                   // source in use
+			put(32, 0x1ffff, 4);             // target mode index 1, and no desktop image
+			put(36, 0x80000000U, 4);         // an internal panel of the headless host display
+			put(40, 1, 4);                   // rotation identity
+			put(44, 1, 4);                   // scaling identity
+			put(48, 60000, 4);               // the mode's 60 Hz as a rational with room for fractional rates
+			put(52, 1000, 4);
+			put(56, 1, 4);                   // progressive scan
+			put(60, 1, 4);                   // the target exists
+			put(64, 1, 4);                   // target in use
+			put(68, 1, 4);                   // the path is active
+			call.write(call[2], path);
+		}
+		if (call[4]) {
+			const auto put = [](std::vector<uint8_t> &bytes, size_t at, uint64_t value, size_t width) {
+				for (size_t byte = 0; byte < width; ++byte) bytes[at + byte] = uint8_t(value >> (byte * 8));
+			};
+			std::vector<uint8_t> source_mode(64, 0);
+			put(source_mode, 0, 1, 4);       // DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE
+			put(source_mode, 8, 1, 8);       // the same one adapter
+			put(source_mode, 16, uint32_t(metrics.screen_x), 4);
+			put(source_mode, 20, uint32_t(metrics.screen_y), 4);
+			put(source_mode, 24, 4, 4);      // 32 bpp GDI pixel format
+			std::vector<uint8_t> target_mode(64, 0);
+			put(target_mode, 0, 2, 4);       // DISPLAYCONFIG_MODE_INFO_TYPE_TARGET
+			put(target_mode, 8, 1, 8);
+			// The CEA-861 1920x1080@60 timing, so a mode the source reports is one the target can show.
+			put(target_mode, 16, 148500000ULL, 8);  // 148.5 MHz pixel clock
+			put(target_mode, 24, 135, 4);    // 67.5 kHz horizontal sync
+			put(target_mode, 28, 2, 4);
+			put(target_mode, 32, 60, 4);     // 60 Hz vertical sync
+			put(target_mode, 36, 1, 4);
+			put(target_mode, 40, uint32_t(metrics.screen_x), 4);
+			put(target_mode, 44, uint32_t(metrics.screen_y), 4);
+			put(target_mode, 48, 2200, 4);   // the total raster the timing blanks to
+			put(target_mode, 52, 1125, 4);
+			put(target_mode, 60, 1, 4);      // progressive scan
+			call.write(call[4], source_mode);
+			call.write(call[4] + 64, target_mode);
+		}
+		if (call[1]) call.store<uint32_t>(call[1], path_count);
+		if (call[3]) call.store<uint32_t>(call[3], mode_count);
+		call.ret(0);
+	});
+	// The one packet types callers read on the way from a path to its monitor: the GDI device name of the source, the monitor
+	// device path of the target, and how bright the panel gets. Struct-version mismatches answer ERROR_INVALID_PARAMETER as
+	// the real display configuration API does.
+	registry.add("DisplayConfigGetDeviceInfo", 1, [this](ApiCall &call) {
+		const auto &metrics = objects.nonclient_metrics();
+		if (!call[0]) {
+			call.fail(87, 87);
+			return;
+		}
+		const uint32_t type = call.load<uint32_t>(call[0]), size = call.load<uint32_t>(call[0] + 4);
+		// DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME / GET_TARGET_NAME / GET_ADAPTER_NAME / GET_ADVANCED_COLOR_INFO / GET_SDR_WHITE_LEVEL.
+		constexpr uint32_t get_source_name = 1, get_target_name = 2, get_adapter_name = 4, get_advanced_color_info = 9, get_sdr_white_level = 11;
+		// The header ends after the adapter LUID and id; the wide names follow it. One byte length per width.
+		constexpr size_t header = 20, source_name = 84, target_name = 420, adapter_name = 276, advanced_color_info = 32, sdr_white_level = 24;
+		size_t expected = 0;
+		switch (type) {
+		case get_source_name: expected = source_name; break;
+		case get_target_name: expected = target_name; break;
+		case get_adapter_name: expected = adapter_name; break;
+		case get_advanced_color_info: expected = advanced_color_info; break;
+		case get_sdr_white_level: expected = sdr_white_level; break;
+		default:
+			// The display configuration calls report their status as the return value itself, not through the last error.
+			call.fail(50, 50);
+			return;
+		}
+		if (size != expected) {
+			call.fail(87, 87);
+			return;
+		}
+		// The answer fills the packet after its header: the header itself stays what the caller wrote, since the caller reads
+		// the request type back out of it.
+		std::vector<uint8_t> packet(size - header, 0);
+		const auto put = [&](size_t at, std::u16string_view text) {
+			std::memcpy(packet.data() + at, text.data(), text.size() * 2);
+		};
+		switch (type) {
+		case get_source_name:
+			put(0, u"\\\\.\\DISPLAY1");
+			break;
+		case get_target_name: {
+			put(16, u"Raven Monitor");
+			put(144, u"\\\\?\\DISPLAY#RAVEN0000#5&2f5f805e&0&UID256#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}");
+			const uint32_t flags = 0x5;  // the friendly name and the ids come from the EDID
+			std::memcpy(packet.data() + 0, &flags, 4);
+			const uint32_t output_technology = 0x80000000U;  // internal
+			std::memcpy(packet.data() + 4, &output_technology, 4);
+			const uint16_t manufacture_id = 0x4ace, product_code_id = 1;
+			std::memcpy(packet.data() + 8, &manufacture_id, 2);
+			std::memcpy(packet.data() + 10, &product_code_id, 2);
+			break;
+		}
+		case get_adapter_name:
+			put(0, u"\\\\.\\DISPLAY1");
+			break;
+		case get_advanced_color_info:
+			packet[0] = 0;               // an sRGB panel: no advanced color to enable
+			packet[4] = 0;               // RGB encoding
+			packet[8] = 8;               // eight bits per color channel
+			break;
+		case get_sdr_white_level: {
+			const uint32_t level = 1000;  // 80 nits: the level counts 1/1000 of the 80 nit reference white
+			std::memcpy(packet.data(), &level, 4);
+			break;
+		}
+		}
+		call.write(call[0] + header, packet);
+		call.ret(0);
 	});
 }
 

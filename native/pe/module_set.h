@@ -67,6 +67,9 @@ public:
 	size_t bind_imports();
 	// Lets imports that name an API set contract resolve through the module that implements it.
 	void add_alias(std::string name, std::string target);
+	// The runtime's own component that serves a system library's export, when one does: an empty view when the export belongs to
+	// the library itself. Both names are taken as the guest writes them.
+	static std::string_view serving_module(std::string_view module, std::string_view name);
 
 private:
 	std::map<std::string, std::unique_ptr<PEModule>> modules;

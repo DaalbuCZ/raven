@@ -124,6 +124,7 @@ NativeRegistry::NativeRegistry(std::filesystem::path file) : file(std::move(file
 	register_runtime_classes();
 	register_event_logs();
 	register_system_environment();
+	register_monitor_edid();
 }
 
 // The classes Windows registers in both registry views whose libraries the runtime brings: the .NET runtime's metadata dispensers, runtime
@@ -233,6 +234,7 @@ void NativeRegistry::register_runtime_classes()
 	static constexpr std::pair<const char16_t *, const char16_t *> runtime_classes[] = {
 		{u"Windows.Management.Deployment.PackageManager", u"raven-deployment.dll"},
 		{u"Windows.UI.ViewManagement.UISettings", u"raven-uisettings.dll"},
+		{u"Windows.UI.ViewManagement.AccessibilitySettings", u"raven-uisettings.dll"},
 		{u"Windows.Globalization.Language", u"raven-twinapi.dll"},
 		{u"Windows.Globalization.ApplicationLanguages", u"raven-xaml.dll"},
 		{u"Windows.System.Profile.RetailInfo", u"raven-twinapi.dll"}, {u"Windows.System.Profile.SharedModeSettings", u"raven-twinapi.dll"},
@@ -245,16 +247,22 @@ void NativeRegistry::register_runtime_classes()
 		{u"Windows.UI.Core.CoreCursor", u"raven-xaml.dll"},
 		{u"Windows.UI.Core.CoreWindow", u"raven-xaml.dll"},
 		{u"Windows.UI.Colors", u"raven-xaml.dll"},
+		{u"Windows.UI.ColorHelper", u"raven-xaml.dll"},
 		{u"Windows.UI.ViewManagement.ApplicationView", u"raven-xaml.dll"},
+		{u"Windows.Graphics.Display.DisplayInformation", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Application", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Input.FocusManager", u"raven-xaml.dll"},
 		{u"Windows.Storage.StorageFile", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.DependencyObject", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.UIElement", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.DependencyProperty", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.PropertyMetadata", u"raven-xaml.dll"},
 		{u"Windows.Foundation.Collections.PropertySet", u"raven-xaml.dll"},
 		{u"Windows.Foundation.PropertyValue", u"raven-xaml.dll"},
 		{u"Windows.Foundation.Uri", u"raven-web.dll"},
 		{u"Windows.UI.Xaml.Controls.ControlTemplate", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.Control", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.UserControl", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Window", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.Frame", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.Page", u"raven-xaml.dll"},
@@ -262,15 +270,31 @@ void NativeRegistry::register_runtime_classes()
 		{u"Windows.UI.Xaml.Controls.TextBlock", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.Button", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.SwapChainPanel", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.ContentDialog", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.ContentPresenter", u"raven-xaml.dll"},
+		{u"Windows.Media.Core.CodecQuery", u"raven-xaml.dll"},
+		{u"Windows.Media.Core.CodecSubtypes", u"raven-xaml.dll"},
 		{u"Windows.UI.Composition.Compositor", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.RowDefinition", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.ColumnDefinition", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.Border", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.StackPanel", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Controls.Image", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Shapes.Rectangle", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Setter", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.VisualState", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.VisualStateGroup", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Media.Animation.SuppressNavigationTransitionInfo", u"raven-xaml.dll"},
 		{u"Windows.System.DispatcherQueueController", u"raven-xaml.dll"},
 		{u"Windows.ApplicationModel.Package", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.ResourceDictionary", u"raven-xaml.dll"},
 		{u"Microsoft.UI.Xaml.Controls.XamlControlsResources", u"raven-xaml.dll"},
 		{u"Windows.ApplicationModel.Resources.Core.ResourceManager", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Style", u"raven-xaml.dll"},
+		{u"Windows.UI.Xaml.Media.SolidColorBrush", u"raven-xaml.dll"},
+		{u"Microsoft.UI.Xaml.Media.SolidColorBrush", u"raven-xaml.dll"},
+		{u"Windows.Security.Cryptography.Core.HashAlgorithmProvider", u"raven-xaml.dll"},
+		{u"Windows.Security.Cryptography.CryptographicBuffer", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Controls.Primitives.FrameworkElementAutomationPeer", u"raven-xaml.dll"},
 		{u"Windows.UI.Xaml.Automation.AutomationProperties", u"raven-xaml.dll"},
 		{u"Windows.Storage.Streams.DataWriter", u"raven-xaml.dll"},
@@ -278,6 +302,11 @@ void NativeRegistry::register_runtime_classes()
 		{u"Windows.Storage.PathIO", u"raven-xaml.dll"},
 		{u"Windows.ApplicationModel.Resources.Core.ResourceContext", u"raven-xaml.dll"},
 		{u"Windows.System.MemoryManager", u"raven-xaml.dll"},
+		{u"Windows.System.Diagnostics.SystemDiagnosticInfo", u"raven-xaml.dll"},
+		{u"Windows.Devices.Display.DisplayMonitor", u"raven-xaml.dll"},
+		{u"Windows.Devices.Enumeration.DeviceInformation", u"raven-xaml.dll"},
+		{u"Windows.Graphics.Imaging.BitmapTransform", u"raven-xaml.dll"},
+		{u"Windows.Graphics.Imaging.BitmapDecoder", u"raven-xaml.dll"},
 		{u"Windows.System.Profile.SystemManufacturers.SystemSupportInfo", u"raven-xaml.dll"},
 		{u"Windows.System.UserProfile.GlobalizationPreferences", u"raven-xaml.dll"},
 		{u"Windows.Data.Xml.Dom.XmlDocument", u"raven-xaml.dll"},
@@ -286,9 +315,11 @@ void NativeRegistry::register_runtime_classes()
 		{u"Windows.Data.Xml.Dom.XmlLoadSettings", u"raven-xaml.dll"},
 		{u"Windows.ApplicationModel.Core.CoreApplication", u"raven-xaml.dll"},
 		{u"Windows.System.DispatcherQueue", u"raven-xaml.dll"},
+		{u"Windows.System.Threading.ThreadPool", u"raven-xaml.dll"},
 		{u"Windows.Web.Http.HttpClient", u"raven-web.dll"},
 		{u"Windows.Web.Http.HttpMethod", u"raven-web.dll"}, {u"Windows.Web.Http.HttpRequestMessage", u"raven-web.dll"},
 		{u"Windows.Web.Http.HttpResponseMessage", u"raven-web.dll"}, {u"Windows.Web.Http.Filters.HttpBaseProtocolFilter", u"raven-web.dll"},
+		{u"Windows.Web.Http.HttpBufferContent", u"raven-web.dll"},
 		{u"Windows.Web.Http.Headers.HttpDateOrDeltaHeaderValue", u"raven-web.dll"}};
 	for (const bool wow : {false, true})
 		for (const auto &[name, library] : runtime_classes) {
@@ -336,7 +367,66 @@ void NativeRegistry::register_system_environment()
 	close(key);
 }
 
-// The event logs every Windows installation keeps, under the service that writes them: programs register their event sources as subkeys
+// The EDID of the runtime's synthetic monitor lives where Windows keeps a monitor's EDID, under the device registry key of its
+// display instance: callers of the display configuration API walk from the target's device path there and read the base block to
+// learn what the panel is and what colors it shows. The synthesized block describes the host's headless display: a digital panel
+// whose preferred detailed timing is the desktop's 1920x1080@60 mode, with the sRGB primaries and a 80 nit reference white. The
+// device path and instance match the ones DisplayConfigGetDeviceInfo answers with.
+void NativeRegistry::register_monitor_edid()
+{
+	const std::u16string path = u"SYSTEM\\CurrentControlSet\\Enum\\DISPLAY\\RAVEN0000\\5&2f5f805e&0&UID256\\Device Parameters";
+	if (keys.contains(fold(u"HKEY_LOCAL_MACHINE\\" + path)))
+		return;
+	uint64_t key = 0;
+	uint32_t disposition = 0;
+	if (create(0x80000002ULL, path, key, disposition))
+		return;
+	std::vector<uint8_t> edid(128, 0);
+	const auto put = [&](size_t at, uint64_t value, size_t width) {
+		for (size_t byte = 0; byte < width; ++byte) edid[at + byte] = uint8_t(value >> (byte * 8));
+	};
+	const auto text = [&](size_t at, uint8_t tag, std::string_view value) {
+		put(at, 0, 3);
+		edid[at + 3] = tag;
+		edid[at + 4] = 0;
+		for (size_t index = 0; index < 13; ++index)
+			edid[at + 5 + index] = index < value.size() ? uint8_t(value[index]) : index == value.size() ? 0x0a : 0x20;
+	};
+	edid[0] = 0x00;
+	for (size_t byte = 1; byte < 7; ++byte) edid[byte] = 0xff;
+	put(8, 0x4ace, 2);          // the manufacturer's three letter PnP id, "RVN"
+	put(10, 1, 2);              // product code
+	put(16, 1, 1);              // week of manufacture
+	put(17, 36, 1);             // 2026
+	edid[18] = 1;
+	edid[19] = 4;               // EDID 1.4
+	edid[20] = 0x80;            // a digital input
+	edid[21] = 53;
+	edid[22] = 30;              // a 24 inch 16:9 panel is 53 by 30 centimetres
+	edid[23] = 140;             // gamma 2.20
+	edid[24] = 0x06;            // the detailed timing is the preferred mode
+	// The sRGB chromaticity: red, green, blue and the white point, each coordinate a 10 bit fraction of 1.
+	put(25, 0xee91, 2);         // the low two bits of each coordinate, two per byte
+	put(27, 0xa354, 2); put(29, 0x4c99, 2); put(31, 0x260f, 2); put(33, 0x5054, 2);
+	edid[36] = 0x80;            // established timings: 640x480@60
+	edid[37] = 0x08;            // and 1024x768@60
+	put(38, 0xd1c0, 2);         // standard timing 1920x1080@60
+	// The first descriptor holds the preferred detailed timing: the CEA-861 1920x1080@60 timing.
+	put(54, 14850, 2);          // a 148.5 MHz pixel clock
+	put(56, 0x711880, 3);       // 1920 active, 280 blank
+	put(59, 0x402d38, 3);       // 1080 active, 45 blank
+	put(62, 0x00452c58, 4);     // 88 then 44 horizontal, 4 then 5 vertical sync pulses
+	put(66, 0x110cdd, 3);       // 477 by 268 millimetres of visible image
+	put(69, 0x1e, 1);           // digital separate syncs, positive on both, no borders
+	text(72, 0xfc, "RAVEN DISPLAY");
+	text(90, 0xff, "RAVEN-0001");
+	text(108, 0xfe, "VIRTUAL PANEL");
+	uint32_t sum = 0;
+	for (size_t byte = 0; byte < 127; ++byte) sum += edid[byte];
+	edid[127] = uint8_t((0x100 - sum) & 0xff);
+	set(key, u"EDID", 3, edid);
+	close(key);
+}
 // of a log and fail when the log's key is missing. A hive that lacks them, a new one or one made before they were added, gets them.
 void NativeRegistry::register_event_logs()
 {

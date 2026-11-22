@@ -25,8 +25,13 @@ constexpr uint32_t error_buffer_overflow = 111, error_insufficient_buffer = 122,
 constexpr uint32_t skip_unicast = 1, skip_anycast = 2, skip_multicast = 4, skip_dns_server = 8;
 constexpr uint32_t windows_inet6 = 23;
 
-// A set of device interfaces that SetupDi hands out; the host exposes no devices to the guest, so the set stays empty.
-class DeviceInfoSet : public KernelObject {};
+// A set of device interfaces that SetupDi hands out. The host exposes one device: the synthetic monitor's interface, which a
+// program that walked to a display configuration target through its device path matches against here, and reads the EDID from
+// through the device registry key that SetupDiOpenDevRegKey opens. Every other set stays empty.
+class DeviceInfoSet : public KernelObject {
+public:
+	std::vector<std::u16string> interfaces;
+};
 
 // An event log query: the log holds no records, so the query only ever reports that nothing more is there.
 class EventQuery : public KernelObject {};
@@ -776,8 +781,17 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("SetupDiClassGuidsFromNameA", 4, [class_guids](ApiCall &call) { class_guids(call, true); });
 	registry.add("SetupDiClassGuidsFromNameExW", 6, [class_guids](ApiCall &call) { class_guids(call, false); });
 	registry.add("SetupDiClassGuidsFromNameExA", 6, [class_guids](ApiCall &call) { class_guids(call, true); });
-	registry.add("SetupDiGetClassDevsW", 4, [&objects](ApiCall &call) {
-		const auto made = objects.add_object(std::make_shared<DeviceInfoSet>());
+	// GUID_DEVINTERFACE_MONITOR, the interface class of monitors, whose one instance the host serves. Its device path is the one
+	// DisplayConfigGetDeviceInfo reports for the target of the display topology, so a program matches the two.
+	constexpr uint8_t monitor_interface_guid[16] = {0x5f, 0x7b, 0xf0, 0xe6, 0x97, 0xee, 0x90, 0x4a, 0xb0, 0x76, 0x33, 0xf5, 0x7b, 0xf4, 0xea, 0xa7};
+	constexpr uint8_t monitor_class_guid[16] = {0x6e, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18};
+	const std::u16string monitor_interface_path = u"\\\\?\\DISPLAY#RAVEN0000#5&2f5f805e&0&UID256#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+	registry.add("SetupDiGetClassDevsW", 4, [&objects, monitor_interface_path, monitor_interface_guid](ApiCall &call) {
+		auto set = std::make_shared<DeviceInfoSet>();
+		// A request for the present monitor device interfaces holds the one monitor; every other class stays empty.
+		if (call[0] && (call.u32(3) & 0x10) && call.read(call[0], 16) == std::vector<uint8_t>(monitor_interface_guid, monitor_interface_guid + 16))
+			set->interfaces.push_back(monitor_interface_path);
+		const auto made = objects.add_object(std::move(set));
 		if (made.status) {
 			call.fail(8, UINT64_MAX);
 			return;
@@ -817,12 +831,57 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint8_t>(call[2], 0);
 		call.ret(0);
 	});
-	registry.add("SetupDiEnumDeviceInterfaces", 5, [&objects](ApiCall &call) {
-		if (!objects.object_as<DeviceInfoSet>(call[0])) {
+	// The one interface of the monitor's device set, then the terminator. SP_DEVICE_INTERFACE_DATA is 32 bytes on a 64-bit caller.
+	registry.add("SetupDiEnumDeviceInterfaces", 5, [&objects, monitor_interface_guid](ApiCall &call) {
+		const auto set = objects.object_as<DeviceInfoSet>(call[0]);
+		if (!set) {
 			call.fail(6, 0);
 			return;
 		}
-		call.fail(error_no_more_items, 0);
+		if (call.u32(3) >= set->interfaces.size()) {
+			call.fail(error_no_more_items, 0);
+			return;
+		}
+		if (!call[4] || call.load<uint32_t>(call[4]) != 32) {
+			call.fail(error_invalid_parameter, 0);
+			return;
+		}
+		call.store<uint32_t>(call[4], 32);
+		call.write(call[4] + 4, std::vector<uint8_t>(monitor_interface_guid, monitor_interface_guid + 16));
+		call.store<uint32_t>(call[4] + 20, 1);  // SPINT_ACTIVE
+		call.ret(1);
+	});
+	// The interface detail holds the device path right after its size word: the packed layout gives the structure a size of 8 on
+	// a 64-bit caller, with the path's characters from the fourth byte on. The device it belongs to is the monitor's.
+	registry.add("SetupDiGetDeviceInterfaceDetailW", 6, [&objects, monitor_interface_path, monitor_class_guid](ApiCall &call) {
+		const auto set = objects.object_as<DeviceInfoSet>(call[0]);
+		if (!set || set->interfaces.empty() || !call[1] || call.load<uint32_t>(call[1]) != 32) {
+			call.fail(error_invalid_parameter, 0);
+			return;
+		}
+		const size_t bytes = 8 + set->interfaces.front().size() * 2;  // the cbSize word and the path with its terminator
+		if (call[4]) call.store<uint32_t>(call[4], uint32_t(bytes));
+		if (!call[2] || call.u32(3) < bytes) {
+			call.fail(error_insufficient_buffer, 0);
+			return;
+		}
+		if (call.load<uint32_t>(call[2]) != 8) {
+			call.fail(error_invalid_parameter, 0);
+			return;
+		}
+		call.store<uint32_t>(call[2], 8);
+		std::vector<uint8_t> text(set->interfaces.front().size() * 2 + 2, 0);
+		std::memcpy(text.data(), set->interfaces.front().data(), set->interfaces.front().size() * 2);
+		call.write(call[2] + 4, text);
+		if (call[5]) {  // the device information the caller passes on to SetupDiOpenDevRegKey
+			if (call.load<uint32_t>(call[5]) != 32) {
+				call.fail(error_invalid_parameter, 0);
+				return;
+			}
+			call.write(call[5] + 4, std::vector<uint8_t>(monitor_class_guid, monitor_class_guid + 16));
+			call.store<uint32_t>(call[5] + 20, 1);  // the device instance
+		}
+		call.ret(1);
 	});
 	registry.add("SetupDiDestroyDeviceInfoList", 1, [&objects](ApiCall &call) {
 		if (!objects.object_as<DeviceInfoSet>(call[0])) {

@@ -1775,6 +1775,7 @@ NativeResult NativeProcess::callback(uint64_t address, std::span<const uint64_t>
 	// ones are the API call's to change: the general registers are all that has to come back.
 	NativeContext saved{};
 	trace(PTRACE_GETREGS, state->child->pid, &saved.registers);
+	const size_t depth = state->callbacks.size();
 	state->callbacks.push_back(saved);
 	// A nested API trap overwrites the pending stdcall cleanup of the call that was interrupted.
 	state->callback_cleanups.push_back(state->pending_cleanup);
@@ -1788,10 +1789,14 @@ NativeResult NativeProcess::callback(uint64_t address, std::span<const uint64_t>
 				state->child->stop();
 				throw;
 			}
-			state->callbacks.pop_back();
-			state->pending_cleanup = state->callback_cleanups.back();
-			state->callback_cleanups.pop_back();
-			state->awaiting_api = true;
+			// end_call and abandon_call clear the nesting while this frame unwinds (a stop elsewhere or a
+			// termination reached inside this callback): there is then nothing pushed here to pop.
+			if (state->callbacks.size() > depth) {
+				state->callbacks.pop_back();
+				state->pending_cleanup = state->callback_cleanups.back();
+				state->callback_cleanups.pop_back();
+				state->awaiting_api = true;
+			}
 		} else {
 			state->child->stop();
 		}

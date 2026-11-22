@@ -512,7 +512,8 @@ bool NativeEnvironment::dispatch(std::string_view name)
 		const auto parameters=pointer(process_block+(narrow ? 0x10 : 0x20));
 		if (!parameters) throw std::runtime_error("native process parameters are not initialized");
 		const auto handle=pointer(parameters+(narrow ? 0x18+(uint32_t(-10)-selector)*4 : 0x20+(uint32_t(-10)-selector)*8));
-		process.return_api(handle);return true;
+		// The parameters block stores UINT64_MAX in a slot whose launch supplied no standard handle; Windows answers NULL for it, not INVALID_HANDLE_VALUE.
+		process.return_api(handle==UINT64_MAX ? 0 : handle);return true;
 	}
 	if (multibyte_information(name)) return true;
 	if (name=="NtQuerySystemInformation")

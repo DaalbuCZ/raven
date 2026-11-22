@@ -28,6 +28,10 @@
 
 namespace raven {
 
+// TEMPORARY diagnosis aid: the guest counter word the patched marshalling-failure helper increments
+// (RAVEN_SYNTHESIZE_TYPENAME, defined in providers.cpp) — the originate-time diagnostics read it.
+extern std::atomic<uint64_t> synthesize_counter_address;
+
 namespace {
 
 constexpr uint32_t e_fail = 0x80004005U, e_handle = 0x80070006U, e_invalidarg = 0x80070057U, e_notimpl = 0x80004001U, s_ok = 0, s_false = 1;
@@ -1350,6 +1354,89 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("WindowsGetStringLen", 1, [](ApiCall &call) { call.ret(call[0] ? call.load<uint32_t>(call[0] + 4) : 0); });
 	registry.add("WindowsIsStringEmpty", 1, [](ApiCall &call) { call.ret(!call[0] || !call.load<uint32_t>(call[0] + 4)); });
+	// WindowsStringHasEmbeddedNull(string, hasEmbedNull) answers whether the characters before the counted length carry a null,
+	// a null or empty string never having one; a missing out pointer is the argument error.
+	registry.add("WindowsStringHasEmbeddedNull", 2, [](ApiCall &call) {
+		if (!call[1]) {
+			call.ret(0x80070057U);
+			return;
+		}
+		uint32_t embedded = 0;
+		if (call[0]) {
+			const uint32_t length = call.load<uint32_t>(call[0] + 4);
+			if (length) {
+				const auto bytes = call.read(call.load_pointer(call[0] + 16), size_t(length) * 2);
+				for (size_t at = 0; at + 1 < bytes.size(); at += 2)
+					if (!bytes[at] && !bytes[at + 1]) {
+						embedded = 1;
+						break;
+					}
+			}
+		}
+		call.store<uint32_t>(call[1], embedded);
+		call.ret(0);
+	});
+	// A preallocated string buffer hands the caller writable characters it fills and nulls, and the promote turns them into a
+	// string handle: Win2D reads a saved document's XML back this way. The preallocated characters live in a block of their own
+	// until the promote copies what they hold up to the terminator into the ordinary string layout.
+	struct preallocated { uint64_t characters; uint32_t length; };
+	const auto preallocated_strings = std::make_shared<std::unordered_map<uint64_t, preallocated>>();
+	const auto preallocated_next = std::make_shared<uint64_t>(0x21);
+	registry.add("WindowsPreallocateStringBuffer", 3, [&, preallocated_strings, preallocated_next](ApiCall &call) {
+		const uint32_t length = call.u32(0);
+		if (!call[1] || !call[2]) {
+			call.ret(0x80004003U); // E_POINTER
+			return;
+		}
+		const auto block = context.allocator.allocate((size_t(length) + 1) * 2, true);
+		if (!block) {
+			call.ret(0x8007000eU); // E_OUTOFMEMORY
+			return;
+		}
+		const uint64_t handle = *preallocated_next;
+		*preallocated_next += 0x10;
+		preallocated_strings->emplace(handle, preallocated{block, length});
+		call.store_pointer(call[1], length ? block : 0); // an empty preallocation answers a null buffer, as Windows does
+		call.store_pointer(call[2], handle);
+		call.ret(0);
+	});
+	registry.add("WindowsPromoteStringBuffer", 2, [&, preallocated_strings](ApiCall &call) {
+		if (!call[1]) {
+			call.ret(0x80004003U); // E_POINTER
+			return;
+		}
+		call.store_pointer(call[1], 0);
+		const auto found = preallocated_strings->find(call[0]);
+		if (found == preallocated_strings->end()) {
+			call.ret(0x80070057U); // E_INVALIDARG
+			return;
+		}
+		const auto [characters, length] = found->second;
+		uint32_t used = 0;
+		while (used < length) {
+			const auto text = call.read(characters + (size_t)used * 2, 2);
+			if (text.size() < 2 || (!text[0] && !text[1]))
+				break;
+			++used;
+		}
+		const size_t width = call.pointer_width(), head = 16 + width;
+		const auto block = context.allocator.allocate(head + (size_t(used) + 1) * 2, true);
+		if (!block) {
+			call.ret(0x8007000eU); // E_OUTOFMEMORY
+			return;
+		}
+		std::vector<uint8_t> image(head + (size_t(used) + 1) * 2);
+		const uint64_t out_characters = block + head;
+		std::memcpy(image.data() + 4, &used, 4);
+		std::memcpy(image.data() + 16, &out_characters, width);
+		const auto text = call.read(characters, size_t(used) * 2);
+		std::memcpy(image.data() + head, text.data(), text.size());
+		call.write(block, image);
+		context.allocator.release(characters);
+		preallocated_strings->erase(found);
+		call.store_pointer(call[1], used ? block : 0);
+		call.ret(0);
+	});
 	// Two strings in code unit order, a null string being the empty one.
 	registry.add("WindowsCompareStringOrdinal", 3, [](ApiCall &call) {
 		const auto text = [&](uint64_t handle) {
@@ -1402,42 +1489,55 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 					std::fprintf(stderr, "\\u%04x", static_cast<unsigned>(character));
 			}
 			std::fprintf(stderr, "\"\n");
-			// Diagnosis aid: dump the managed exception object's first fields and chase pointer-like values
-			// one level deep — the stack-trace array holds code addresses that resolve to the failing call's
-			// method, which the missing-marshalling diagnosis needs.
-			if (record.exception) {
-				try {
-					const auto bytes = call.read(record.exception, 0x100);
-					std::fprintf(stderr, "raven: exception object %llx:", static_cast<unsigned long long>(record.exception));
-					for (size_t i = 0; i < bytes.size(); i += 8) {
-						uint64_t value = 0;
-						std::memcpy(&value, bytes.data() + i, 8);
-						std::fprintf(stderr, " %llx", static_cast<unsigned long long>(value));
+			// TEMPORARY DIAGNOSIS AID (Shapr3D ThemedImage NotImplementedException): the originating thread's
+			// stack, its pointer-like values resolved to modules — the managed call chain that led to the
+			// RoOriginateLanguageException, which names the throwing site's callers. Removed after the round.
+			if (std::getenv("RAVEN_DUMP_THROW_STACK")) try {
+				// The patched marshalling-failure helper's call counter (RAVEN_SYNTHESIZE_TYPENAME),
+				// read at the originate: how many rounds through the sl+0x86218c site this launch has
+				// made when the exception was reported — the occurrence number the synthetic product
+				// needs to land on the Register round.
+				if (const uint64_t counter = synthesize_counter_address.load(std::memory_order_relaxed); counter) try {
+					const auto words = call.process.read_memory(counter, 8);
+					uint32_t count = 0, occurrence = 0;
+					std::memcpy(&count, words.data(), 4);
+					std::memcpy(&occurrence, words.data() + 4, 4);
+					std::fprintf(stderr, "raven: synthesize counter %u, occurrence %u\n", count, occurrence);
+				} catch (const std::exception &) {
+				}
+				const auto registers = call.process.context().registers;
+				std::vector<std::tuple<uint64_t, uint64_t, const char *>> spans;
+				for (const auto &[name, module] : context.modules.all())
+					spans.emplace_back(module->loaded.base(), module->loaded.base() + module->image.image_size, name.c_str());
+				const auto resolve = [&spans](uint64_t value) -> std::string {
+					for (const auto &[begin, end, name] : spans)
+						if (value >= begin && value < end) {
+							char text[96];
+							std::snprintf(text, sizeof text, " (%s+%llx)", name, (unsigned long long)(value - begin));
+							return text;
+						}
+					return {};
+				};
+				std::fprintf(stderr, "raven: originate stack scan (rsp %llx):", static_cast<unsigned long long>(registers.rsp));
+				for (uint64_t page = registers.rsp & ~0xfffULL; page < (registers.rsp & ~0xfffULL) + 0x8000; page += 0x1000) {
+					std::vector<uint8_t> page_bytes;
+					try {
+						page_bytes = call.process.read_memory(page, 0x1000);
+					} catch (const std::exception &) {
+						break;
 					}
-					std::fprintf(stderr, "\n");
-					for (size_t i = 8; i < bytes.size(); i += 8) {
+					for (size_t at = (page == (registers.rsp & ~0xfffULL) ? registers.rsp & 0xfff : 0); at + 8 <= page_bytes.size(); at += 8) {
 						uint64_t value = 0;
-						std::memcpy(&value, bytes.data() + i, 8);
+						std::memcpy(&value, page_bytes.data() + at, 8);
 						if (value < 0x10000)
 							continue;
-						if (const auto text = describe_text(call.process, value); !text.empty())
-							std::fprintf(stderr, "raven:   [%02zx] text: %s\n", i, text.c_str());
-						try {
-							const auto inner = call.read(value, 0x80);
-							std::fprintf(stderr, "raven:   [%02zx] -> %llx:", i, static_cast<unsigned long long>(value));
-							for (size_t j = 0; j < inner.size(); j += 8) {
-								uint64_t word = 0;
-								std::memcpy(&word, inner.data() + j, 8);
-								std::fprintf(stderr, " %llx", static_cast<unsigned long long>(word));
-								if (const auto text = describe_text(call.process, word); !text.empty())
-									std::fprintf(stderr, "<%s>", text.c_str());
-							}
-							std::fprintf(stderr, "\n");
-						} catch (const ApiFault &) {
-						}
+						std::fprintf(stderr, "\nraven:   %llx %llx%s", static_cast<unsigned long long>(page + at),
+							static_cast<unsigned long long>(value), resolve(value).c_str());
 					}
-				} catch (const ApiFault &) {
 				}
+				std::fprintf(stderr, "\n");
+			} catch (const std::exception &) {
+				std::fprintf(stderr, "raven: originate stack unreadable\n");
 			}
 		}
 		call.ret(1);
@@ -1616,8 +1716,9 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("RoGetParameterizedTypeInstanceIID", 5, [](ApiCall &call) { call.ret(0x80004001U); });
 	// No Windows Runtime class exists here: initialization joins the thread to a COM apartment like CoInitializeEx without OLE 1.0 DDE
-	// (RO_INIT_MULTITHREADED is 1), and every activation reports that the class is not registered.
-	registry.add("RoInitialize", 1, [initialize](ApiCall &call) { initialize(call, call.u32(0) == 1 ? 4 : 6); });
+	// (RO_INIT_SINGLETHREADED is 1 and RO_INIT_MULTITHREADED is 0, so the apartment bit flips: 6 is the apartment-threaded STA and 4 the
+	// multithreaded MTA), and every activation reports that the class is not registered.
+	registry.add("RoInitialize", 1, [initialize](ApiCall &call) { initialize(call, call.u32(0) == 1 ? 6 : 4); });
 	registry.add("RoUninitialize", 0, uninitialize);
 	registry.add("RoGetActivationFactory", 3, [](ApiCall &call) {
 		// The traced failure says which class was asked for.

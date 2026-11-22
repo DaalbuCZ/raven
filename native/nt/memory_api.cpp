@@ -213,14 +213,16 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("LocalFree", 1, free_block);
 	registry.add("GlobalFree", 1, free_block);
 	const auto lock_block = [&](ApiCall &call) {
-		const auto block = allocator.data(call[0]);
-		const auto size = allocator.size(block);
-		if (size == UINT64_MAX) {
+		bool discarded = false;
+		// The lock resolves the handle and counts in one step, so a resize can neither slip between them nor move
+		// the block under the pointer this answers; a locked movable object does not move.
+		const auto block = allocator.acquire(call[0], &discarded);
+		if (block == UINT64_MAX) {
 			call.fail(6);
 			return;
 		}
 		// A movable block without bytes is what Windows calls discarded: it has a handle, and nothing to lock.
-		if (!size && allocator.movable(call[0])) {
+		if (discarded) {
 			call.fail(157);
 			return;
 		}
@@ -228,7 +230,17 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("LocalLock", 1, lock_block);
 	registry.add("GlobalLock", 1, lock_block);
-	const auto unlock_block = [](ApiCall &call) { call.set_last_error(0); };
+	const auto unlock_block = [&](ApiCall &call) {
+		bool was_locked = false, still = false;
+		const bool result = allocator.unlock_movable(call[0], &was_locked, &still);
+		if (!was_locked) {
+			call.set_last_error(158 /* ERROR_NOT_LOCKED */);
+			call.ret(0);
+			return;
+		}
+		call.set_last_error(0);
+		call.ret(result ? 1 : 0);
+	};
 	registry.add("LocalUnlock", 1, unlock_block);
 	registry.add("GlobalUnlock", 1, unlock_block);
 	const auto size_block = [&](ApiCall &call) {
@@ -251,17 +263,35 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("LocalHandle", 1, handle_block);
 	registry.add("GlobalHandle", 1, handle_block);
 	const auto resize_block = [&](ApiCall &call) {
+		// LMEM_MODIFY changes what kind of block this is, not its bytes.
+		if (call.u32(2) & modify_flag) {
+			if (call.u32(2) & movable_flag)
+				allocator.make_movable(call[0]);
+			call.ret(call[0]);
+			return;
+		}
 		const auto block = allocator.data(call[0]);
 		const auto old = allocator.size(block);
 		if (old == UINT64_MAX) {
 			call.fail(6);
 			return;
 		}
-		// LMEM_MODIFY changes what kind of block this is, not its bytes.
-		if (call.u32(2) & modify_flag) {
-			if (call.u32(2) & movable_flag)
-				allocator.make_movable(call[0]);
-			call.ret(call[0]);
+		if (allocator.movable(call[0])) {
+			// The move of a movable handle runs as one critical section against the handle's lock, size and free
+			// calls: a locked object does not move (the call fails as Windows's realloc of a locked block does),
+			// and a lock that arrives during the move resolves the new pointer instead of keeping the old alive.
+			bool locked = false;
+			const auto handle = allocator.reallocate_movable(call[0], call[1], (call.u32(2) & zero_flag) != 0, &locked,
+				[&](uint64_t from, uint64_t to, uint64_t bytes) { call.write(to, call.read(from, bytes)); });
+			if (locked) {
+				call.fail(212 /* ERROR_LOCKED */);
+				return;
+			}
+			if (!handle) {
+				call.fail(8);
+				return;
+			}
+			call.ret(handle);
 			return;
 		}
 		const auto address = allocator.allocate(call[1], call.u32(2) & zero_flag);
@@ -273,11 +303,6 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 			call.write(address, call.read(block, kept));
 		if (!call[1])
 			allocator.mark_empty(address);
-		if (allocator.movable(call[0])) {
-			allocator.move(call[0], address);
-			call.ret(call[0]);
-			return;
-		}
 		allocator.release(call[0]);
 		call.ret(address);
 	};

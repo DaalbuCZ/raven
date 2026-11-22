@@ -472,6 +472,14 @@ int main(int argc, char **argv)
 							if (std::filesystem::exists(component))
 								return read_module(component.c_str());
 						}
+						// The Direct3D interop component carries the two constructors Windows' d3d11.dll exports for handing a COM
+						// device or surface to WinRT, which the Direct3D library below (DXVK) does not; the loader starts it when
+						// a guest's import needs them.
+						if (!selected && name=="raven-d3d11interop.dll" && entry->image.is_64) {
+							const auto component = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "raven-d3d11interop.dll";
+							if (std::filesystem::exists(component))
+								return read_module(component.c_str());
+						}
 						// The Direct3D libraries a Windows installation provides come from RAVEN_D3D_DIRECTORY (one or more directories separated by
 						// colons, such as a DXVK build and a vkd3d-proton build of the program's width) or from beside the runtime.
 						if (!selected && (name=="dxgi.dll" || name=="d3d11.dll" || name=="d3d10core.dll" || name=="d3d10_1.dll" || name=="d3d9.dll" || name=="d3d8.dll" ||

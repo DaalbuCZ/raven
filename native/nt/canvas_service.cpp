@@ -4,8 +4,11 @@
 #include "graphics/canvas.h"
 #endif
 
+#include <cstdio>
 #include <cstring>
+#include <map>
 #include <memory>
+#include <vector>
 
 namespace raven {
 
@@ -161,8 +164,88 @@ void register_canvas_service(ApiRegistry &registry, KernelContext &)
 
 #else
 
-void register_canvas_service(ApiRegistry &, KernelContext &)
+// Without the Skia rasterizer the canvas service still serves the surfaces themselves: the memory a render target draws into
+// exists, its pixels can be read and written, and a drawing command is dropped loudly by name, the way a stub says what it
+// cannot do. A Skia build (scripts/provision-text.py, configured as RAVEN_SKIA_SOURCE/RAVEN_SKIA_LIBRARY) replaces the
+// dropped commands with real rasterization.
+void register_canvas_service(ApiRegistry &registry, KernelContext &)
 {
+	static std::map<uint32_t, std::pair<uint32_t, std::vector<uint8_t>>> surfaces;
+	static uint32_t next_surface = 1;
+	static unsigned long dropped_draws = 0;
+	registry.add("RavenCanvasCreate", 2, [](ApiCall &call) {
+		const uint32_t width = call.u32(0), height = call.u32(1);
+		// A surface of BGRA bytes premultiplied; a request beyond the memory the service keeps is refused.
+		if (!width || !height || uint64_t(width) * height > (256ull << 20) / 4) {
+			call.ret(0);
+			return;
+		}
+		const uint32_t id = next_surface++;
+		auto &surface = surfaces[id];
+		surface.first = width;
+		surface.second.assign(size_t(width) * height * 4, 0);
+		call.ret(id);
+	});
+	registry.add("RavenCanvasDestroy", 1, [](ApiCall &call) { surfaces.erase(call.u32(0)); });
+	// RavenCanvasSize(surface, size): the width and height as two words; zero when there is no such surface.
+	registry.add("RavenCanvasSize", 2, [](ApiCall &call) {
+		const auto found = surfaces.find(call.u32(0));
+		if (found == surfaces.end()) {
+			call.ret(0);
+			return;
+		}
+		if (call[1]) {
+			call.store<uint32_t>(call[1], found->second.first);
+			call.store<uint32_t>(call[1] + 4, found->second.second.size() / 4 / found->second.first);
+		}
+		call.ret(1);
+	});
+	// RavenCanvasPixels(surface, x, y, width, height, buffer, pitch, write): rows move whole between the guest and the surface.
+	registry.add("RavenCanvasPixels", 8, [](ApiCall &call) {
+		const auto found = surfaces.find(call.u32(0));
+		const uint32_t width = call.u32(3), height = call.u32(4), pitch = call.u32(6);
+		const int32_t x = call.i32(1), y = call.i32(2);
+		if (found == surfaces.end() || !width || !height || !call[5] || pitch < uint64_t(width) * 4 ||
+			x < 0 || y < 0 || uint64_t(x) + width > found->second.first ||
+			uint64_t(y) + height > found->second.second.size() / 4 / found->second.first ||
+			uint64_t(pitch) * height > (512ull << 20)) {
+			call.ret(0);
+			return;
+		}
+		const bool write = call.u32(7) != 0;
+		const size_t bytes = size_t(pitch) * (height - 1) + size_t(width) * 4;
+		if (write) {
+			const auto source = call.read(call[5], bytes);
+			for (uint32_t row = 0; row < height; ++row)
+				std::memcpy(found->second.second.data() + (size_t(y + row) * found->second.first + x) * 4,
+					source.data() + size_t(row) * pitch, size_t(width) * 4);
+		} else {
+			std::vector<uint8_t> buffer(bytes, 0);
+			for (uint32_t row = 0; row < height; ++row)
+				std::memcpy(buffer.data() + size_t(row) * pitch,
+					found->second.second.data() + (size_t(y + row) * found->second.first + x) * 4, size_t(width) * 4);
+			call.write(call[5], std::span<const uint8_t>(buffer.data(), bytes));
+		}
+		call.ret(1);
+	});
+	// RavenCanvasDraw(surface, command, data, size) and RavenCanvasBatch(records, size): the rasterizer they need is not in this
+	// build, so a command is dropped and said so; the surfaces stay what they were, and a program that reads pixels back reads
+	// the zeros a never-drawn surface carries. A batch that ran nothing failed nothing, which is the answer the queue's caller
+	// takes to keep going.
+	registry.add("RavenCanvasDraw", 4, [](ApiCall &call) {
+		++dropped_draws;
+		if (dropped_draws <= 20 || dropped_draws % 1000 == 0)
+			std::fprintf(stderr, "raven: canvas draw dropped, no Skia rasterizer in this build (%lu so far, %u bytes)\n",
+				dropped_draws, call.u32(3));
+		call.ret(1);
+	});
+	registry.add("RavenCanvasBatch", 2, [](ApiCall &call) {
+		++dropped_draws;
+		if (dropped_draws <= 20 || dropped_draws % 1000 == 0)
+			std::fprintf(stderr, "raven: canvas batch dropped, no Skia rasterizer in this build (%lu commands so far, %u bytes)\n",
+				dropped_draws, call.u32(1));
+		call.ret(0);
+	});
 }
 
 #endif

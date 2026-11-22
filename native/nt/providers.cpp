@@ -45,6 +45,10 @@
 #include <unordered_set>
 
 namespace raven {
+// TEMPORARY diagnosis aid (Shapr3D RAVEN_SYNTHESIZE_TYPENAME): the guest word the patched
+// marshalling-failure helper increments on every call, so the originate-time diagnostics can say how
+// many rounds have passed and an occurrence number can aim the synthetic product at one round.
+std::atomic<uint64_t> synthesize_counter_address{0};
 
 // A whole host file in one read: libraries such as a browser's main DLL run to hundreds of megabytes, and reading them a character at
 // a time through a stream iterator cost seconds in every process that loads them.
@@ -2094,6 +2098,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		"NtCancelIoFileEx",
 		// Opening files by their native names, which Rust's standard library and mio look up at run time.
 		"NtCreateFile", "NtOpenFile",
+		// The native sleep, which vkd3d-proton's swapchain setup looks up at run time for its frame-latency waits.
+		"NtDelayExecution",
 		// What the runtime's own components import from ntdll, which they need whether a program loads them at start or later.
 		"DbgPrint", "NtCancelIoFile", "NtCreateSection", "NtFsControlFile", "NtReadFile", "RtlCreateUnicodeStringFromAsciiz", "RtlFreeHeap",
 		"RtlFreeUnicodeString", "RtlDllShutdownInProgress", "RtlGetVersion", "RtlIpv6AddressToStringExW", "RtlIpv6StringToAddressW", "RtlLengthSid", "RtlUnicodeToMultiByteN",
@@ -2531,9 +2537,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				"GetCurrentInputMessageSource", "GetWindowThreadProcessId", "GetClassNameW", "GetClassLongPtrW", "GetClassLongW"};
 			if (!keep_quiet.contains(api_name))
 				windows.wake(environment.thread_id());
-			// ntdll's RtlExitUserProcess is the ExitProcess of programs that do without kernel32.
+			// ntdll's RtlExitUserProcess is the ExitProcess of programs that do without kernel32. The call is served before the trace
+			// below learns of it, so the one thing a dead run cannot say is who ended it: name the caller chain (module+offset each),
+			// for a process an aborting thread ends must not leave its decision placeless.
 			if (api_name == "ExitProcess" || api_name == "RtlExitUserProcess") {
 				const auto code=uint32_t(process.api_arguments(1)[0]);
+				if (kernel_ptr && kernel_ptr->describe_stack)
+					std::cerr << "raven: " << api_name << '(' << code << ") from" << kernel_ptr->describe_stack() << '\n';
 				process.abandon_call();
 				throw ProcessExit{code,result.instruction};
 			}
@@ -2675,10 +2685,20 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			// named by RAVEN_DUMP_CELLS is first entered, resolve every cell named by
 			// RAVEN_DUMP_CELLS_LIST="module:offset,module:offset,..." (module name as in the module set,
 			// hex offset) and print where it points.
-			if (const char *cells_api = std::getenv("RAVEN_DUMP_CELLS"); cells_api && api_name == cells_api) {
+			if (const char *cells_api = std::getenv("RAVEN_DUMP_CELLS"); cells_api) {
+				// An optional ":N" suffix fires the dump at the Nth occurrence instead of the first.
+				static unsigned cells_seen = 0;
+				const std::string cells_api_text(cells_api);
+				const auto cells_colon = cells_api_text.rfind(':');
+				unsigned cells_nth = 1;
+				std::string cells_name = cells_api_text;
+				if (cells_colon != std::string::npos && cells_api_text.find_first_not_of("0123456789", cells_colon + 1) == std::string::npos) {
+					cells_name = cells_api_text.substr(0, cells_colon);
+					cells_nth = unsigned(std::stoul(cells_api_text.substr(cells_colon + 1)));
+				}
 				static bool cells_dumped = false;
 				const char *cells_list = std::getenv("RAVEN_DUMP_CELLS_LIST");
-				if (!cells_dumped && cells_list) {
+				if (api_name == cells_name && ++cells_seen == cells_nth && !cells_dumped && cells_list) {
 					cells_dumped = true;
 					const std::string list(cells_list);
 					for (size_t at = 0; at < list.size();) {
@@ -2713,7 +2733,6 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					}
 				}
 			}
-			// TEMPORARY DIAGNOSIS AID (Shapr3D interop wall): SharedLibrary's interop marshalling fails on
 			// a runtime-created generic type no module carries marshalling data for (deterministically, on
 			// raven as on Windows), and the compiled marshallers report the failure by calling the shared
 			// factory at sharedlibrary.dll+0x847fd0, which builds the MissingInteropDataException and throws
@@ -2722,8 +2741,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			// exception. What the guest does with an unmarshalled value is undefined; this only says
 			// whether the window pipeline can run past the wall.
 			static const bool tolerate_missing_interop = std::getenv("RAVEN_TOLERATE_MISSING_INTEROP") != nullptr;
+			static const bool synthesize_typename = std::getenv("RAVEN_SYNTHESIZE_TYPENAME") != nullptr;
 			static bool missing_interop_patched = false;
-			if (tolerate_missing_interop && !missing_interop_patched) {
+			if ((tolerate_missing_interop || synthesize_typename) && !missing_interop_patched) {
 				for (const auto &[name, module] : modules.all())
 					if (name == "sharedlibrary.dll") {
 						missing_interop_patched = true;
@@ -2740,19 +2760,162 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 							} else
 								std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP unexpected bytes at sharedlibrary.dll+847fd0, not patched\n";
 							// The shared marshalling-failure helper every compiled marshaller funnels through.
+							// With RAVEN_SYNTHESIZE_TYPENAME (TEMPORARY diagnosis aid, a stronger tolerate
+							// variant) the helper answers the round whose argument is the failing dynamic
+							// type's handle (EETypeRva 0x1b1c0, the handle the MissingInteropData message
+							// formats) with a real guest HSTRING — the marshalled TypeName's Name the
+							// caller stores its return into, whose zero was what DependencyProperty.Register
+							// read as a nameless type. Every other call keeps the proven null return: an
+							// ungated synthetic broke an earlier consumer (shapr.native treated the product
+							// as an error message and threw E_FAIL with it). The synthetic name is NOT the
+							// failed type's identity — raven cannot know it — which this trace records once.
 							const uint64_t helper = module->loaded.base() + 0x8621c0;
 							const auto head = process.read_memory(helper, 5);
 							if (head.size() == 5 && head[0] == 0x53 && head[1] == 0x48 && head[2] == 0x83 && head[3] == 0xec && head[4] == 0x20) {
+								static const char16_t synthetic_name[] = u"Windows.UI.Xaml.Controls.Control";
+								// The failing round's call site, identified by single-stepping the round
+								// (RAVEN_STEP='CoGetApartmentType:520:20000'): the marshalling function at
+								// sl+0x862100 calls the helper at sl+0x862187 right after a runtime call on
+								// the static "sourceString" header, and the helper's return value is what
+								// the round stores as the marshalled TypeName's Name.
+								const uint64_t failing_site = module->loaded.base() + 0x86218c;
+								std::vector<uint8_t> patch;
+								// TEMPORARY probe: with RAVEN_SYNTHESIZE_TYPENAME=echo the gated call returns
+								// its own argument instead of a product — the consumer that breaks on it then
+								// names the argument's identity through how the break reports (an HSTRING
+								// argument surfaces as the exception message; anything else faults the read).
+								const bool echo_argument = [] {
+									const char *value = std::getenv("RAVEN_SYNTHESIZE_TYPENAME");
+									return value && !std::strcmp(value, "echo");
+								}();
+								if (echo_argument) {
+									patch = {0x48, 0x89, 0xc8, 0xc3}; // mov rax,rcx; ret
+									std::cerr << "raven: RAVEN_SYNTHESIZE_TYPENAME=echo patched sharedlibrary.dll+8621c0 (the sl+0x86218c call echoes its argument)\n";
+								}
+								if (!echo_argument && synthesize_typename) try {
+									// The guest HSTRING raven's WindowsCreateString makes: a 24-byte header
+									// (length at +4, character pointer at +16) followed by the characters.
+									// The block is a host-owned mapping pinned at an explicit far-away guest
+									// address — kept for the life of the process. A kernel-picked address lands
+									// beside the thread stacks and a guest-side allocation lands in the .NET GC's
+									// reserved ranges; both broke the startup in the first attempts.
+									const size_t width = 8;
+									const uint32_t length = static_cast<uint32_t>(sizeof(synthetic_name) / sizeof(synthetic_name[0]) - 1);
+									const uint64_t block = process.map_memory(0x1000, PROT_READ | PROT_WRITE, 0x400000000ULL);
+									std::vector<uint8_t> image(16 + width + (size_t(length) + 1) * 2);
+									const uint64_t characters = block + 16 + width;
+									std::memcpy(image.data() + 4, &length, 4);
+									std::memcpy(image.data() + 16, &characters, width);
+									for (uint32_t at = 0; at < length; ++at) {
+										image[16 + width + at * 2] = static_cast<uint8_t>(synthetic_name[at]);
+										image[16 + width + at * 2 + 1] = static_cast<uint8_t>(synthetic_name[at] >> 8);
+									}
+									// The call counter at block+0x800 (the host reads it at the originate-time
+									// diagnostics) and the occurrence to answer at block+0x808: the sl+0x86218c
+									// site runs for many early rounds whose null continuation is the proven
+									// tolerated behavior, so the synthetic product needs an occurrence number
+									// (RAVEN_SYNTHESIZE_TYPENAME=<N>) to reach the Register round specifically.
+									const uint64_t counter_block = block + 0x800;
+									const uint64_t occurrence = [&] {
+										const char *value = std::getenv("RAVEN_SYNTHESIZE_TYPENAME");
+										char *end = nullptr;
+										const unsigned long long parsed = std::strtoull(value, &end, 10);
+										return end && *end ? 0ULL : parsed;
+									}();
+									process.write_memory(block, image);
+									const std::vector<uint8_t> words{0, 0, 0, 0, static_cast<uint8_t>(occurrence), static_cast<uint8_t>(occurrence >> 8),
+										static_cast<uint8_t>(occurrence >> 16), static_cast<uint8_t>(occurrence >> 24), 0, 0, 0, 0, 0, 0, 0, 0};
+									process.write_memory(counter_block, words);
+									synthesize_counter_address.store(counter_block, std::memory_order_relaxed);
+									std::cerr << "raven: RAVEN_SYNTHESIZE_TYPENAME product \"Windows.UI.Xaml.Controls.Control\" at guest HSTRING "
+										<< std::hex << block << std::dec << ", counter at " << std::hex << counter_block << std::dec
+										<< ", occurrence " << occurrence << " of the rounds returning to sl+0x86218c\n";
+									// Entry: count the call (the .NET runtime's internal ABI does not tolerate
+									// clobbered r10/r11 — the first counter patch died in the GC init — so the
+									// registers are saved and restored around every path). Then, when the return
+									// address is the failing site AND the occurrence matches, return the
+									// synthetic HSTRING; otherwise the proven null. (A multi-site variant with
+									// the logic in a mapped executable trampoline faulted its own instruction
+									// fetch — raven's runtime pages and the .NET GC's protections around a
+									// host-mapped code page are not settled; reverted to this in-place form.)
+									patch.insert(patch.end(), {0x41, 0x53});             // push r11
+									patch.insert(patch.end(), {0x41, 0x52});             // push r10
+									patch.insert(patch.end(), {0x49, 0xbb});             // mov r11, counter_block
+									for (int byte = 0; byte < 8; ++byte)
+										patch.push_back(static_cast<uint8_t>(counter_block >> (8 * byte)));
+									patch.insert(patch.end(), {0xf0, 0x41, 0xff, 0x03}); // lock inc dword [r11]
+									patch.insert(patch.end(), {0x49, 0xba});             // mov r10, failing_site
+									for (int byte = 0; byte < 8; ++byte)
+										patch.push_back(static_cast<uint8_t>(failing_site >> (8 * byte)));
+									patch.insert(patch.end(), {0x48, 0x8b, 0x44, 0x24, 0x10}); // mov rax,[rsp+16] (the return address, above the two pushes)
+									patch.insert(patch.end(), {0x4c, 0x39, 0xd0});       // cmp rax, r10
+									patch.insert(patch.end(), {0x75, 0x18});             // jne → the null path at the end
+									patch.insert(patch.end(), {0x41, 0x8b, 0x43, 0x04}); // mov eax,[r11+4] (the occurrence)
+									patch.insert(patch.end(), {0x41, 0x39, 0x03});       // cmp [r11], eax (the count)
+									patch.insert(patch.end(), {0x75, 0x0f});             // jne → the null path at the end
+									patch.push_back(0x48);                               // mov rax, block (the synthetic product)
+									patch.push_back(0xb8);
+									for (int byte = 0; byte < 8; ++byte)
+										patch.push_back(static_cast<uint8_t>(block >> (8 * byte)));
+									patch.insert(patch.end(), {0x41, 0x5a});             // pop r10
+									patch.insert(patch.end(), {0x41, 0x59});             // pop r11
+									patch.push_back(0xc3);                               // ret
+									patch.insert(patch.end(), {0x31, 0xc0});             // null: xor eax,eax
+									patch.insert(patch.end(), {0x41, 0x5a});             // pop r10
+									patch.insert(patch.end(), {0x41, 0x59});             // pop r11
+									patch.push_back(0xc3);                               // ret
+								} catch (const std::exception &error) {
+									std::cerr << "raven: RAVEN_SYNTHESIZE_TYPENAME allocation failed (" << error.what() << "), returning null\n";
+								}
+								if (patch.empty())
+									patch = ret0;
+								// The write crosses cache lines and is not atomic: every other guest thread
+								// is paused for it, or a concurrent helper call executes a half-written
+								// patch (the 1007/c0000602 fail-fast storms of the first builds).
+								std::vector<std::shared_ptr<GuestThread>> paused;
+								if (kernel_ptr)
+									for (const auto id : kernel_ptr->threads.thread_ids())
+										if (id != kernel_ptr->threads.current_id())
+											if (auto thread = kernel_ptr->threads.find(id); thread && kernel_ptr->threads.suspend(*thread) != UINT32_MAX)
+												paused.push_back(std::move(thread));
 								process.protect_image(helper & ~uint64_t(0xfff), 0x1000, 0x7 /* RWX */);
-								process.write_memory(helper, ret0);
+								process.write_memory(helper, patch);
 								process.protect_image(helper & ~uint64_t(0xfff), 0x1000, 0x5 /* RX */);
-								std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP patched sharedlibrary.dll+8621c0 (marshalling-failure helper returns null)\n";
+								for (const auto &thread : paused)
+									kernel_ptr->threads.resume(*thread);
+								if (synthesize_typename) {
+									std::cerr << "raven: SYNTHESIZE patch bytes:";
+									for (const auto byte : patch)
+										std::fprintf(stderr, " %02x", byte);
+									const auto readback = process.read_memory(helper, patch.size());
+									std::cerr << "\nraven: readback       :";
+									for (const auto byte : readback)
+										std::fprintf(stderr, " %02x", byte);
+									std::cerr << '\n';
+								}
+								std::cerr << (patch.size() > 3 ?
+									"raven: RAVEN_SYNTHESIZE_TYPENAME patched sharedlibrary.dll+8621c0 (helper answers the failing dynamic type with the synthetic HSTRING, null otherwise)\n" :
+									"raven: RAVEN_TOLERATE_MISSING_INTEROP patched sharedlibrary.dll+8621c0 (marshalling-failure helper returns null)\n");
 							} else
 								std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP unexpected bytes at sharedlibrary.dll+8621c0, not patched\n";
 						} catch (const std::exception &error) {
 							std::cerr << "raven: RAVEN_TOLERATE_MISSING_INTEROP patch failed: " << error.what() << '\n';
 						}
 					}
+			}
+			// TEMPORARY diagnosis aid (RAVEN_SYNTHESIZE_TYPENAME): the marshalling-failure helper's call
+			// counter read at the DependencyProperty.Register refusal — the occurrence the synthetic
+			// product must fire at is the count of sl+0x86218c calls up to this note.
+			if (api_name == "OutputDebugStringA" && synthesize_typename && kernel_ptr) try {
+				const auto note = describe_text(process, process.api_arguments(1)[0]);
+				if (note.find("xaml_styles.c:688") != std::string::npos)
+					if (const uint64_t counter = synthesize_counter_address.load(std::memory_order_relaxed); counter) {
+						const auto words = process.read_memory(counter, 8);
+						uint32_t count = 0;
+						std::memcpy(&count, words.data(), 4);
+						std::cerr << "raven: SYNTHESIZE counter at the Register refusal: " << count << '\n';
+					}
+			} catch (const std::exception &) {
 			}
 			if (api_name=="RtlRaiseStatus")
 				return native_raise_rtl_exception(process,true);
@@ -3611,6 +3774,15 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 							if (message.starts_with("missing PE module: "))
 								acquire(std::string(message.substr(19)));
 							else if (message.starts_with("missing PE export: ")) {
+								// An export the library lacks may be one the runtime serves from its own component: start that
+								// component and resolve again. A component already present that lacks it ends the search.
+								if (!symbol.by_ordinal) {
+									const auto serving = ModuleSet::serving_module(symbol.module, symbol.name);
+									if (!serving.empty() && modules.all().find(std::string(serving)) == modules.all().end()) {
+										acquire(std::string(serving));
+										continue;
+									}
+								}
 								if (std::getenv("RAVEN_TRACE_API") || std::getenv("RAVEN_TRACE_FAIL"))
 									std::cerr << "raven: cannot load " << name << ": " << staged[index].module->name << " imports " << message << '\n';
 								missing = true;
