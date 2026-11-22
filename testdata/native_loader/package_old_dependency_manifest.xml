@@ -1,0 +1,6 @@
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity Name="Raven.TooOld" Publisher="CN=Raven" Version="1.0.0.0"/>
+  <Extensions><Extension Category="windows.activatableClass.inProcessServer"><InProcessServer>
+    <Path>fixture-winrt.dll</Path><ActivatableClass ActivatableClassId="Fixture.TooOld"/>
+  </InProcessServer></Extension></Extensions>
+</Package>

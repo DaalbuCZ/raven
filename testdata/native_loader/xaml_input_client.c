@@ -33,6 +33,8 @@
 #include "../../native/upstream/raven-xaml/windows_ui_xaml_buttonbase.h"
 #include "../../native/upstream/raven-xaml/xaml_input.h"
 
+static const IID ui_statics_iid = {0x58d3573b,0xf52c,0x45be,{0x98,0x8b,0xa5,0x86,0x95,0x64,0x87,0x3c}};
+typedef HRESULT (WINAPI *event_get_fn)(IInspectable *, IInspectable **);
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
 typedef HRESULT (WINAPI *load_function)(const void *, uint32_t, IInspectable **);
@@ -431,6 +433,14 @@ int raven_entry(void)
 	struct element_state counting_entered = {&element_table, 1, &entered_count, S_OK, 0};
 	struct element_state middle_entered = {&element_table, 1, &middle_entered_count, S_OK, 0};
 	struct element_state counting_exited = {&element_table, 1, &exited_count, S_OK, 0};
+	int routed_count = 0;
+	struct element_state routed_pressed = {&element_table, 1, &routed_count, S_OK, 0};
+	IInspectable *ui_statics = NULL, *pressed_event = NULL; HSTRING ui_key = NULL;
+	static const WCHAR ui_class[] = L"Windows.UI.Xaml.UIElement";
+	if (WindowsCreateString(ui_class, ARRAYSIZE(ui_class)-1, &ui_key) != S_OK ||
+		RoGetActivationFactory(ui_key, &ui_statics_iid, (void **)&ui_statics) != S_OK || !ui_statics ||
+		((event_get_fn)((void **)ui_statics->lpVtbl)[9])(ui_statics, &pressed_event) != S_OK || !pressed_event ||
+		child_ui->lpVtbl->AddHandler(child_ui, pressed_event, (IUnknown *)&routed_pressed, FALSE) != S_OK) return 110;
 	struct element_state child_pressed = {&element_table, 1, &child_pressed_count, S_OK, 1};
 	struct element_state middle_pressed = {&element_table, 1, &middle_pressed_count, S_OK, 2};
 	struct element_state outer_pressed = {&element_table, 1, &outer_pressed_count, S_OK, 3};
@@ -531,6 +541,7 @@ int raven_entry(void)
 		if (!order_is(expected, 3)) return 59;
 	}
 	if (child_pressed_count != 1 || middle_pressed_count != 1 || outer_pressed_count != 1) return 60;
+	if (routed_count != 1 || child_ui->lpVtbl->RemoveHandler(child_ui, pressed_event, (IUnknown *)&routed_pressed) != S_OK || routed_pressed.refs != 1) return 111;
 	boolean pressed = FALSE;
 	if (button_base->lpVtbl->get_IsPressed(button_base, (uint64_t)(uintptr_t)&pressed) != S_OK || !pressed) return 61;
 
@@ -555,7 +566,7 @@ int raven_entry(void)
 		static const int expected[] = {1, 2, 3};
 		if (!order_is(expected, 3)) return 66;
 	}
-	if (child_pressed_count != 2 || middle_pressed_count != 2 || outer_pressed_count != 2) return 67;
+	if (child_pressed_count != 2 || middle_pressed_count != 2 || outer_pressed_count != 2 || routed_count != 1) return 67;
 
 	/* Out of the window: every hovered element exits, the outer grid among them, and the hover set clears. */
 	SendMessageW(hwnd, WM_MOUSELEAVE, 0, 0);
@@ -603,6 +614,7 @@ int raven_entry(void)
 	/* Closing the window unsubscribes the routing; the tree below survives the close intact. */
 	if (ICoreWindow_Close(window) != S_OK) return 87;
 
+	pressed_event->lpVtbl->Release(pressed_event); ui_statics->lpVtbl->Release(ui_statics); WindowsDeleteString(ui_key);
 	button_base->lpVtbl->Release(button_base);
 	if (failing_entered.refs != 1 || counting_entered.refs != 1 || middle_entered.refs != 1 || counting_exited.refs != 1 ||
 		child_pressed.refs != 1 || middle_pressed.refs != 1 || outer_pressed.refs != 1 ||

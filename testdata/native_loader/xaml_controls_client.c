@@ -9,15 +9,44 @@
 #include <windows.foundation.h>
 #include "windows_ui_xaml_controls.h"
 #include "windows_ui_xaml_elements.h"
+#include "windows_ui_xaml_uielement.h"
 #include "windows_ui_xaml_markup.h"
 #include "windows_ui_xaml_style.h"
+#include "xaml_styles.h"
 #include "windows_ui_xaml_dictionary.h"
 #include "windows_ui_xaml_application.h"
 #include "windows_ui_xaml_window.h"
+#include "windows_ui_xaml_contentdialog.h"
 
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
 typedef HRESULT (WINAPI *load_function)(const void *, uint32_t, IInspectable **);
+
+static const IID dependency_object_iid = {0x5c526665, 0xf60e, 0x4912, {0xaf, 0x59, 0x5f, 0xe0, 0x68, 0x0f, 0x08, 0x9d}};
+
+static const IID fixture_ui_statics_iid = {0x58d3573b,0xf52c,0x45be,{0x98,0x8b,0xa5,0x86,0x95,0x64,0x87,0x3c}};
+typedef HRESULT (WINAPI *routed_event_get_fn)(IInspectable *, IInspectable **);
+static const IID frame_framework_iid = {0xa391d09b,0x4a99,0x4b7c,{0x9d,0x8d,0x6f,0xa5,0xd0,0x1f,0x6f,0xbf}};
+typedef HRESULT (WINAPI *content_get_fn)(IInspectable *, IInspectable **);
+typedef HRESULT (WINAPI *content_put_fn)(IInspectable *, IInspectable *);
+typedef HRESULT (WINAPI *framework_name_get_fn)(IInspectable *, HSTRING *);
+typedef HRESULT (WINAPI *framework_name_put_fn)(IInspectable *, HSTRING);
+typedef HRESULT (WINAPI *framework_event_add_fn)(IInspectable *, IUnknown *, INT64 *);
+typedef HRESULT (WINAPI *framework_event_remove_fn)(IInspectable *, INT64);
+static const IID frame_theme_iid = {0x792a5d91, 0x62a1, 0x40bf, {0xa0, 0xce, 0xf9, 0xc1, 0x31, 0xfc, 0xb7, 0xa7}};
+struct fixture_theme;
+struct fixture_theme_vtbl {
+ HRESULT (WINAPI *QueryInterface)(struct fixture_theme *, REFIID, void **);
+ ULONG (WINAPI *AddRef)(struct fixture_theme *);
+ ULONG (WINAPI *Release)(struct fixture_theme *);
+ HRESULT (WINAPI *GetIids)(struct fixture_theme *, ULONG *, IID **);
+ HRESULT (WINAPI *GetRuntimeClassName)(struct fixture_theme *, HSTRING *);
+ HRESULT (WINAPI *GetTrustLevel)(struct fixture_theme *, TrustLevel *);
+ HRESULT (WINAPI *get_ActualTheme)(struct fixture_theme *, INT32 *);
+ HRESULT (WINAPI *add_ActualThemeChanged)(struct fixture_theme *, IUnknown *, INT64 *);
+ HRESULT (WINAPI *remove_ActualThemeChanged)(struct fixture_theme *, INT64);
+};
+struct fixture_theme { const struct fixture_theme_vtbl *lpVtbl; };
 
 typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIFrame frame1;
 typedef __x_ABI_CWindows_CUI_CXaml_CControls_CIFrame2 frame2;
@@ -98,8 +127,8 @@ struct fixture_control_vtbl {
 	HRESULT (STDMETHODCALLTYPE *put_HorizontalContentAlignment)(void *This, uint64_t value);
 	HRESULT (STDMETHODCALLTYPE *get_VerticalContentAlignment)(void *This, uint64_t value);
 	HRESULT (STDMETHODCALLTYPE *put_VerticalContentAlignment)(void *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *get_Background)(void *This, uint64_t value);
-	HRESULT (STDMETHODCALLTYPE *put_Background)(void *This, uint64_t value);
+	HRESULT (STDMETHODCALLTYPE *get_Background)(void *This, IInspectable **value);
+	HRESULT (STDMETHODCALLTYPE *put_Background)(void *This, IInspectable *value);
 	HRESULT (STDMETHODCALLTYPE *get_BorderThickness)(void *This, uint64_t value);
 	HRESULT (STDMETHODCALLTYPE *put_BorderThickness)(void *This, uint64_t value);
 	HRESULT (STDMETHODCALLTYPE *get_BorderBrush)(void *This, uint64_t value);
@@ -2189,6 +2218,115 @@ static HRESULT only_child_text(IInspectable *root, HSTRING *text)
 	return S_OK;
 }
 
+/* Test the dependency-property ABI without depending on an element implementation's private layout. */
+struct fixture_dependency_vtbl {
+	HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(void *);
+	ULONG (WINAPI *Release)(void *);
+	HRESULT (WINAPI *GetIids)(void *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(void *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(void *, TrustLevel *);
+	HRESULT (WINAPI *GetValue)(void *, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *, IInspectable **);
+	HRESULT (WINAPI *SetValue)(void *, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *, IInspectable *);
+	HRESULT (WINAPI *ClearValue)(void *, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *);
+	HRESULT (WINAPI *ReadLocalValue)(void *, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *, IInspectable **);
+};
+struct fixture_dependency { const struct fixture_dependency_vtbl *lpVtbl; };
+static const IID dependency_factory_iid = {0x9a03af92, 0x7d8a, 0x4937, {0x88, 0x4f, 0xec, 0xf3, 0x4f, 0xe0, 0x2a, 0xcb}};
+struct fixture_dependency_factory_vtbl {
+	HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(void *); ULONG (WINAPI *Release)(void *);
+	HRESULT (WINAPI *GetIids)(void *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(void *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(void *, TrustLevel *);
+	HRESULT (WINAPI *CreateInstance)(void *, IInspectable *, IInspectable **, struct fixture_dependency **);
+};
+struct fixture_dependency_factory { const struct fixture_dependency_factory_vtbl *lpVtbl; };
+struct fixture_changed_args_vtbl {
+	HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+	ULONG (WINAPI *AddRef)(void *); ULONG (WINAPI *Release)(void *);
+	HRESULT (WINAPI *GetIids)(void *, ULONG *, IID **);
+	HRESULT (WINAPI *GetRuntimeClassName)(void *, HSTRING *);
+	HRESULT (WINAPI *GetTrustLevel)(void *, TrustLevel *);
+	HRESULT (WINAPI *get_Property)(void *, __x_ABI_CWindows_CUI_CXaml_CIDependencyProperty **);
+	HRESULT (WINAPI *get_OldValue)(void *, IInspectable **);
+	HRESULT (WINAPI *get_NewValue)(void *, IInspectable **);
+};
+struct fixture_changed_args { const struct fixture_changed_args_vtbl *lpVtbl; };
+static struct {
+	const __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallbackVtbl *lpVtbl;
+	ULONG refs, calls; HRESULT status;
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *property;
+	IInspectable *old_value, *new_value;
+} frame_changed;
+static HRESULT WINAPI frame_changed_query(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *self, REFIID iid, void **out)
+{
+	if (!out) return E_POINTER; *out = NULL;
+	if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback)) return E_NOINTERFACE;
+	*out = self; ++frame_changed.refs; return S_OK;
+}
+static ULONG WINAPI frame_changed_addref(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *self) { (void)self; return ++frame_changed.refs; }
+static ULONG WINAPI frame_changed_release(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *self) { (void)self; return --frame_changed.refs; }
+static HRESULT WINAPI frame_changed_invoke(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *self,
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyObject *sender, __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyChangedEventArgs *event)
+{
+	(void)self;
+	struct fixture_changed_args *args = (struct fixture_changed_args *)event;
+	__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *property = NULL;
+	IInspectable *old = NULL, *value = NULL;
+	++frame_changed.calls;
+	frame_changed.status = !sender || !args || args->lpVtbl->get_Property(args, &property) != S_OK ||
+		args->lpVtbl->get_OldValue(args, &old) != S_OK || args->lpVtbl->get_NewValue(args, &value) != S_OK ||
+		property != frame_changed.property || old != frame_changed.old_value || value != frame_changed.new_value ? E_FAIL : S_OK;
+	if (property) property->lpVtbl->Release(property);
+	if (old) old->lpVtbl->Release(old);
+	if (value) value->lpVtbl->Release(value);
+	return frame_changed.status;
+}
+static const __x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallbackVtbl frame_changed_table = {
+	frame_changed_query, frame_changed_addref, frame_changed_release, frame_changed_invoke
+};
+
+/* ContentDialog.ShowAsync: the fixture's own completed handler, the delegate shape the parameterized operation's
+ * put_Completed takes. The operation is already terminal when the handler arrives, so the invoke fires inside
+ * put_Completed itself; the recorded status and result are what the await would see. */
+typedef __FIAsyncOperation_1_Windows__CUI__CXaml__CControls__CContentDialogResult fixture_dialog_op_i;
+typedef __FIAsyncOperationCompletedHandler_1_Windows__CUI__CXaml__CControls__CContentDialogResult fixture_dialog_done_i;
+
+struct fixture_dialog_done {
+	const __FIAsyncOperationCompletedHandler_1_Windows__CUI__CXaml__CControls__CContentDialogResultVtbl *lpVtbl;
+	LONG refs;
+	AsyncStatus status;
+	INT32 result;
+};
+static HRESULT WINAPI fixture_dialog_done_query(fixture_dialog_done_i *iface, REFIID iid, void **out)
+{
+	(void)iface;
+	if (!out) return E_POINTER;
+	*out = NULL;
+	if (IsEqualIID(iid, &IID_IUnknown)) {
+		*out = iface;
+		InterlockedIncrement(&((struct fixture_dialog_done *)iface)->refs);
+		return S_OK;
+	}
+	return E_NOINTERFACE;
+}
+static ULONG WINAPI fixture_dialog_done_addref(fixture_dialog_done_i *iface)
+{ return (ULONG)InterlockedIncrement(&((struct fixture_dialog_done *)iface)->refs); }
+static ULONG WINAPI fixture_dialog_done_release(fixture_dialog_done_i *iface)
+{ return (ULONG)InterlockedDecrement(&((struct fixture_dialog_done *)iface)->refs); }
+static HRESULT WINAPI fixture_dialog_done_invoke(fixture_dialog_done_i *iface, fixture_dialog_op_i *operation, AsyncStatus status)
+{
+	struct fixture_dialog_done *self = (struct fixture_dialog_done *)iface;
+	self->status = status;
+	self->result = -1;
+	if (operation && operation->lpVtbl->GetResults(operation, &self->result) != S_OK) self->result = -2;
+	return S_OK;
+}
+static const __FIAsyncOperationCompletedHandler_1_Windows__CUI__CXaml__CControls__CContentDialogResultVtbl fixture_dialog_done_table = {
+	fixture_dialog_done_query, fixture_dialog_done_addref, fixture_dialog_done_release, fixture_dialog_done_invoke,
+};
+
 /* Frame and Page through the metadata provider and the XBF loader: Navigate resolves a type name and creates the page, the frame
  * reports its source type, and a compiled document instantiates its root type. */
 int raven_entry(void)
@@ -2210,6 +2348,32 @@ int raven_entry(void)
 	IInspectable *frame_object = NULL, *page_object = NULL;
 	if (frame_factory->lpVtbl->ActivateInstance(frame_factory, &frame_object) != S_OK || !frame_object) return 4;
 	{
+		static const WCHAR name[] = L"Windows.UI.Xaml.DependencyObject";
+		HSTRING key = NULL, actual = NULL;
+		struct fixture_dependency_factory *factory = NULL;
+		struct fixture_dependency *base = NULL;
+		IInspectable *inner = NULL;
+		IUnknown *identity = NULL;
+		frame1 *not_frame = NULL;
+		if (WindowsCreateString(name, ARRAYSIZE(name)-1, &key) != S_OK ||
+			RoGetActivationFactory(key, &dependency_factory_iid, (void **)&factory) != S_OK || !factory ||
+			factory->lpVtbl->CreateInstance(factory, NULL, NULL, &base) != S_OK || !base ||
+			base->lpVtbl->GetRuntimeClassName(base, &actual) != S_OK || !same(actual, name, ARRAYSIZE(name)-1) ||
+			base->lpVtbl->QueryInterface(base, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame, (void **)&not_frame) != E_NOINTERFACE || not_frame ||
+			base->lpVtbl->QueryInterface(base, &IID_IUnknown, (void **)&identity) != S_OK || identity != (IUnknown *)base) return 35;
+		identity->lpVtbl->Release(identity); base->lpVtbl->Release(base); WindowsDeleteString(actual);
+		base = NULL; identity = NULL;
+		ULONG before = frame_object->lpVtbl->AddRef(frame_object);
+		frame_object->lpVtbl->Release(frame_object);
+		if (factory->lpVtbl->CreateInstance(factory, frame_object, &inner, &base) != S_OK || !base || !inner ||
+			base->lpVtbl->QueryInterface(base, &IID_IUnknown, (void **)&identity) != S_OK || identity != (IUnknown *)frame_object) return 36;
+		identity->lpVtbl->Release(identity); base->lpVtbl->Release(base); inner->lpVtbl->Release(inner);
+		ULONG after = frame_object->lpVtbl->AddRef(frame_object);
+		frame_object->lpVtbl->Release(frame_object);
+		if (before != after) return 37;
+		factory->lpVtbl->Release(factory); WindowsDeleteString(key);
+	}
+	{
 		__x_ABI_CWindows_CUI_CXaml_CControls_CIFrameFactory *ctor=NULL;
 		IInspectable *inner=NULL, *base=NULL; frame1 *part=NULL; IUnknown *identity=NULL;
 		if (frame_factory->lpVtbl->QueryInterface(frame_factory,&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrameFactory,(void **)&ctor)!=S_OK || !ctor ||
@@ -2218,12 +2382,199 @@ int raven_entry(void)
 			inner->lpVtbl->QueryInterface(inner,&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame,(void **)&part)!=S_OK || !part ||
 			part->lpVtbl->QueryInterface(part,&IID_IUnknown,(void **)&identity)!=S_OK || identity!=(IUnknown *)frame_object) return 22;
 		identity->lpVtbl->Release(identity); part->lpVtbl->Release(part); base->lpVtbl->Release(base);
+		{
+			IUnknown *dependency = NULL, *dependency_identity = NULL;
+			ULONG before = frame_object->lpVtbl->AddRef(frame_object);
+			frame_object->lpVtbl->Release(frame_object);
+			if (inner->lpVtbl->QueryInterface(inner, &dependency_object_iid, (void **)&dependency) != S_OK || !dependency ||
+				dependency->lpVtbl->QueryInterface(dependency, &IID_IUnknown, (void **)&dependency_identity) != S_OK ||
+				dependency_identity != (IUnknown *)frame_object) return 23;
+			dependency_identity->lpVtbl->Release(dependency_identity);
+			dependency->lpVtbl->Release(dependency);
+			ULONG after = frame_object->lpVtbl->AddRef(frame_object);
+			frame_object->lpVtbl->Release(frame_object);
+			if (before != after) return 24;
+		}
+		{
+			IUnknown *control = NULL, *control_identity = NULL;
+			ULONG before = frame_object->lpVtbl->AddRef(frame_object);
+			frame_object->lpVtbl->Release(frame_object);
+			if (inner->lpVtbl->QueryInterface(inner, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl, (void **)&control) != S_OK || !control ||
+				control->lpVtbl->QueryInterface(control, &IID_IUnknown, (void **)&control_identity) != S_OK ||
+				control_identity != (IUnknown *)frame_object) return 25;
+			control_identity->lpVtbl->Release(control_identity);
+			control->lpVtbl->Release(control);
+			ULONG after = frame_object->lpVtbl->AddRef(frame_object);
+			frame_object->lpVtbl->Release(frame_object);
+			if (before != after) return 26;
+		}
+		{
+			struct fixture_theme *theme = NULL; IUnknown *identity2 = NULL;
+			if (inner->lpVtbl->QueryInterface(inner, &frame_theme_iid, (void **)&theme) != S_OK || !theme ||
+				theme->lpVtbl->QueryInterface(theme, &IID_IUnknown, (void **)&identity2) != S_OK || identity2 != (IUnknown *)frame_object) return 38;
+			identity2->lpVtbl->Release(identity2); theme->lpVtbl->Release(theme);
+		}
+		{
+			IInspectable *ui = NULL; IUnknown *identity2 = NULL;
+			if (inner->lpVtbl->QueryInterface(inner, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui) != S_OK || !ui ||
+				ui->lpVtbl->QueryInterface(ui, &IID_IUnknown, (void **)&identity2) != S_OK || identity2 != (IUnknown *)frame_object) return 46;
+			identity2->lpVtbl->Release(identity2); ui->lpVtbl->Release(ui);
+		}
+		{
+			IInspectable *content = NULL; IUnknown *identity2 = NULL;
+			if (inner->lpVtbl->QueryInterface(inner, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl, (void **)&content) != S_OK || !content ||
+				content->lpVtbl->QueryInterface(content, &IID_IUnknown, (void **)&identity2) != S_OK || identity2 != (IUnknown *)frame_object) return 52;
+			identity2->lpVtbl->Release(identity2); content->lpVtbl->Release(content);
+		}
 		inner->lpVtbl->Release(inner); ctor->lpVtbl->Release(ctor);
 	}
 	if (page_factory->lpVtbl->ActivateInstance(page_factory, &page_object) != S_OK || !page_object) return 5;
 	frame1 *frame = NULL;
 	if (frame_object->lpVtbl->QueryInterface(frame_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIFrame, (void **)&frame) != S_OK ||
 		!frame) return 6;
+	{
+		IUnknown *control = NULL, *control_identity = NULL, *frame_identity = NULL;
+		if (frame_object->lpVtbl->QueryInterface(frame_object, &IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControl, (void **)&control) != S_OK || !control ||
+			control->lpVtbl->QueryInterface(control, &IID_IUnknown, (void **)&control_identity) != S_OK ||
+			frame_object->lpVtbl->QueryInterface(frame_object, &IID_IUnknown, (void **)&frame_identity) != S_OK ||
+			control_identity != frame_identity) return 27;
+		const struct fixture_control_vtbl *table = (const struct fixture_control_vtbl *)control->lpVtbl;
+		IInspectable *background = NULL;
+		if (table->get_Background(control, NULL) != E_POINTER ||
+			table->put_Background(control, page_object) != S_OK ||
+			table->get_Background(control, &background) != S_OK || background != page_object ||
+			table->put_Background(control, NULL) != S_OK) return 41;
+		background->lpVtbl->Release(background);
+		frame_identity->lpVtbl->Release(frame_identity);
+		control_identity->lpVtbl->Release(control_identity);
+		control->lpVtbl->Release(control);
+	}
+	{
+		IInspectable *ui = NULL; IUnknown *identity2 = NULL;
+		if (frame_object->lpVtbl->QueryInterface(frame_object, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui) != S_OK || !ui ||
+			ui->lpVtbl->QueryInterface(ui, &IID_IUnknown, (void **)&identity2) != S_OK || identity2 != (IUnknown *)frame_object) return 47;
+		identity2->lpVtbl->Release(identity2); ui->lpVtbl->Release(ui);
+	}
+	{
+		static const WCHAR class_name[] = L"Windows.UI.Xaml.UIElement";
+		HSTRING key = NULL; IInspectable *statics = NULL, *event = NULL, *again = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIUIElement *ui = NULL;
+		if (WindowsCreateString(class_name, ARRAYSIZE(class_name)-1, &key) != S_OK ||
+			RoGetActivationFactory(key, &fixture_ui_statics_iid, (void **)&statics) != S_OK || !statics ||
+			((routed_event_get_fn)((void **)statics->lpVtbl)[9])(statics, &event) != S_OK || !event ||
+			((routed_event_get_fn)((void **)statics->lpVtbl)[9])(statics, &again) != S_OK || again != event ||
+			frame_object->lpVtbl->QueryInterface(frame_object, &IID__x_ABI_CWindows_CUI_CXaml_CIUIElement, (void **)&ui) != S_OK || !ui) return 48;
+		ULONG before = page_object->lpVtbl->AddRef(page_object); page_object->lpVtbl->Release(page_object);
+		if (ui->lpVtbl->AddHandler(ui, event, (IUnknown *)page_object, FALSE) != S_OK ||
+			ui->lpVtbl->RemoveHandler(ui, event, (IUnknown *)page_object) != S_OK) return 49;
+		IInspectable *key_event = NULL;
+		if (((routed_event_get_fn)((void **)statics->lpVtbl)[6])(statics, &key_event) != S_OK || !key_event ||
+			ui->lpVtbl->AddHandler(ui, key_event, (IUnknown *)page_object, TRUE) != S_OK ||
+			ui->lpVtbl->RemoveHandler(ui, key_event, (IUnknown *)page_object) != S_OK) return 51;
+		key_event->lpVtbl->Release(key_event);
+		ULONG after = page_object->lpVtbl->AddRef(page_object); page_object->lpVtbl->Release(page_object);
+		if (before != after) return 50;
+		ui->lpVtbl->Release(ui); again->lpVtbl->Release(again); event->lpVtbl->Release(event); statics->lpVtbl->Release(statics); WindowsDeleteString(key);
+	}
+	{
+		IInspectable *content = NULL, *value = NULL;
+		if (frame_object->lpVtbl->QueryInterface(frame_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIContentControl, (void **)&content) != S_OK || !content) return 53;
+		void **slots = (void **)content->lpVtbl;
+		if (((content_get_fn)slots[6])(content, NULL) != E_POINTER ||
+			((content_put_fn)slots[7])(content, page_object) != S_OK ||
+			((content_get_fn)slots[6])(content, &value) != S_OK || value != page_object ||
+			((content_put_fn)slots[7])(content, NULL) != S_OK) return 54;
+		value->lpVtbl->Release(value); content->lpVtbl->Release(content);
+	}
+	{
+		IInspectable *framework = NULL; IUnknown *identity = NULL; HSTRING input = NULL, output = NULL;
+		static const WCHAR expected[] = L"FrameName";
+		if (frame_object->lpVtbl->QueryInterface(frame_object, &frame_framework_iid, (void **)&framework) != S_OK || !framework ||
+			framework->lpVtbl->QueryInterface(framework, &IID_IUnknown, (void **)&identity) != S_OK || identity != (IUnknown *)frame_object ||
+			WindowsCreateString(expected, ARRAYSIZE(expected)-1, &input) != S_OK) return 42;
+		void **slots = (void **)framework->lpVtbl;
+		if (((framework_name_put_fn)slots[34])(framework, input) != S_OK ||
+			((framework_name_get_fn)slots[33])(framework, &output) != S_OK || !same(output, expected, ARRAYSIZE(expected)-1) ||
+			((framework_name_get_fn)slots[33])(framework, NULL) != E_POINTER) return 43;
+		INT64 first = 0, second = 0;
+		ULONG before = page_object->lpVtbl->AddRef(page_object); page_object->lpVtbl->Release(page_object);
+		if (((framework_event_add_fn)slots[43])(framework, (IUnknown *)page_object, &first) != S_OK || !first ||
+			((framework_event_add_fn)slots[45])(framework, (IUnknown *)page_object, &second) != S_OK || first == second ||
+			((framework_event_remove_fn)slots[44])(framework, first) != S_OK ||
+			((framework_event_remove_fn)slots[46])(framework, second) != S_OK) return 44;
+		ULONG after = page_object->lpVtbl->AddRef(page_object); page_object->lpVtbl->Release(page_object);
+		if (before != after) return 45;
+		WindowsDeleteString(input); WindowsDeleteString(output); identity->lpVtbl->Release(identity); framework->lpVtbl->Release(framework);
+	}
+	{
+		struct fixture_theme *theme = NULL; INT32 actual = 0; INT64 token = 0;
+		ULONG before = frame_object->lpVtbl->AddRef(frame_object); frame_object->lpVtbl->Release(frame_object);
+		if (frame_object->lpVtbl->QueryInterface(frame_object, &frame_theme_iid, (void **)&theme) != S_OK || !theme ||
+			theme->lpVtbl->get_ActualTheme(theme, NULL) != E_POINTER ||
+			theme->lpVtbl->get_ActualTheme(theme, &actual) != S_OK || actual != 1 ||
+			theme->lpVtbl->add_ActualThemeChanged(theme, (IUnknown *)page_object, &token) != S_OK || !token ||
+			theme->lpVtbl->remove_ActualThemeChanged(theme, token) != S_OK) return 39;
+		theme->lpVtbl->Release(theme);
+		ULONG after = frame_object->lpVtbl->AddRef(frame_object); frame_object->lpVtbl->Release(frame_object);
+		if (before != after) return 40;
+	}
+	{
+		HSTRING dp_name = NULL, meta_name = NULL, property_name = NULL;
+		IActivationFactory *dp_factory = NULL, *meta_factory = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics *dp_statics = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics *meta_statics = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata *metadata = NULL;
+		__x_ABI_CWindows_CUI_CXaml_CIDependencyProperty *property = NULL;
+		struct fixture_dependency *dependency = NULL, *other_dependency = NULL;
+		IInspectable *other_frame = NULL, *read = NULL, *unset = NULL;
+		xaml_type_name type = {NULL, TypeKind_Primitive}, owner = {NULL, TypeKind_Metadata};
+		static const WCHAR dp_class[] = L"Windows.UI.Xaml.DependencyProperty";
+		static const WCHAR meta_class[] = L"Windows.UI.Xaml.PropertyMetadata";
+		static const WCHAR prop[] = L"FixtureFrameProperty";
+		frame_changed.lpVtbl = &frame_changed_table; frame_changed.refs = 1; frame_changed.calls = 0;
+		if (WindowsCreateString(dp_class, ARRAYSIZE(dp_class)-1, &dp_name) != S_OK ||
+			WindowsCreateString(meta_class, ARRAYSIZE(meta_class)-1, &meta_name) != S_OK ||
+			WindowsCreateString(prop, ARRAYSIZE(prop)-1, &property_name) != S_OK ||
+			WindowsCreateString(L"Object", 6, &type.Name) != S_OK || WindowsDuplicateString(frame_key, &owner.Name) != S_OK ||
+			RoGetActivationFactory(dp_name, &IID_IActivationFactory, (void **)&dp_factory) != S_OK ||
+			RoGetActivationFactory(meta_name, &IID_IActivationFactory, (void **)&meta_factory) != S_OK ||
+			dp_factory->lpVtbl->QueryInterface(dp_factory, &IID___x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStatics, (void **)&dp_statics) != S_OK ||
+			meta_factory->lpVtbl->QueryInterface(meta_factory, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataStatics, (void **)&meta_statics) != S_OK ||
+			meta_statics->lpVtbl->CreateWithDefaultValueAndCallback(meta_statics, (IInspectable *)frame_factory,
+				(__x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback *)&frame_changed, &metadata) != S_OK ||
+			dp_statics->lpVtbl->RegisterAttached(dp_statics, property_name, type, owner, metadata, &property) != S_OK ||
+			frame_object->lpVtbl->QueryInterface(frame_object, &dependency_object_iid, (void **)&dependency) != S_OK ||
+			frame_factory->lpVtbl->ActivateInstance(frame_factory, &other_frame) != S_OK ||
+			other_frame->lpVtbl->QueryInterface(other_frame, &dependency_object_iid, (void **)&other_dependency) != S_OK) return 28;
+		metadata->lpVtbl->Release(metadata);
+		frame_changed.property = property; frame_changed.old_value = (IInspectable *)frame_factory; frame_changed.new_value = (IInspectable *)page_factory;
+		if (dependency->lpVtbl->GetValue(dependency, property, &read) != S_OK || read != (IInspectable *)frame_factory) return 29;
+		read->lpVtbl->Release(read); read = NULL;
+		if (dp_statics->lpVtbl->get_UnsetValue(dp_statics, &unset) != S_OK ||
+			dependency->lpVtbl->ReadLocalValue(dependency, property, &read) != S_OK || read != unset) return 30;
+		read->lpVtbl->Release(read); read = NULL;
+		if (dependency->lpVtbl->SetValue(dependency, property, (IInspectable *)page_factory) != S_OK ||
+			frame_changed.calls != 1 || frame_changed.status != S_OK ||
+			dependency->lpVtbl->ReadLocalValue(dependency, property, &read) != S_OK || read != (IInspectable *)page_factory) return 31;
+		read->lpVtbl->Release(read); read = NULL;
+		if (other_dependency->lpVtbl->GetValue(other_dependency, property, &read) != S_OK || read != (IInspectable *)frame_factory) return 32;
+		read->lpVtbl->Release(read); read = NULL;
+		frame_changed.old_value = (IInspectable *)page_factory; frame_changed.new_value = (IInspectable *)frame_factory;
+		if (dependency->lpVtbl->ClearValue(dependency, property) != S_OK || frame_changed.calls != 2 || frame_changed.status != S_OK ||
+			dependency->lpVtbl->ReadLocalValue(dependency, property, &read) != S_OK || read != unset) return 33;
+		read->lpVtbl->Release(read); read = (IInspectable *)1;
+		frame_changed.old_value = (IInspectable *)frame_factory; frame_changed.new_value = NULL;
+		if (dependency->lpVtbl->SetValue(dependency, property, NULL) != S_OK || frame_changed.calls != 3 || frame_changed.status != S_OK ||
+			dependency->lpVtbl->ReadLocalValue(dependency, property, &read) != S_OK || read != NULL ||
+			dependency->lpVtbl->SetValue(dependency, property, NULL) != S_OK || frame_changed.calls != 3) return 34;
+		unset->lpVtbl->Release(unset);
+		other_dependency->lpVtbl->Release(other_dependency); other_frame->lpVtbl->Release(other_frame);
+		dependency->lpVtbl->Release(dependency); property->lpVtbl->Release(property);
+		meta_statics->lpVtbl->Release(meta_statics); dp_statics->lpVtbl->Release(dp_statics);
+		meta_factory->lpVtbl->Release(meta_factory); dp_factory->lpVtbl->Release(dp_factory);
+		WindowsDeleteString(owner.Name); WindowsDeleteString(type.Name); WindowsDeleteString(property_name);
+		WindowsDeleteString(meta_name); WindowsDeleteString(dp_name);
+	}
 	page1 *page = NULL;
 	if (page_object->lpVtbl->QueryInterface(page_object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPage, (void **)&page) != S_OK ||
 		!page) return 7;
@@ -3599,6 +3950,67 @@ int raven_entry(void)
 		application_activation->lpVtbl->Release(application_activation);
 		application->lpVtbl->Release(application);
 	}
+
+	/* ContentDialog.ShowAsync: the standalone dialog frame's presentation members answer honestly — ShowAsync
+	 * returns an IAsyncOperation`1<ContentDialogResult> that is already terminal, completed with None (the
+	 * documented result for a dialog taken down without a button click), the parameterized instance faces the
+	 * await casts answer, the completed handler set after the fact fires inside put_Completed, and Hide answers
+	 * S_OK the way Windows' own does on a dialog that is not shown. */
+	{
+		static const WCHAR dialog_name[] = L"Windows.UI.Xaml.Controls.ContentDialog";
+		static const WCHAR ok_text[] = L"OK";
+		HSTRING dialog_key = NULL, ok_value = NULL, read_back = NULL;
+		IActivationFactory *dialog_factory = NULL;
+		IInspectable *dialog_object = NULL;
+		contentdialog_i *dialog = NULL;
+		IInspectable *operation_object = NULL;
+		fixture_dialog_op_i *operation = NULL, *operation_alt = NULL;
+		IAsyncInfo *info = NULL;
+		AsyncStatus status;
+		INT32 direct_result = -1;
+		struct fixture_dialog_done done;
+		HRESULT hide_result;
+		if (WindowsCreateString(dialog_name, ARRAYSIZE(dialog_name) - 1, &dialog_key) != S_OK) return 7800;
+		if (RoGetActivationFactory(dialog_key, &IID_IActivationFactory, (void **)&dialog_factory) != S_OK || !dialog_factory)
+			return 7801;
+		if (dialog_factory->lpVtbl->ActivateInstance(dialog_factory, &dialog_object) != S_OK || !dialog_object) return 7802;
+		if (dialog_object->lpVtbl->QueryInterface(dialog_object,
+			&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIContentDialog, (void **)&dialog) != S_OK || !dialog) return 7803;
+		if (WindowsCreateString(ok_text, ARRAYSIZE(ok_text) - 1, &ok_value) != S_OK) return 7804;
+		if (dialog->lpVtbl->put_PrimaryButtonText(dialog, ok_value) != S_OK ||
+			dialog->lpVtbl->get_PrimaryButtonText(dialog, &read_back) != S_OK ||
+			!same(read_back, ok_text, ARRAYSIZE(ok_text) - 1)) return 7805;
+		WindowsDeleteString(read_back);
+		WindowsDeleteString(ok_value);
+		if (dialog->lpVtbl->ShowAsync(dialog, &operation_object) != S_OK || !operation_object) return 7806;
+		if (operation_object->lpVtbl->QueryInterface(operation_object,
+			&IID___FIAsyncOperation_1_Windows__CUI__CXaml__CControls__CContentDialogResult,
+			(void **)&operation) != S_OK || !operation) return 7807;
+		if (operation_object->lpVtbl->QueryInterface(operation_object,
+			&IID___FIAsyncOperation_1_Windows__CUI__CXaml__CControls__CContentDialogResult_rcvariant,
+			(void **)&operation_alt) != S_OK || !operation_alt) return 7808;
+		if (operation->lpVtbl->QueryInterface(operation, &IID_IAsyncInfo, (void **)&info) != S_OK || !info)
+			return 7809;
+		if (info->lpVtbl->get_Status(info, &status) != S_OK || status != Completed) return 7810;
+		info->lpVtbl->Release(info);
+		done.lpVtbl = &fixture_dialog_done_table;
+		done.refs = 1;
+		done.status = Started;
+		done.result = -3;
+		if (operation->lpVtbl->put_Completed(operation, (fixture_dialog_done_i *)&done) != S_OK ||
+			done.status != Completed || done.result != 0) return 7811;
+		if (operation->lpVtbl->GetResults(operation, &direct_result) != S_OK || direct_result != 0) return 7812;
+		hide_result = dialog->lpVtbl->Hide(dialog);
+		if (hide_result != S_OK) return 7813;
+		operation_alt->lpVtbl->Release(operation_alt);
+		operation->lpVtbl->Release(operation);
+		operation_object->lpVtbl->Release(operation_object);
+		dialog->lpVtbl->Release(dialog);
+		dialog_object->lpVtbl->Release(dialog_object);
+		dialog_factory->lpVtbl->Release(dialog_factory);
+		WindowsDeleteString(dialog_key);
+	}
+
 
 	frame_fifth->lpVtbl->Release(frame_fifth);
 	frame_fourth->lpVtbl->Release(frame_fourth);

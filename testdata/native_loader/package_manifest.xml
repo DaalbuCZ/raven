@@ -9,6 +9,11 @@
   <Resources>
     <Resource Language="en-US"/>
   </Resources>
+  <Dependencies>
+    <PackageDependency Name="Raven.Dependency" Publisher="CN=Raven" MinVersion="1.0.0.0"/>
+    <PackageDependency Name="Raven.BadPublisher" Publisher="CN=Raven" MinVersion="1.0.0.0"/>
+    <PackageDependency Name="Raven.TooOld" Publisher="CN=Raven" MinVersion="2.0.0.0"/>
+  </Dependencies>
   <Extensions>
     <Extension Category="other"><InProcessServer><Path>wrong.dll</Path><ActivatableClass ActivatableClassId="Fixture.WrongCategory"/></InProcessServer></Extension>
     <Extension Category="windows.activatableClass.inProcessServer"><InProcessServer>

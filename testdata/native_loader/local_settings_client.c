@@ -478,7 +478,15 @@ int raven_entry(void)
 		observable->lpVtbl->Release(observable);
 	} else if (!lstrcmpW(mode, L"empty")) {
 		UINT32 size = 99;
-		if (map->lpVtbl->get_Size(map, &size) != S_OK || size || map->lpVtbl->Clear(map) != S_OK) return 24;
+		__FIObservableMap_2_HSTRING_IInspectable *observable = NULL;
+		struct changed_handler handler = {{(void *)&changed_table}, 1, 0, 0, CollectionChange_Reset};
+		EventRegistrationToken token;
+		if (values->lpVtbl->QueryInterface(values, &IID___FIObservableMap_2_HSTRING_IInspectable, (void **)&observable) != S_OK ||
+			observable->lpVtbl->add_MapChanged(observable, &handler.iface, &token) != S_OK ||
+			map->lpVtbl->get_Size(map, &size) != S_OK || size || map->lpVtbl->Remove(map, int_key) != S_OK || handler.calls ||
+			observable->lpVtbl->remove_MapChanged(observable, token) != S_OK || handler.refs != 1 ||
+			map->lpVtbl->Clear(map) != S_OK) return 24;
+		observable->lpVtbl->Release(observable);
 	} else if (!lstrcmpW(mode, L"read")) {
 		IInspectable *null_value = (void *)1;
 		boolean found = FALSE;

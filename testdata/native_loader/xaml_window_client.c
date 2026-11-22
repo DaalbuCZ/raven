@@ -6,6 +6,7 @@
 #include <winstring.h>
 #include <activation.h>
 #include <windows.ui.core.h>
+#include <windows.graphics.display.h>
 #include "windows_ui_xaml_window.h"
 
 typedef HRESULT (WINAPI *initialize_function)(int);
@@ -85,12 +86,46 @@ int raven_entry(void)
 	if (first->lpVtbl->get_Bounds(first, (uint64_t)(uintptr_t)&bounds) != S_OK) return 7;
 	core_window *core = NULL;
 	if (first->lpVtbl->get_CoreWindow(first, (uint64_t)(uintptr_t)&core) != S_OK || !core) return 8;
+	{
+		static const WCHAR display_name[] = L"Windows.Graphics.Display.DisplayInformation";
+		HSTRING key = NULL;
+		__x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformationStatics *display_statics = NULL;
+		__x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformation *display = NULL;
+		__x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformation2 *display2 = NULL;
+		__x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformation3 *display3 = NULL;
+		__x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformation4 *display4 = NULL;
+		__FIReference_1_DOUBLE *diagonal = (void *)1; UINT32 width = 0, height = 0;
+		IInspectable *identity = NULL; FLOAT dpi = 0; DOUBLE ratio = 0;
+		if (WindowsCreateString(display_name, ARRAYSIZE(display_name)-1, &key) != S_OK ||
+			RoGetActivationFactory(key, &IID___x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformationStatics, (void **)&display_statics) != S_OK || !display_statics ||
+			display_statics->lpVtbl->GetForCurrentView(display_statics, &display) != S_OK || !display ||
+			display->lpVtbl->get_LogicalDpi(display, &dpi) != S_OK || dpi <= 0 ||
+			display->lpVtbl->QueryInterface(display, &IID___x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformation2, (void **)&display2) != S_OK || !display2 ||
+			display2->lpVtbl->get_RawPixelsPerViewPixel(display2, &ratio) != S_OK || ratio != (DOUBLE)dpi / 96.0 ||
+			display2->lpVtbl->QueryInterface(display2, &IID_IInspectable, (void **)&identity) != S_OK || identity != (IInspectable *)display ||
+			display->lpVtbl->QueryInterface(display, &IID___x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformation3, (void **)&display3) != S_OK || !display3 ||
+			display3->lpVtbl->get_DiagonalSizeInInches(display3, &diagonal) != S_OK || diagonal ||
+			display->lpVtbl->QueryInterface(display, &IID___x_ABI_CWindows_CGraphics_CDisplay_CIDisplayInformation4, (void **)&display4) != S_OK || !display4 ||
+			display4->lpVtbl->get_ScreenWidthInRawPixels(display4, &width) != S_OK || !width ||
+			display4->lpVtbl->get_ScreenHeightInRawPixels(display4, &height) != S_OK || !height ||
+			display->lpVtbl->get_LogicalDpi(display, NULL) != E_POINTER) return 26;
+		identity->lpVtbl->Release(identity); display4->lpVtbl->Release(display4); display3->lpVtbl->Release(display3); display2->lpVtbl->Release(display2); display->lpVtbl->Release(display);
+		display_statics->lpVtbl->Release(display_statics); WindowsDeleteString(key);
+	}
 	core_dispatcher *dispatcher = NULL;
 	if (first->lpVtbl->get_Dispatcher(first, (uint64_t)(uintptr_t)&dispatcher) != S_OK || !dispatcher) return 9;
 	window2 *later = NULL;
 	if (first->lpVtbl->QueryInterface(first, &IID__x_ABI_CWindows_CUI_CXaml_CIWindow2, (void **)&later) != S_OK || !later) return 10;
 	window3 *third = NULL;
 	if (first->lpVtbl->QueryInterface(first, &IID__x_ABI_CWindows_CUI_CXaml_CIWindow3, (void **)&third) != S_OK || !third) return 11;
+	{
+		IInspectable *compositor = NULL, *again = NULL;
+		if (third->lpVtbl->get_Compositor(third, 0) != E_POINTER ||
+			third->lpVtbl->get_Compositor(third, (uint64_t)(uintptr_t)&compositor) != S_OK || !compositor ||
+			third->lpVtbl->get_Compositor(third, (uint64_t)(uintptr_t)&again) != S_OK || again != compositor) return 25;
+		again->lpVtbl->Release(again);
+		compositor->lpVtbl->Release(compositor);
+	}
 	window4 *fourth = NULL;
 	if (first->lpVtbl->QueryInterface(first, &IID__x_ABI_CWindows_CUI_CXaml_CIWindow4, (void **)&fourth) != S_OK || !fourth) return 12;
 	if (first->lpVtbl->Activate(first) != S_OK) return 13;

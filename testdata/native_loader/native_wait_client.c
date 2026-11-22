@@ -74,6 +74,12 @@ int raven_entry(void)
 	const HANDLE both[] = {unset, set};
 	if (NtWaitForMultipleObjects(2, both, 1, FALSE, &one_second) != 1 || NtWaitForMultipleObjects(2, both, 0, FALSE, &twenty_ms) != STATUS_TIMEOUT)
 		return 12;
+	// Libraries that look the native sleep up at run time rather than importing it (vkd3d-proton's swapchain setup among them) need it
+	// in ntdll's export table, where GetProcAddress finds it, and the pointer it returns must answer like the import does.
+	NTSTATUS (NTAPI *delay_lookup)(BOOLEAN, const LARGE_INTEGER *) =
+		(NTSTATUS (NTAPI *)(BOOLEAN, const LARGE_INTEGER *))GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtDelayExecution");
+	if (!delay_lookup || delay_lookup(FALSE, &twenty_ms) != 0)
+		return 13;
 	CloseHandle(thread);
 	CloseHandle(set);
 	CloseHandle(unset);

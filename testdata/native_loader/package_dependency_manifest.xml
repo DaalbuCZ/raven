@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity Name="Raven.Dependency" Publisher="CN=Raven" Version="1.0.0.0"/>
+  <Extensions><Extension Category="windows.activatableClass.inProcessServer"><InProcessServer>
+    <Path>fixture-winrt.dll</Path><ActivatableClass ActivatableClassId="Fixture.DependencyClass" ThreadingModel="both"/>
+  </InProcessServer></Extension></Extensions>
+</Package>

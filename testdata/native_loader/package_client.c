@@ -197,8 +197,8 @@ int raven_entry(void)
 		WindowsDeleteString(family);
 	}
 	{
-		static const WCHAR *classes[] = { L"Fixture.PackagedClass", L"Fixture.WrongCategory", L"Fixture.Traversal" };
-		static const HRESULT results[] = { S_OK, REGDB_E_CLASSNOTREG, E_INVALIDARG };
+		static const WCHAR *classes[] = { L"Fixture.PackagedClass", L"Fixture.WrongCategory", L"Fixture.Traversal", L"Fixture.DependencyClass", L"Fixture.BadPublisher", L"Fixture.TooOld" };
+		static const HRESULT results[] = { S_OK, REGDB_E_CLASSNOTREG, E_INVALIDARG, S_OK, REGDB_E_CLASSNOTREG, REGDB_E_CLASSNOTREG };
 		for (UINT32 i = 0; i < ARRAYSIZE(classes); ++i) {
 			HSTRING key = NULL;
 			IActivationFactory *packaged = NULL;
@@ -206,7 +206,7 @@ int raven_entry(void)
 			HRESULT result = RoGetActivationFactory(key, &IID_IActivationFactory, (void **)&packaged);
 			WindowsDeleteString(key);
 			if (result != results[i]) return 41 + i;
-			if (i == 0) {
+			if (i == 0 || i == 3) {
 				HSTRING actual = NULL;
 				if (!packaged || packaged->lpVtbl->GetRuntimeClassName(packaged, &actual) != S_OK ||
 					!same_text(actual, L"Fixture.PackagedClass")) return 44;

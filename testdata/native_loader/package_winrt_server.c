@@ -27,7 +27,8 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING class_id, I
 	const WCHAR *text = WindowsGetStringRawBuffer(class_id, &length);
 	if (!out) return E_POINTER;
 	*out = NULL;
-	if (length != 21 || CompareStringOrdinal(text, length, L"Fixture.PackagedClass", -1, FALSE) != CSTR_EQUAL) return CLASS_E_CLASSNOTAVAILABLE;
+	if ((length != 21 || CompareStringOrdinal(text, length, L"Fixture.PackagedClass", -1, FALSE) != CSTR_EQUAL) &&
+		(length != 23 || CompareStringOrdinal(text, length, L"Fixture.DependencyClass", -1, FALSE) != CSTR_EQUAL)) return CLASS_E_CLASSNOTAVAILABLE;
 	*out = &factory;
 	return S_OK;
 }

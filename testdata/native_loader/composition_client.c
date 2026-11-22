@@ -195,14 +195,17 @@ static int check_swapchain_panel(void)
 	IDXGISwapChain *value = (void *)(UINT_PTR)1;
 	if (get(panel, NULL) != E_POINTER || get(panel, &value) != S_OK || value) return __LINE__;
 	struct chain_probe first = {{&chain_table}, 1}, second = {{&chain_table}, 1};
-	if (native->lpVtbl->SetSwapChain(native, (IDXGISwapChain *)&first) != E_NOTIMPL || first.refs != 1) return __LINE__;
+	/* The native face attaches like the engine-internal store does: the panel keeps the composition swapchain
+	 * reference (AddRef/Release, the honest storage the Shapr3D attach path rides), so SetSwapChain answers
+	 * S_OK and the reference counts below track the stored chain. */
+	if (native->lpVtbl->SetSwapChain(native, (IDXGISwapChain *)&first) != S_OK || first.refs != 2) return __LINE__;
 	if (store(panel, (IDXGISwapChain *)&first) != S_OK || first.refs != 2) return __LINE__;
 	if (store(panel, (IDXGISwapChain *)&first) != S_OK || first.refs != 2) return __LINE__;
 	if (get(panel, &value) != S_OK || value != (IDXGISwapChain *)&first || first.refs != 3) return __LINE__;
 	value->lpVtbl->Release(value);
 	if (store(panel, (IDXGISwapChain *)&second) != S_OK || first.refs != 1 || second.refs != 2) return __LINE__;
-	if (native->lpVtbl->SetSwapChain(native, (IDXGISwapChain *)&first) != E_NOTIMPL || first.refs != 1) return __LINE__;
-	if (get(panel, &value) != S_OK || value != (IDXGISwapChain *)&second) return __LINE__;
+	if (native->lpVtbl->SetSwapChain(native, (IDXGISwapChain *)&first) != S_OK || first.refs != 2 || second.refs != 1) return __LINE__;
+	if (get(panel, &value) != S_OK || value != (IDXGISwapChain *)&first || first.refs != 3) return __LINE__;
 	value->lpVtbl->Release(value);
 	struct panel_worker worker = {panel, native, store, get};
 	HANDLE thread = CreateThread(NULL, 0, panel_wrong_thread, &worker, 0, NULL);
@@ -210,7 +213,7 @@ static int check_swapchain_panel(void)
 	if (!thread || WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 ||
 		!GetExitCodeThread(thread, &result) || result) return __LINE__;
 	CloseHandle(thread);
-	if (native->lpVtbl->SetSwapChain(native, NULL) != S_OK || second.refs != 1) return __LINE__;
+	if (native->lpVtbl->SetSwapChain(native, NULL) != S_OK || first.refs != 1) return __LINE__;
 	if (store(panel, (IDXGISwapChain *)&first) != S_OK) return __LINE__;
 	object->lpVtbl->Release(object);
 	panel->lpVtbl->Release(panel);

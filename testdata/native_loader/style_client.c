@@ -72,6 +72,32 @@ typedef __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataVtbl metadata_i_vtbl;
 typedef __x_ABI_CWindows_CUI_CXaml_CISetter setter_i;
 typedef raven_dependency_property_interop dp_interop_i;
 
+static const IID fixture_solid_factory_iid = {0xd935ce0c,0x86f5,0x4da6,{0x8a,0x27,0xb1,0x61,0x9e,0xf7,0xf9,0x2b}};
+static const IID fixture_solid_iid = {0x9d850850,0x66f3,0x48df,{0x9a,0x8f,0x82,0x4b,0xd5,0xe0,0x70,0xaf}};
+struct fixture_solid_factory;
+struct fixture_solid_factory_vtbl {
+ HRESULT (WINAPI *QueryInterface)(struct fixture_solid_factory *, REFIID, void **);
+ ULONG (WINAPI *AddRef)(struct fixture_solid_factory *);
+ ULONG (WINAPI *Release)(struct fixture_solid_factory *);
+ HRESULT (WINAPI *GetIids)(struct fixture_solid_factory *, ULONG *, IID **);
+ HRESULT (WINAPI *GetRuntimeClassName)(struct fixture_solid_factory *, HSTRING *);
+ HRESULT (WINAPI *GetTrustLevel)(struct fixture_solid_factory *, TrustLevel *);
+ HRESULT (WINAPI *CreateInstanceWithColor)(struct fixture_solid_factory *, color_s, IInspectable **);
+};
+struct fixture_solid_factory { const struct fixture_solid_factory_vtbl *lpVtbl; };
+struct fixture_solid;
+struct fixture_solid_vtbl {
+ HRESULT (WINAPI *QueryInterface)(struct fixture_solid *, REFIID, void **);
+ ULONG (WINAPI *AddRef)(struct fixture_solid *);
+ ULONG (WINAPI *Release)(struct fixture_solid *);
+ HRESULT (WINAPI *GetIids)(struct fixture_solid *, ULONG *, IID **);
+ HRESULT (WINAPI *GetRuntimeClassName)(struct fixture_solid *, HSTRING *);
+ HRESULT (WINAPI *GetTrustLevel)(struct fixture_solid *, TrustLevel *);
+ HRESULT (WINAPI *get_Color)(struct fixture_solid *, color_s *);
+ HRESULT (WINAPI *put_Color)(struct fixture_solid *, color_s);
+};
+struct fixture_solid { const struct fixture_solid_vtbl *lpVtbl; };
+
 typedef HRESULT (WINAPI *initialize_function)(int);
 typedef HRESULT (WINAPI *factory_function)(HSTRING, REFIID, void **);
 
@@ -770,6 +796,24 @@ int raven_entry(void)
 		return 1;
 	if (initialize(1) != S_OK)
 		return 2;
+	{
+		static const WCHAR class_name[] = L"Windows.UI.Xaml.Media.SolidColorBrush";
+		HSTRING key = NULL, name = NULL; struct fixture_solid_factory *factory = NULL;
+		IInspectable *object = NULL, *identity = NULL; struct fixture_solid *solid = NULL;
+		color_s input = {255, 25, 40, 80}, result = {0};
+		if (WindowsCreateString(class_name, ARRAYSIZE(class_name)-1, &key) != S_OK ||
+			get_factory(key, &fixture_solid_factory_iid, (void **)&factory) != S_OK || !factory ||
+			factory->lpVtbl->CreateInstanceWithColor(factory, input, &object) != S_OK || !object ||
+			object->lpVtbl->QueryInterface(object, &fixture_solid_iid, (void **)&solid) != S_OK || !solid ||
+			solid->lpVtbl->get_Color(solid, &result) != S_OK || result.A != input.A || result.R != input.R || result.G != input.G || result.B != input.B ||
+			solid->lpVtbl->QueryInterface(solid, &IID_IInspectable, (void **)&identity) != S_OK || identity != object ||
+			solid->lpVtbl->GetRuntimeClassName(solid, &name) != S_OK || !same_text(name, class_name)) return 201;
+		input.R = 99;
+		if (solid->lpVtbl->put_Color(solid, input) != S_OK || solid->lpVtbl->get_Color(solid, &result) != S_OK || result.R != 99 ||
+			solid->lpVtbl->get_Color(solid, NULL) != E_POINTER) return 202;
+		WindowsDeleteString(name); WindowsDeleteString(key); identity->lpVtbl->Release(identity);
+		solid->lpVtbl->Release(solid); object->lpVtbl->Release(object); factory->lpVtbl->Release(factory);
+	}
 	/* the interop window and its surface */
 	if (WindowsCreateString(core_name, ARRAYSIZE(core_name) - 1, &core_key) != S_OK)
 		return 3;

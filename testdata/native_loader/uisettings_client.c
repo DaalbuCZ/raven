@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <winstring.h>
 #include <activation.h>
+#include <weakreference.h>
 #include <windows.ui.viewmanagement.h>
 
 typedef HRESULT (WINAPI *initialize_function)(int);
@@ -51,9 +52,25 @@ int raven_entry(void)
 	EventRegistrationToken token = {0};
 	if (FAILED(three->lpVtbl->add_ColorValuesChanged(three, (void *)object, &token)) || !token.value) return 11;
 	if (FAILED(three->lpVtbl->remove_ColorValuesChanged(three, token))) return 12;
+	IWeakReferenceSource *source = NULL; IWeakReference *weak = NULL; IInspectable *resolved = NULL;
+	if (IInspectable_QueryInterface(object, &IID_IWeakReferenceSource, (void **)&source) != S_OK || !source ||
+		source->lpVtbl->GetWeakReference(source, &weak) != S_OK || !weak ||
+		weak->lpVtbl->Resolve(weak, &IID_IInspectable, &resolved) != S_OK || resolved != object) return 13;
+	IInspectable_Release(resolved); source->lpVtbl->Release(source);
 	three->lpVtbl->Release(three);
 	two->lpVtbl->Release(two);
 	one->lpVtbl->Release(one);
 	IInspectable_Release(object);
+	resolved = (IInspectable *)1;
+	if (weak->lpVtbl->Resolve(weak, &IID_IInspectable, &resolved) != S_OK || resolved) return 14;
+	weak->lpVtbl->Release(weak);
+	static const WCHAR accessibility_name[] = L"Windows.UI.ViewManagement.AccessibilitySettings";
+	struct reference accessibility_class = {1, ARRAYSIZE(accessibility_name) - 1, {0, 0}, accessibility_name};
+	IInspectable *access = NULL; __x_ABI_CWindows_CUI_CViewManagement_CIAccessibilitySettings *settings = NULL;
+	boolean contrast = TRUE;
+	if (RoActivateInstance((HSTRING)&accessibility_class, &access) != S_OK || !access ||
+		IInspectable_QueryInterface(access, &IID___x_ABI_CWindows_CUI_CViewManagement_CIAccessibilitySettings, (void **)&settings) != S_OK ||
+		settings->lpVtbl->get_HighContrast(settings, &contrast) != S_OK || contrast) return 15;
+	settings->lpVtbl->Release(settings); IInspectable_Release(access);
 	return 0;
 }
