@@ -376,6 +376,50 @@ static void record_error(struct raven_desktop_window *window, HRESULT error)
 {
 	if (FAILED(error)) InterlockedCompareExchange(&window->error, error, S_OK);
 }
+
+/* The MinGW headers used for this component do not declare the restricted-error API. Keep the
+ * diagnostic path late-bound so it remains optional and cannot affect event dispatch. */
+struct restricted_error_info;
+struct restricted_error_info_vtbl {
+	HRESULT (STDMETHODCALLTYPE *QueryInterface)(struct restricted_error_info *, REFIID, void **);
+	ULONG (STDMETHODCALLTYPE *AddRef)(struct restricted_error_info *);
+	ULONG (STDMETHODCALLTYPE *Release)(struct restricted_error_info *);
+	HRESULT (STDMETHODCALLTYPE *GetErrorDetails)(struct restricted_error_info *, HSTRING *, HSTRING *, HRESULT *, HSTRING *);
+	HRESULT (STDMETHODCALLTYPE *GetReference)(struct restricted_error_info *, HSTRING *);
+};
+struct restricted_error_info { const struct restricted_error_info_vtbl *lpVtbl; };
+typedef HRESULT (WINAPI *ro_get_restricted_error_info)(struct restricted_error_info **);
+
+static void log_event_result(enum raven_window_event event, HRESULT result)
+{
+	WCHAR line[256];
+	wsprintfW(line, L"raven-xaml: CoreWindow event %s handler Invoke -> HRESULT 0x%08lx\n",
+		args_name(event), (unsigned long)result);
+	OutputDebugStringW(line);
+	if (SUCCEEDED(result)) return;
+
+	HMODULE combase = GetModuleHandleW(L"combase.dll");
+	if (!combase) return;
+	ro_get_restricted_error_info get_info = (ro_get_restricted_error_info)GetProcAddress(combase, "RoGetRestrictedErrorInfo");
+	if (!get_info) return;
+	struct restricted_error_info *info = NULL;
+	if (FAILED(get_info(&info)) || !info) return;
+	HSTRING description = NULL, restricted = NULL, reference = NULL;
+	HRESULT error = S_OK;
+	if (SUCCEEDED(info->lpVtbl->GetErrorDetails(info, &description, &restricted, &error, &reference))) {
+		const WCHAR *description_text = description ? WindowsGetStringRawBuffer(description, NULL) : L"";
+		const WCHAR *restricted_text = restricted ? WindowsGetStringRawBuffer(restricted, NULL) : L"";
+		const WCHAR *reference_text = reference ? WindowsGetStringRawBuffer(reference, NULL) : L"";
+		wsprintfW(line, L"raven-xaml: RestrictedErrorInfo error 0x%08lx description=%s restricted=%s reference=%s\n",
+			(unsigned long)error, description_text, restricted_text, reference_text);
+		OutputDebugStringW(line);
+	}
+	if (description) WindowsDeleteString(description);
+	if (restricted) WindowsDeleteString(restricted);
+	if (reference) WindowsDeleteString(reference);
+	info->lpVtbl->Release(info);
+}
+
 HRESULT raven_desktop_error(struct raven_desktop_window *window)
 {
 	return window ? (HRESULT)InterlockedExchange(&window->error, S_OK) : S_OK;
@@ -429,7 +473,9 @@ static BOOL fire_event_sample(struct raven_desktop_window *window, enum raven_wi
 #define CALL_EVENT(Name, field) do { \
 	typedef __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__C##Name handler_type; \
 	handler_type *handler = (void *)handlers[i]; \
-	record_error(window, handler->lpVtbl->Invoke(handler, window->owner, &args->field)); \
+	HRESULT invoke_result = handler->lpVtbl->Invoke(handler, window->owner, &args->field); \
+	log_event_result(event, invoke_result); \
+	record_error(window, invoke_result); \
 } while (0)
 		switch (event) {
 		case RAVEN_WINDOW_ACTIVATED: CALL_EVENT(WindowActivatedEventArgs, activated); break;
