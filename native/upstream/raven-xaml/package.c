@@ -1670,17 +1670,50 @@ __declspec(dllexport) HRESULT raven_package_manifest_application_entry_point(con
 	return create_string(manifest.entry_point, out);
 }
 
+static void package_server_trace(HSTRING class_id, const WCHAR *manifest_path, BOOL manifest_found, BOOL manifest_read,
+	BOOL parser_selected, const WCHAR *final_path)
+{
+	char enabled[2];
+	if (!GetEnvironmentVariableA("RAVEN_TRACE_PACKAGE_SERVER", enabled, sizeof enabled) || !enabled[0] || enabled[0] == '0')
+		return;
+	OutputDebugStringA("raven-package: requested WinRT class ");
+	OutputDebugStringW(WindowsGetStringRawBuffer(class_id, NULL));
+	OutputDebugStringA("\n");
+	OutputDebugStringA("raven-package: resolved manifest path ");
+	if (manifest_found && manifest_path)
+		OutputDebugStringW(manifest_path);
+	else
+		OutputDebugStringA("<unresolved>");
+	OutputDebugStringA("\n");
+	OutputDebugStringA(manifest_read ? "raven-package: manifest read succeeded\n" :
+		"raven-package: manifest read failed\n");
+	OutputDebugStringA(parser_selected ? "raven-package: parser selected server_path\n" :
+		"raven-package: parser did not select server_path\n");
+	OutputDebugStringA("raven-package: final DLL path ");
+	if (final_path && *final_path)
+		OutputDebugStringW(final_path);
+	else
+		OutputDebugStringA("<unresolved>");
+	OutputDebugStringA("\n");
+}
+
 /* Search the app before its declared dependencies; prefixed manifest elements are not supported yet. */
 __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id, HSTRING *out)
 {
-	WCHAR manifest_path[MAX_PATH], path[MAX_PATH];
+	WCHAR manifest_path[MAX_PATH], resolved_manifest_path[MAX_PATH], path[MAX_PATH];
 	struct package_manifest manifest;
 	BYTE *data;
 	UINT32 length;
+	BOOL manifest_found, manifest_read;
 	if (!out) return E_POINTER;
 	*out = NULL;
 	if (!class_id) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
-	if (!find_manifest(manifest_path) || !read_file(manifest_path, &data, &length)) return S_FALSE;
+	manifest_found = find_manifest(manifest_path);
+	manifest_read = manifest_found && read_file(manifest_path, &data, &length);
+	if (!manifest_read) {
+		package_server_trace(class_id, manifest_path, manifest_found, FALSE, FALSE, NULL);
+		return S_FALSE;
+	}
 	memset(&manifest, 0, sizeof manifest);
 	manifest.requested_class = WindowsGetStringRawBuffer(class_id, NULL);
 	parse_manifest(data, length, &manifest);
@@ -1692,7 +1725,11 @@ __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id
 		lstrcpyW(root, manifest_path);
 		slash = root + lstrlenW(root);
 		while (slash > root && *slash != L'\\') --slash;
-		if (*slash != L'\\') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
+		if (*slash != L'\\') {
+			package_server_trace(class_id, manifest_path, TRUE, TRUE, FALSE, NULL);
+			RAVEN_XAML_INVALIDARG();
+			return E_INVALIDARG;
+		}
 		*slash = 0;
 		for (UINT32 i = 0; i < manifest.dependency_count && !manifest.server_path[0]; ++i) {
 			const struct package_dependency *dependency = &manifest.dependencies[i];
@@ -1725,16 +1762,28 @@ __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id
 				}
 			}
 		}
-		if (!manifest.server_path[0]) return S_FALSE;
+		if (!manifest.server_path[0]) {
+			package_server_trace(class_id, manifest_path, TRUE, TRUE, FALSE, NULL);
+			return S_FALSE;
+		}
 	}
+	lstrcpyW(resolved_manifest_path, manifest_path);
 	/* Package paths are relative and cannot escape their root or select another drive. */
 	const WCHAR *p = manifest.server_path, *part = p;
 	for (;;) {
 		if ((*p && *p < 32) || *p == L':' || *p == L'/' || *p == L'*' || *p == L'?' ||
-			*p == L'"' || *p == L'<' || *p == L'>' || *p == L'|') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
+			*p == L'"' || *p == L'<' || *p == L'>' || *p == L'|') {
+			package_server_trace(class_id, resolved_manifest_path, TRUE, TRUE, TRUE, NULL);
+			RAVEN_XAML_INVALIDARG();
+			return E_INVALIDARG;
+		}
 		if (*p == L'\\' || !*p) {
 			UINT32 count = (UINT32)(p - part);
-			if (!count || part[count - 1] == L'.' || part[count - 1] == L' ') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
+			if (!count || part[count - 1] == L'.' || part[count - 1] == L' ') {
+				package_server_trace(class_id, resolved_manifest_path, TRUE, TRUE, TRUE, NULL);
+				RAVEN_XAML_INVALIDARG();
+				return E_INVALIDARG;
+			}
 			if (!*p) break;
 			part = p + 1;
 		}
@@ -1742,12 +1791,20 @@ __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id
 	}
 	WCHAR *slash = manifest_path + lstrlenW(manifest_path);
 	while (slash > manifest_path && *slash != L'\\') --slash;
-	if (*slash != L'\\') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
+	if (*slash != L'\\') {
+		package_server_trace(class_id, resolved_manifest_path, TRUE, TRUE, TRUE, NULL);
+		RAVEN_XAML_INVALIDARG();
+		return E_INVALIDARG;
+	}
 	*slash = 0;
-	if (lstrlenW(manifest_path) + 1 + lstrlenW(manifest.server_path) >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+	if (lstrlenW(manifest_path) + 1 + lstrlenW(manifest.server_path) >= MAX_PATH) {
+		package_server_trace(class_id, resolved_manifest_path, TRUE, TRUE, TRUE, NULL);
+		return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
+	}
 	lstrcpyW(path, manifest_path);
 	lstrcatW(path, L"\\");
 	lstrcatW(path, manifest.server_path);
+	package_server_trace(class_id, resolved_manifest_path, TRUE, TRUE, TRUE, path);
 	return WindowsCreateString(path, (UINT32)lstrlenW(path), out);
 }
 
