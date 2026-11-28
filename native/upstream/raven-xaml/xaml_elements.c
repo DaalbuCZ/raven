@@ -4284,6 +4284,20 @@ HRESULT raven_xaml_element_render_info(IInspectable *object, enum element_render
 		grid->lpVtbl->Release(grid);
 		return S_OK;
 	}
+	panel1 *panel = NULL;
+	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel, (void **)&panel)) && panel) {
+		if (panel->lpVtbl == &panel_table) {
+			struct grid *self = ((struct panel_part *)panel)->owner;
+			*kind = element_render_panel;
+			*color = self->color;
+			*alpha = self->alpha;
+			*width = self->width;
+			*height = self->height;
+			*child_count = self->children ? self->children->count : 0;
+		}
+		panel->lpVtbl->Release(panel);
+		return S_OK;
+	}
 	/* A button paints no chrome yet, but its size drives the rectangle the layout gives it and the hit test works from. */
 	button1 *button = NULL;
 	if (SUCCEEDED(object->lpVtbl->QueryInterface(object, &IID__x_ABI_CWindows_CUI_CXaml_CControls_CIButton, (void **)&button)) && button) {
@@ -4411,6 +4425,28 @@ HRESULT raven_xaml_grid_render_child(IInspectable *object, UINT32 index, IInspec
 	*out = (IInspectable *)children->items[index];
 	(*out)->lpVtbl->AddRef(*out);
 	grid->lpVtbl->Release(grid);
+	return S_OK;
+}
+
+HRESULT raven_xaml_panel_render_child(IInspectable *object, UINT32 index, IInspectable **out)
+{
+	panel1 *panel = NULL;
+	if (!out)
+		return E_POINTER;
+	*out = NULL;
+	if (FAILED(object->lpVtbl->QueryInterface(object,
+		&IID__x_ABI_CWindows_CUI_CXaml_CControls_CIPanel, (void **)&panel)) || !panel)
+		return S_FALSE;
+	if (panel->lpVtbl != &panel_table) {
+		panel->lpVtbl->Release(panel);
+		return S_FALSE;
+	}
+	struct children_vector *children = ((struct panel_part *)panel)->owner->children;
+	if (children && index < children->count) {
+		*out = (IInspectable *)children->items[index];
+		(*out)->lpVtbl->AddRef(*out);
+	}
+	panel->lpVtbl->Release(panel);
 	return S_OK;
 }
 

@@ -1510,7 +1510,11 @@ static HRESULT materialize_resource(IInspectable *dictionary, const WCHAR *key, 
 				text = short_name;
 			}
 			if (length != text_length || memcmp(key, text, length * sizeof(WCHAR))) continue;
-			if (entry->loading || frame->resource_depth >= RESOURCE_HOPS) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
+			/* A deferred entry can request its own key while its value is being built (common in default style
+			 * templates). Treat that lookup as not materialized yet; the ordinary dictionary lookup can still find an
+			 * already-installed value or continue through merged dictionaries. */
+			if (entry->loading || frame->resource_depth >= RESOURCE_HOPS)
+				return E_BOUNDS;
 			for (uint32_t j = 0; j < frame->map->capacity; ++j)
 				if (frame->map->entries[j].token == entry->token) frame->map->entries[j].loading = TRUE;
 			struct deferred_frame request = *frame;
@@ -1604,7 +1608,11 @@ static HRESULT deferred_stream_realize(void *context, IInspectable *dictionary, 
 	if (at >= stream->end || (previous && previous->resource_depth >= RESOURCE_HOPS)) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	while (stream->map.entries[slot].token && stream->map.entries[slot].token != token)
 		slot = (slot + 1) & (stream->map.capacity - 1);
-	if (!stream->map.entries[slot].token || stream->map.entries[slot].loading) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
+	if (!stream->map.entries[slot].token) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
+	/* A reentrant resource reference can reach the same deferred stream before its first realization has finished.
+	 * Report it as unresolved so dictionary lookup can continue, rather than aborting the entire XBF load. */
+	if (stream->map.entries[slot].loading)
+		return E_BOUNDS;
 	const BYTE kind = stream->metadata.data[at];
 	if (kind != 1 && kind != 4 && kind != 20 && kind != 21 && kind != 22 && kind != 34 && kind != 35)
 		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1400\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
@@ -2229,7 +2237,8 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			}
 			if (kind == 19) {
 				IInspectable *collection = NULL;
-				if (!depth || depth == LOADER_DEPTH) {
+				const BOOL resources = length == 9 && !memcmp(name, L"Resources", 9 * sizeof(WCHAR));
+				if (depth == LOADER_DEPTH || (!depth && !resources)) {
 					status = E_NOTIMPL; goto done;
 				}
 				if (length == 18 && !memcmp(name, L"MergedDictionaries", 18 * sizeof(WCHAR))) {
@@ -2252,6 +2261,29 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 						break;
 					}
 					status = get_theme_dictionaries(stack[depth - 1].object, &collection);
+					if (FAILED(status)) goto done;
+					memset(&stack[depth], 0, sizeof stack[depth]);
+					stack[depth].object = collection; stack[depth].kind = 5; ++depth;
+				} else if (length == 9 && !memcmp(name, L"Resources", 9 * sizeof(WCHAR))) {
+					IInspectable *owner = depth ? stack[depth - 1].object : target;
+					if (!owner) {
+						memset(&stack[depth], 0, sizeof stack[depth]);
+						stack[depth].kind = 5; ++depth;
+						break;
+					}
+					if (!depth) {
+						__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary *dictionary = NULL;
+						if (SUCCEEDED(IInspectable_QueryInterface(owner,
+							&IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary)) && dictionary) {
+							dictionary->lpVtbl->Release(dictionary);
+							collection = owner;
+							IInspectable_AddRef(collection);
+						} else {
+							status = raven_xaml_element_get_resources(owner, &collection);
+						}
+					} else {
+						status = raven_xaml_element_get_resources(owner, &collection);
+					}
 					if (FAILED(status)) goto done;
 					memset(&stack[depth], 0, sizeof stack[depth]);
 					stack[depth].object = collection; stack[depth].kind = 5; ++depth;

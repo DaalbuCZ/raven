@@ -108,6 +108,7 @@ HRESULT raven_xaml_element_set_type(IInspectable *object, const WCHAR *name, UIN
 	UINT32 type_length);
 HRESULT raven_xaml_element_apply_value(IInspectable *object, const WCHAR *name, UINT32 length, IInspectable *value);
 IInspectable *raven_xaml_element_resources_existing(IInspectable *object);
+HRESULT raven_xaml_element_get_resources(IInspectable *object, IInspectable **out);
 HRESULT raven_xaml_dictionary_lookup(IInspectable *dictionary, const WCHAR *text, UINT32 length, IInspectable **out);
 HRESULT raven_xaml_dictionary_lookup_theme(IInspectable *dictionary, const WCHAR *text, UINT32 length,
 	const WCHAR *theme, UINT32 theme_length, IInspectable **out);
@@ -238,10 +239,11 @@ HRESULT raven_xaml_elements_set_float(IInspectable *object, const WCHAR *name, U
 
 /* What the rendering pass reads from an element: the grids fill their area, the frames show their page, the content controls
  * show their content. */
-enum element_render_kind { element_render_none, element_render_grid, element_render_frame, element_render_page };
+enum element_render_kind { element_render_none, element_render_grid, element_render_frame, element_render_page, element_render_panel };
 HRESULT raven_xaml_element_render_info(IInspectable *object, enum element_render_kind *kind, COLORREF *color, BYTE *alpha,
 	float *width, float *height, UINT32 *child_count);
 HRESULT raven_xaml_grid_render_child(IInspectable *object, UINT32 index, IInspectable **out);
+HRESULT raven_xaml_panel_render_child(IInspectable *object, UINT32 index, IInspectable **out);
 HRESULT raven_xaml_frame_render_child(IInspectable *object, IInspectable **out);
 BOOL raven_application_notify(DWORD reason, void *reserved);
 

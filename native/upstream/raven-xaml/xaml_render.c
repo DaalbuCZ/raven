@@ -61,6 +61,36 @@ struct render_root {
 
 static struct render_root *render_roots;
 static LONG render_ready;
+static LONG render_trace_checked;
+static LONG render_trace_enabled;
+static LONG render_trace_count;
+
+static void render_trace(IInspectable *element, enum element_render_kind kind, COLORREF color, BYTE alpha,
+	float width, float height, UINT32 child_count, float x, float y)
+{
+	char enabled[8] = "";
+	if (!render_trace_checked) {
+		InterlockedExchange(&render_trace_enabled,
+			GetEnvironmentVariableA("RAVEN_TRACE_RENDER", enabled, sizeof enabled) && enabled[0] && enabled[0] != '0');
+		InterlockedExchange(&render_trace_checked, 1);
+	}
+	if (!render_trace_enabled || InterlockedIncrement(&render_trace_count) > 160)
+		return;
+	char message[512], class_name[160] = "?";
+	HSTRING name = NULL;
+	if (element && SUCCEEDED(element->lpVtbl->GetRuntimeClassName(element, &name)) && name) {
+		UINT32 length = 0;
+		const WCHAR *wide = WindowsGetStringRawBuffer(name, &length);
+		if (wide)
+			WideCharToMultiByte(CP_UTF8, 0, wide, (int)(length < 150 ? length : 150), class_name,
+				sizeof class_name - 1, NULL, NULL);
+		WindowsDeleteString(name);
+	}
+	wsprintfA(message, "raven-render: %s kind=%u color=%06lx alpha=%u size=%lux%lu children=%u at=%ld,%ld\n", class_name,
+		(unsigned)kind, (unsigned long)color, (unsigned)alpha,
+		(unsigned long)width, (unsigned long)height, child_count, (LONG)x, (LONG)y);
+	OutputDebugStringA(message);
+}
 
 static void render_lock_init(void)
 {
@@ -384,19 +414,22 @@ static HRESULT render_element(IInspectable *element, container1 *parent, composi
 	HRESULT result = raven_xaml_element_render_info(element, &kind, &color, &alpha, &width, &height, &child_count);
 	if (FAILED(result))
 		return result;
+	render_trace(element, kind, color, alpha, width, height, child_count, origin_x, origin_y);
 	const float area_width = width > 0 ? width : parent_width;
 	const float area_height = height > 0 ? height : parent_height;
 	/* The hit-test geometry follows the projection: the rectangle the layout gave this element, recorded in paint order so the
 	 * reverse walk of the routing finds the topmost element first. */
 	raven_input_record(window, element, origin_x, origin_y, area_width, area_height);
-	if (kind == element_render_grid && alpha) {
+	if (kind == element_render_grid) {
 		struct raven_xaml_grid_track rows[RENDER_TRACKS], columns[RENDER_TRACKS];
 		UINT32 row_count = 0, column_count = 0;
 		raven_xaml_grid_render_rows(element, rows, RENDER_TRACKS, &row_count);
 		raven_xaml_grid_render_columns(element, columns, RENDER_TRACKS, &column_count);
-		result = render_append_sprite(parent, compositor, color, alpha, origin_x, origin_y, area_width, area_height);
-		if (FAILED(result))
-			return result;
+		if (alpha) {
+			result = render_append_sprite(parent, compositor, color, alpha, origin_x, origin_y, area_width, area_height);
+			if (FAILED(result))
+				return result;
+		}
 		/* The children the Auto tracks measure: the first RENDER_TRACKS children, each measured once, correlated by its
 		 * row/column slot and span. Children beyond the cap render without sizing Auto tracks. */
 		float desired_width[RENDER_TRACKS] = {0}, desired_height[RENDER_TRACKS] = {0};
@@ -433,6 +466,32 @@ static HRESULT render_element(IInspectable *element, container1 *parent, composi
 		}
 		return S_OK;
 	}
+	if (kind == element_render_panel) {
+		if (alpha) {
+			result = render_append_sprite(parent, compositor, color, alpha, origin_x, origin_y, area_width, area_height);
+			if (FAILED(result))
+				return result;
+		}
+		float offset_y = 0.0f;
+		for (UINT32 index = 0; index < child_count; ++index) {
+			IInspectable *child = NULL;
+			if (raven_xaml_panel_render_child(element, index, &child) != S_OK || !child)
+				continue;
+			float child_width = 0.0f, child_height = 0.0f;
+			measure_element(child, scale, &child_width, &child_height);
+			if (child_height <= 0.0f)
+				child_height = (area_height - offset_y) / (float)(child_count - index);
+			if (child_width <= 0.0f)
+				child_width = area_width;
+			if (child_height > area_height - offset_y)
+				child_height = area_height - offset_y;
+			render_element(child, parent, compositor, window, scale, child_width, child_height,
+				origin_x, origin_y + offset_y);
+			offset_y += child_height;
+			child->lpVtbl->Release(child);
+		}
+		return S_OK;
+	}
 	/* A TextBlock paints its text at the top-left of the cell the layout gave it; the sprite carries the text payload and
 	 * the presentation draws it. A block without text paints nothing, and the block does not yet influence its own size —
 	 * the measure and arrange stage will. */
@@ -442,6 +501,12 @@ static HRESULT render_element(IInspectable *element, container1 *parent, composi
 	COLORREF text_color = 0;
 	BYTE text_alpha = 0;
 	if (raven_xaml_element_render_text(element, &text, &text_length, &font_size, &text_color, &text_alpha) == S_OK) {
+		if (render_trace_enabled && text_length && InterlockedIncrement(&render_trace_count) <= 160) {
+			char message[128];
+			wsprintfA(message, "raven-render: text length=%u font=%lu color=%06lx alpha=%u\n",
+				(unsigned)text_length, (unsigned long)font_size, (unsigned long)text_color, (unsigned)text_alpha);
+			OutputDebugStringA(message);
+		}
 		if (text_length) {
 			result = render_append_text_sprite(parent, compositor, text, text_length, font_size, text_color, text_alpha,
 				origin_x, origin_y, area_width, area_height);
@@ -483,6 +548,21 @@ static void render_pass(struct render_root *root)
 		HWND surface = NULL;
 		if (raven_window_composition_surface(root->window, &surface, &dpi_scale) != S_OK)
 			dpi_scale = 1.0f;
+		/* A newly created desktop CoreWindow can report empty DIP bounds before its first resize event. The HWND already
+		 * has a client area at that point, so use it to seed the initial projection instead of laying out at 0x0. */
+		if ((width <= 0.0f || height <= 0.0f) && surface) {
+			RECT client;
+			if (GetClientRect(surface, &client)) {
+				if (width <= 0.0f)
+					width = (float)(client.right - client.left) / dpi_scale;
+				if (height <= 0.0f)
+					height = (float)(client.bottom - client.top) / dpi_scale;
+			}
+		}
+		/* The default XAML page surface uses the light-theme page brush. With no explicit background in the tree,
+		 * keep black default TextBlock foregrounds legible instead of exposing the compositor's black clear. */
+		if (width > 0.0f && height > 0.0f)
+			render_append_sprite(visual, compositor, RGB(255, 255, 255), 255, 0.0f, 0.0f, width, height);
 		render_element(root->element, visual, compositor, window, dpi_scale, width, height, 0.0f, 0.0f);
 	}
 	raven_composition_attach(root->window, (visual1 *)visual);

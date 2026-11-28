@@ -121,7 +121,8 @@ static const IAsyncInfoVtbl info_table = { info_query, info_addref, info_release
 static HRESULT WINAPI op_put_completed(message_operation *self, IUnknown *handler) { raven_trace_note("raven-xaml: MessageDialog operation put_Completed\n"); if (self->completed) return E_ILLEGAL_DELEGATE_ASSIGNMENT; self->completed = handler; handler_addref(handler); if (handler) { void **v = *(void ***)handler; ((HRESULT (WINAPI *)(void *, void *, AsyncStatus))v[3])(handler, self, Completed); } return S_OK; }
 static HRESULT WINAPI op_get_completed(message_operation *self, IUnknown **handler) { if (!handler) return E_POINTER; *handler = self->completed; handler_addref(*handler); return S_OK; }
 static HRESULT WINAPI op_results(message_operation *self, IInspectable **result) { raven_trace_note("raven-xaml: MessageDialog operation GetResults\n"); if (!result) return E_POINTER; *result = NULL; if (self->closed) return RO_E_CLOSED; if (self->result) { *result = self->result; self->result->lpVtbl->AddRef(self->result); } return S_OK; }
-static const message_operation_vtbl op_table = { { op_query, op_addref, op_release, op_iids, op_name, op_trust }, op_put_completed, op_get_completed, op_results };
+static const message_operation_vtbl op_table = { { (void *)op_query, (void *)op_addref, (void *)op_release,
+	(void *)op_iids, (void *)op_name, (void *)op_trust }, op_put_completed, op_get_completed, op_results };
 static message_operation *new_operation(ui_command *command) { message_operation *op = ALLOC(sizeof *op); if (!op) return NULL; op->lpVtbl = &op_table; op->info.lpVtbl = &info_table; op->refs = 1; if (command) { op->result = (IInspectable *)&command->iface; command->iface.lpVtbl->AddRef(&command->iface); } return op; }
 
 typedef struct message_dialog { raven_message_dialog_i iface; LONG refs; HSTRING content, title; UINT32 default_index, cancel_index, options; } message_dialog;
