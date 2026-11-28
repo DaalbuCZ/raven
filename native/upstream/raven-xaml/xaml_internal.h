@@ -88,6 +88,7 @@ void raven_application_leave_xaml(void);
 HRESULT raven_xaml_application_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_window_factory(HSTRING name, IActivationFactory **out);
 HRESULT raven_xaml_controls_factory(HSTRING name, IActivationFactory **out);
+HRESULT raven_message_dialog_factory(HSTRING name, IActivationFactory **out);
 const WCHAR *raven_xaml_class_by_stable(uint32_t stable);
 const WCHAR *raven_xaml_property_by_stable(uint32_t stable);
 HRESULT raven_xaml_create_named(const WCHAR *name, UINT32 length, IInspectable **out);
