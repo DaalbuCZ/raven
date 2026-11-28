@@ -24,18 +24,7 @@
 #include <winstring.h>
 #include <stdint.h>
 #include <asyncinfo.h>
-
-/* Windows.Foundation.Point, as the metadata's struct(...;f4;f4) gives it. */
-typedef struct __x_ABI_CWindows_CFoundation_CPoint {
-	float X;
-	float Y;
-} __x_ABI_CWindows_CFoundation_CPoint;
-
-/* Windows.Foundation.Size, as the metadata's struct(...;f4;f4) gives it. */
-typedef struct __x_ABI_CWindows_CFoundation_CSize {
-	float Width;
-	float Height;
-} __x_ABI_CWindows_CFoundation_CSize;
+#include <windows.foundation.h>
 
 /* Windows.Graphics.DisplayAdapterId, the LUID the adapter is known by. */
 typedef struct __x_ABI_CWindows_CGraphics_CDisplayAdapterId {
