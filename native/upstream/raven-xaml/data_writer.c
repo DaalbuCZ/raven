@@ -1363,12 +1363,6 @@ static const __x_ABI_CWindows_CStorage_CStreams_CIDataWriterFactoryVtbl writer_f
 	factory_create_name, factory_create_trust, factory_create_data_writer,
 };
 
-struct writer_factory {
-	IActivationFactory activation;
-	writer_factory_i create;
-	LONG refs;
-};
-
 static struct writer_factory writer_factory_instance = {
 	{&writer_activation_table}, {&writer_factory_table}, 1,
 };
