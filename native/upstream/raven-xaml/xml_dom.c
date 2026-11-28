@@ -424,7 +424,7 @@ struct xml_node {
 	SIZE_T attr_count, attr_cap;
 };
 
-static HRESULT WINAPI xml_node_query(struct xml_node *self, REFIID iid, void **out);
+static HRESULT xml_node_query(struct xml_node *self, REFIID iid, void **out);
 static ULONG xml_node_addref(struct xml_node *self);
 static ULONG xml_node_release(struct xml_node *self);
 struct xml_parser;
