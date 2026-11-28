@@ -18,6 +18,38 @@
 #include <wininet.h>
 #include "windows.web.http.h"
 
+static inline void web_uri_trace(const WCHAR *stage, const WCHAR *text)
+{
+	WCHAR enabled[2], record[1200];
+	if (!GetEnvironmentVariableW(L"RAVEN_URI_TRACE", enabled, ARRAYSIZE(enabled))) return;
+	const WCHAR *at = text, *authority = NULL, *userinfo = NULL;
+	while (*at && (at - text) < 1023) {
+		if (*at == L':' && at[1] == L'/' && at[2] == L'/') { authority = at + 3; break; }
+		++at;
+	}
+	if (authority) {
+		const WCHAR *p = authority;
+		while (*p && *p != L'/' && *p != L'?' && *p != L'#') { if (*p == L'@') userinfo = p; ++p; }
+	}
+	WCHAR *out = record;
+	const WCHAR *prefix = L"raven-web URI ";
+	while (*prefix && out < record + ARRAYSIZE(record) - 2) *out++ = *prefix++;
+	for (size_t i = 0; *stage && i < 128; ++i) *out++ = *stage++;
+	*out++ = L':'; *out++ = L' ';
+	WCHAR *uri = out;
+	for (const WCHAR *p = text; *p && out < uri + 1023; ++p) {
+		if (*p == L'?' || *p == L'#') break;
+		if (userinfo && p >= authority && p <= userinfo) {
+			if (p == authority) { const WCHAR *redacted = L"[redacted]@"; while (*redacted && out < uri + 1023) *out++ = *redacted++; }
+			p = userinfo;
+			continue;
+		}
+		*out++ = *p;
+	}
+	*out++ = L'\n'; *out = 0;
+	OutputDebugStringW(record);
+}
+
 typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClass uri_class;
 typedef __x_ABI_CWindows_CStorage_CStreams_CIBuffer buffer_class;
 typedef __x_ABI_CWindows_CStorage_CStreams_CIInputStream input_stream;

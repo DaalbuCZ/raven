@@ -2157,7 +2157,7 @@ static HRESULT WINAPI frame_dependency_get_value(__x_ABI_CWindows_CUI_CXaml_CIDe
 	raven_dependency_property_interop *interop = NULL;
 	if (!result) return E_POINTER;
 	*result = NULL;
-	if (!dp) return E_INVALIDARG;
+	if (!dp) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	for (struct frame_property *entry = self->properties; entry; entry = entry->next)
 		if (entry->property == dp) {
 			*result = entry->value;
@@ -2251,7 +2251,7 @@ static HRESULT WINAPI frame_dependency_put_value(__x_ABI_CWindows_CUI_CXaml_CIDe
 	struct frame *self = ((struct frame_dependency_part *)iface)->owner;
 	struct frame_property *entry;
 	IInspectable *old = NULL;
-	if (!dp) return E_INVALIDARG;
+	if (!dp) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	HRESULT status = frame_dependency_get_value(iface, dp, &old);
 	if (FAILED(status)) return status;
 	for (entry = self->properties; entry && entry->property != dp; entry = entry->next) {}
@@ -2277,7 +2277,7 @@ static HRESULT WINAPI frame_dependency_clear_value(__x_ABI_CWindows_CUI_CXaml_CI
 	struct frame *self = ((struct frame_dependency_part *)iface)->owner;
 	struct frame_property **at;
 	IInspectable *old, *next = NULL;
-	if (!dp) return E_INVALIDARG;
+	if (!dp) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	for (at = &self->properties; *at && (*at)->property != dp; at = &(*at)->next) {}
 	if (!*at) return S_OK;
 	struct frame_property *entry = *at;
@@ -2298,7 +2298,7 @@ static HRESULT WINAPI frame_dependency_read_local(__x_ABI_CWindows_CUI_CXaml_CID
 	struct frame *self = ((struct frame_dependency_part *)iface)->owner;
 	if (!result) return E_POINTER;
 	*result = NULL;
-	if (!dp) return E_INVALIDARG;
+	if (!dp) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	for (struct frame_property *entry = self->properties; entry; entry = entry->next)
 		if (entry->property == dp) {
 			*result = entry->value;
@@ -3502,13 +3502,13 @@ HRESULT __declspec(dllexport) raven_xaml_control_template_put_root(IInspectable 
 		&IID___x_ABI_CWindows_CUI_CXaml_CControls_CIControlTemplate, (void **)&iface)) || !iface) {
 		if (root)
 			IInspectable_Release(root);
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_controls.c:958\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_controls.c:958\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	if (iface->lpVtbl != &template_table) {
 		iface->lpVtbl->Release(iface);
 		if (root)
 			IInspectable_Release(root);
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_controls.c:964\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_controls.c:964\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	self = (struct control_template *)iface;
 	(void)raven_xaml_control_template_root(template_object, &probe);
@@ -3650,7 +3650,7 @@ static IInspectable *create_swapchain_panel(void)
 HRESULT __declspec(dllexport) raven_xaml_swapchain_panel_store(raven_swapchain_panel *iface, IDXGISwapChain *chain)
 {
 	if (!iface) return E_POINTER;
-	if (iface->lpVtbl != &sc_table) return E_INVALIDARG;
+	if (iface->lpVtbl != &sc_table) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	struct swapchain_panel *self = ((struct swapchain_part *)iface)->owner;
 	if (self->thread != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
 	if (chain) chain->lpVtbl->AddRef(chain);
@@ -3664,7 +3664,7 @@ HRESULT __declspec(dllexport) raven_xaml_swapchain_panel_get(raven_swapchain_pan
 	if (!out) return E_POINTER;
 	*out = NULL;
 	if (!iface) return E_POINTER;
-	if (iface->lpVtbl != &sc_table) return E_INVALIDARG;
+	if (iface->lpVtbl != &sc_table) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	struct swapchain_panel *self = ((struct swapchain_part *)iface)->owner;
 	if (self->thread != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
 	*out = self->stored;

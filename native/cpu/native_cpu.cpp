@@ -595,7 +595,7 @@ struct NativeProcess::State {
 	bool serving = false, serving_queued = false;
 	// Diagnostics: where the guest is found running, every sample_period.
 	std::chrono::milliseconds sample_period{0};
-	std::function<void(uint64_t)> sampler;
+	std::function<void(user_regs_struct)> sampler;
 	// Where the stack arguments of the call being served start; they are read only when a handler asks for them.
 	uint64_t served_stack = 0;
 	void require_stopped() const;
@@ -1988,7 +1988,7 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 				if (sampling) {
 					user_regs_struct where{};
 					trace(PTRACE_GETREGS, child.pid, &where);
-					state->sampler(where.rip);
+					state->sampler(where);
 				}
 				// Whether another thread wants the processor is asked again: it may have become ready through a served call meanwhile. When
 				// none does, this thread starts a new slice, so the next served call does not interrupt it at once.
@@ -2039,7 +2039,7 @@ NativeResult NativeProcess::resume(std::chrono::milliseconds timeout)
 		signal = WSTOPSIG(status);
 		if (parallel() && signal == SIGSTOP) {
 			if (sampled_stop && state->sampler)
-				state->sampler(registers.rip);
+				state->sampler(registers);
 			continue;
 		}
 		if (state->seccomp && signal == SIGTRAP && (status >> 16) == PTRACE_EVENT_SECCOMP)
@@ -2137,7 +2137,7 @@ void NativeProcess::set_time_slicing(std::chrono::milliseconds slice, std::funct
 	state->slice_yield = std::move(yield);
 }
 
-void NativeProcess::set_guest_sampler(std::chrono::milliseconds period, std::function<void(uint64_t)> sampler)
+void NativeProcess::set_guest_sampler(std::chrono::milliseconds period, std::function<void(user_regs_struct)> sampler)
 {
 	state->sample_period = period;
 	state->sampler = std::move(sampler);

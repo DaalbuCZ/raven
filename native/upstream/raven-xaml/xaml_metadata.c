@@ -268,7 +268,7 @@ HRESULT raven_xaml_create_from_type(const xaml_type_name *type, IInspectable **o
 		return E_POINTER;
 	*out = NULL;
 	if (!type || !type->Name)
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	result = provider_from_application(&provider);
 	if (FAILED(result))
 		return result;
@@ -290,7 +290,7 @@ HRESULT raven_xaml_create_named(const WCHAR *name, UINT32 length, IInspectable *
 		return E_POINTER;
 	*out = NULL;
 	if (!name)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_metadata.c:177\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_metadata.c:177\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	for (size_t index = 0; index < ARRAYSIZE(entries); ++index) {
 		if (!same_text(name, length, entries[index].class_name) && !same_text(name, length, entries[index].name))
 			continue;

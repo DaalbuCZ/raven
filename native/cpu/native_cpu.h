@@ -174,7 +174,7 @@ public:
 	// Runs before the guest runs again: before every resumption and before a served call is answered.
 	void set_resume_hook(std::function<void()> hook);
 	// Diagnostics: interrupts a guest that runs without stopping every `period` and reports where it was.
-	void set_guest_sampler(std::chrono::milliseconds period, std::function<void(uint64_t rip)> sampler);
+	void set_guest_sampler(std::chrono::milliseconds period, std::function<void(user_regs_struct registers)> sampler);
 
 private:
 	void make_served_block(uint64_t teb, uint64_t &guest, uint64_t *&host);

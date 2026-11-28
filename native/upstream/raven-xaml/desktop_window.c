@@ -12,6 +12,7 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_System
 #include <windows.h>
+#include "xaml_internal.h"
 #include <windowsx.h>
 #include <winstring.h>
 #include "desktop_window.h"
@@ -782,7 +783,7 @@ HRESULT raven_desktop_minimum_size(struct raven_desktop_window *window, Size siz
 {
 	HRESULT status = access_window(window);
 	if (FAILED(status)) return status;
-	if (size.Width != size.Width || size.Height != size.Height) { OutputDebugStringA("raven-xaml: size not finite\n"); return E_INVALIDARG; }
+	if (size.Width != size.Width || size.Height != size.Height) { OutputDebugStringA("raven-xaml: size not finite\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (!size.Width && !size.Height) { window->min_width = window->min_height = 0; return S_OK; }
 	if (size.Width < 192) size.Width = 192; else if (size.Width > 500) size.Width = 500;
 	if (size.Height < 48) size.Height = 48; else if (size.Height > 500) size.Height = 500;

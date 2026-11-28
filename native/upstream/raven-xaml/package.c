@@ -1679,7 +1679,7 @@ __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id
 	UINT32 length;
 	if (!out) return E_POINTER;
 	*out = NULL;
-	if (!class_id) return E_INVALIDARG;
+	if (!class_id) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	if (!find_manifest(manifest_path) || !read_file(manifest_path, &data, &length)) return S_FALSE;
 	memset(&manifest, 0, sizeof manifest);
 	manifest.requested_class = WindowsGetStringRawBuffer(class_id, NULL);
@@ -1692,7 +1692,7 @@ __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id
 		lstrcpyW(root, manifest_path);
 		slash = root + lstrlenW(root);
 		while (slash > root && *slash != L'\\') --slash;
-		if (*slash != L'\\') return E_INVALIDARG;
+		if (*slash != L'\\') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		*slash = 0;
 		for (UINT32 i = 0; i < manifest.dependency_count && !manifest.server_path[0]; ++i) {
 			const struct package_dependency *dependency = &manifest.dependencies[i];
@@ -1731,10 +1731,10 @@ __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id
 	const WCHAR *p = manifest.server_path, *part = p;
 	for (;;) {
 		if ((*p && *p < 32) || *p == L':' || *p == L'/' || *p == L'*' || *p == L'?' ||
-			*p == L'"' || *p == L'<' || *p == L'>' || *p == L'|') return E_INVALIDARG;
+			*p == L'"' || *p == L'<' || *p == L'>' || *p == L'|') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		if (*p == L'\\' || !*p) {
 			UINT32 count = (UINT32)(p - part);
-			if (!count || part[count - 1] == L'.' || part[count - 1] == L' ') return E_INVALIDARG;
+			if (!count || part[count - 1] == L'.' || part[count - 1] == L' ') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 			if (!*p) break;
 			part = p + 1;
 		}
@@ -1742,7 +1742,7 @@ __declspec(dllexport) HRESULT WINAPI raven_package_winrt_server(HSTRING class_id
 	}
 	WCHAR *slash = manifest_path + lstrlenW(manifest_path);
 	while (slash > manifest_path && *slash != L'\\') --slash;
-	if (*slash != L'\\') return E_INVALIDARG;
+	if (*slash != L'\\') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	*slash = 0;
 	if (lstrlenW(manifest_path) + 1 + lstrlenW(manifest.server_path) >= MAX_PATH) return HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW);
 	lstrcpyW(path, manifest_path);

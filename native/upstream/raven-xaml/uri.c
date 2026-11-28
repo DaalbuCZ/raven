@@ -20,6 +20,52 @@ typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClass uri_i;
 typedef __x_ABI_CWindows_CFoundation_CIUriRuntimeClassFactory uri_factory_i;
 typedef __x_ABI_CWindows_CFoundation_CIStringable stringable_i;
 static const WCHAR class_name[] = L"Windows.Foundation.Uri";
+static void uri_trace(const WCHAR *text, UINT32 length, const char *where)
+{
+	WCHAR enabled[2];
+	WCHAR *safe;
+	UINT32 end = 0, authority = 0, userinfo = UINT32_MAX;
+	if (!GetEnvironmentVariableW(L"RAVEN_URI_TRACE", enabled, ARRAYSIZE(enabled)) || !text)
+		return;
+	while (end < length && text[end] != L'?' && text[end] != L'#') ++end;
+	while (authority < end && text[authority] != L':') ++authority;
+	if (authority + 2 < end && text[authority + 1] == L'/' && text[authority + 2] == L'/') {
+		UINT32 authority_start = authority + 3;
+		authority = authority_start;
+		while (authority < end && text[authority] != L'/') {
+			if (text[authority] == L'@' && userinfo == UINT32_MAX) userinfo = authority;
+			++authority;
+		}
+	}
+	if ((SIZE_T)end > ((SIZE_T)-1 / sizeof(WCHAR)) - 16)
+		return;
+	safe = HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)end + 16) * sizeof(WCHAR));
+	if (!safe)
+		return;
+	if (userinfo != UINT32_MAX) {
+		static const WCHAR redacted[] = L"[redacted]@";
+		UINT32 scheme_end = 0, out = 0;
+		while (scheme_end < end && text[scheme_end] != L':') ++scheme_end;
+		scheme_end += 3;
+		while (out < scheme_end) { safe[out] = text[out]; ++out; }
+		for (UINT32 i = 0; i < ARRAYSIZE(redacted) - 1; ++i) safe[out++] = redacted[i];
+		for (UINT32 i = userinfo + 1; i < end; ++i) safe[out++] = text[i];
+		safe[out] = 0;
+	} else {
+		for (UINT32 i = 0; i < end; ++i) safe[i] = text[i];
+		safe[end] = 0;
+	}
+	WCHAR line[1024];
+	UINT32 out = 0;
+	static const WCHAR prefix[] = L"raven-xaml uri ";
+	for (UINT32 i = 0; i < ARRAYSIZE(prefix) - 1 && out < ARRAYSIZE(line) - 1; ++i) line[out++] = prefix[i];
+	for (const char *p = where; *p && out < ARRAYSIZE(line) - 1; ++p) line[out++] = (WCHAR)*p;
+	for (UINT32 i = 0; i < 2 && out < ARRAYSIZE(line) - 1; ++i) line[out++] = i ? L' ' : L':';
+	for (UINT32 i = 0; safe[i] && out < ARRAYSIZE(line) - 2; ++i) line[out++] = safe[i];
+	line[out++] = L'\n'; line[out] = 0;
+	OutputDebugStringW(line);
+	HeapFree(GetProcessHeap(), 0, safe);
+}
 struct uri {
 	uri_i iface;
 	stringable_i stringable;
@@ -73,7 +119,14 @@ static HRESULT uri_slice(struct uri *self, UINT32 begin, UINT32 end, HSTRING *ou
 }
 static HRESULT WINAPI uri_raw(uri_i *iface, HSTRING *out)
 { if (!out) return E_POINTER; return WindowsDuplicateString(((struct uri *)iface)->raw, out); }
-static HRESULT WINAPI uri_absolute(uri_i *iface, HSTRING *out) { return uri_raw(iface, out); }
+static HRESULT WINAPI uri_absolute(uri_i *iface, HSTRING *out)
+{
+	struct uri *self = (void *)iface;
+	UINT32 length = 0;
+	const WCHAR *text = WindowsGetStringRawBuffer(self->raw, &length);
+	uri_trace(text, length, "uri_absolute");
+	return uri_raw(iface, out);
+}
 static HRESULT WINAPI uri_scheme(uri_i *iface, HSTRING *out)
 { struct uri *s = (void *)iface; return uri_slice(s, 0, s->scheme_end, out); }
 static HRESULT WINAPI uri_path(uri_i *iface, HSTRING *out)
@@ -119,13 +172,14 @@ static HRESULT create_uri(HSTRING input, uri_i **out)
 	UINT32 length = 0, scheme = 0, authority, path, end, query;
 	const WCHAR *text = WindowsGetStringRawBuffer(input, &length);
 	struct uri *self;
+	uri_trace(text, length, "create_uri");
 	if (!out) return E_POINTER;
 	*out = NULL;
-	if (!length || !((text[0] >= L'a' && text[0] <= L'z') || (text[0] >= L'A' && text[0] <= L'Z'))) { OutputDebugStringA("raven-xaml: uri scheme refused\n"); return E_INVALIDARG; }
+	if (!length || !((text[0] >= L'a' && text[0] <= L'z') || (text[0] >= L'A' && text[0] <= L'Z'))) { OutputDebugStringA("raven-xaml: uri scheme refused\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	while (scheme < length && ((text[scheme] >= L'a' && text[scheme] <= L'z') ||
 		(text[scheme] >= L'0' && text[scheme] <= L'9') || text[scheme] == L'+' || text[scheme] == L'-' || text[scheme] == L'.')) ++scheme;
 	if (scheme < length && text[scheme] >= L'A' && text[scheme] <= L'Z') return 0x80004011; /* PROBE */
-	if (scheme >= length || text[scheme] != L':') { OutputDebugStringA("raven-xaml: uri colon refused\n"); return E_INVALIDARG; }
+	if (scheme >= length || text[scheme] != L':') { OutputDebugStringA("raven-xaml: uri colon refused\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (scheme + 2 >= length || text[scheme+1] != L'/' || text[scheme+2] != L'/') return 0x80004012; /* PROBE */
 	authority = scheme + 3; path = authority;
 	while (path < length && text[path] != L'/' && text[path] != L'?' && text[path] != L'#') ++path;
@@ -198,6 +252,7 @@ __declspec(dllexport) HRESULT raven_xaml_uri_create(const WCHAR *text, UINT32 le
 	*out = NULL;
 	if (!text && length)
 		return E_POINTER;
+	uri_trace(text, length, "raven_xaml_uri_create");
 	result = WindowsCreateString(text, length, &input);
 	if (FAILED(result))
 		return result;

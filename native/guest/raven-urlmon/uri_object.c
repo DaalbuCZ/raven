@@ -1088,6 +1088,7 @@ HRESULT WINAPI CreateUri(LPCWSTR text, DWORD flags, DWORD_PTR reserved, IUri **u
 		return E_INVALIDARG;
 	if ((flags & (Uri_CREATE_FILE_USE_DOS_PATH | Uri_CREATE_ALLOW_RELATIVE)) == (Uri_CREATE_FILE_USE_DOS_PATH | Uri_CREATE_ALLOW_RELATIVE))
 		return E_INVALIDARG;
+	uri_trace(L"input", text);
 	self = new_uri();
 	if (!self)
 		return E_OUTOFMEMORY;
@@ -1098,6 +1099,7 @@ HRESULT WINAPI CreateUri(LPCWSTR text, DWORD flags, DWORD_PTR reserved, IUri **u
 		return result;
 	}
 	self->ready = TRUE;
+	uri_trace(L"absolute", self->data.absolute);
 	*uri = &self->IUri_iface;
 	return S_OK;
 }

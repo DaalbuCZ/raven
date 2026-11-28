@@ -300,6 +300,7 @@ HRESULT exchange_send(struct exchange *exchange, const struct transport_settings
 	WCHAR host[INTERNET_MAX_HOST_NAME_LENGTH + 1], user[256], password[256];
 	UINT32 uri_length;
 	const WCHAR *uri_text_buffer = winrt_text(uri_string, &uri_length);
+	web_uri_trace(L"before InternetCrackUrlW", uri_text_buffer);
 	URL_COMPONENTSW parts = {sizeof(parts)};
 	parts.lpszHostName = host;
 	parts.dwHostNameLength = ARRAYSIZE(host);

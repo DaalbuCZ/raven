@@ -891,11 +891,11 @@ static HRESULT pri_blob_from_entry(UINT32 i, const BYTE **data, UINT32 *length)
 		bytes = read_u16(items->table, item * 4 + 2);
 	} else {
 		item -= items->string_count;
-		if (item >= items->blob_count) return E_INVALIDARG;
+		if (item >= items->blob_count) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		offset = read_u32(items->blob_table, item * 8);
 		bytes = read_u32(items->blob_table, item * 8 + 4);
 	}
-	if (offset > items->data_bytes || bytes > items->data_bytes - offset) return E_INVALIDARG;
+	if (offset > items->data_bytes || bytes > items->data_bytes - offset) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	*data = items->data + offset; *length = bytes;
 	return S_OK;
 }
@@ -944,7 +944,7 @@ HRESULT raven_pri_open_map(const WCHAR *package, UINT32 package_length, const WC
 	UINT32 length = 0;
 	struct pri_extra_map *map = NULL;
 	if (!package || !package_length || !path) return E_POINTER;
-	if (package_length >= PRI_MAX_PACKAGE_UNITS) return E_INVALIDARG;
+	if (package_length >= PRI_MAX_PACKAGE_UNITS) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	ensure_pri();
 	for (UINT32 i = 0; i < PRI_MAX_EXTRA_MAPS; ++i) {
 		struct pri_extra_map *candidate = &extra_maps[i];

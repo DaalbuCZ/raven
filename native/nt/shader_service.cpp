@@ -5,9 +5,17 @@
 #include "shader/hlsl_compile.h"
 #include "shader/sm4.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <mutex>
+#include <string>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace raven {
 
@@ -26,6 +34,73 @@ struct ShaderResult {
 std::mutex shader_mutex;
 std::map<uint32_t, ShaderResult> shader_results;
 uint32_t next_shader_result = 1;
+std::atomic<unsigned> traced_shader_failures{0};
+std::atomic<unsigned> dumped_shader_bytecode{0};
+
+void dump_shader_bytecode(const std::vector<uint8_t> &code)
+{
+	static const bool enabled = std::getenv("RAVEN_DUMP_SHADER_BYTECODE") != nullptr;
+	if (!enabled || code.empty() || code.size() > 1024 * 1024)
+		return;
+	unsigned count = dumped_shader_bytecode.load(std::memory_order_relaxed);
+	do {
+		if (count >= 32)
+			return;
+	} while (!dumped_shader_bytecode.compare_exchange_weak(count, count + 1, std::memory_order_relaxed));
+	static std::atomic<unsigned> sequence{0};
+	const auto index = sequence.fetch_add(1, std::memory_order_relaxed);
+	const auto path = "/tmp/raven-shader-" + std::to_string(getpid()) + "-" + std::to_string(index) + ".dxbc";
+	const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fd < 0)
+		return;
+	size_t written = 0;
+	while (written < code.size()) {
+		const auto count = write(fd, code.data() + written, code.size() - written);
+		if (count <= 0)
+			break;
+		written += size_t(count);
+	}
+	close(fd);
+	if (written == code.size())
+		std::fprintf(stderr, "raven: dumped shader bytecode file=%s size=%zu\n", path.c_str(), written);
+}
+
+void trace_shader_failure(const shader::CompileRequest &request, const shader::CompileResult &compiled)
+{
+	static const bool enabled = std::getenv("RAVEN_TRACE_SHADER") != nullptr;
+	if (!enabled || traced_shader_failures.fetch_add(1, std::memory_order_relaxed) >= 16)
+		return;
+	// This compiler has no native HRESULT; E_FAIL is the failure returned by the D3DCompile shim.
+	std::fprintf(stderr, "raven: D3DCompile failed name=%s entry=%s target=%s HRESULT=0x80004005\n", request.name.c_str(), request.entry.c_str(), request.target.c_str());
+	std::fprintf(stderr, "raven: shader diagnostics: %.*s%s\n", int(std::min<size_t>(compiled.messages.size(), 2048)), compiled.messages.data(),
+		compiled.messages.size() > 2048 ? " [truncated]" : "");
+	const auto open = compiled.messages.find('(');
+	const auto close = open == std::string::npos ? open : compiled.messages.find(')', open + 1);
+	if (close == std::string::npos || close == open + 1)
+		return;
+	char *end = nullptr;
+	const auto line = std::strtoul(compiled.messages.c_str() + open + 1, &end, 10);
+	if (end != compiled.messages.c_str() + close || line == 0)
+		return;
+	const size_t first = line > 2 ? line - 2 : 1;
+	size_t start = 0, shown = 1;
+	while (shown < first && start < request.source.size()) {
+		const auto newline = request.source.find('\n', start);
+		if (newline == std::string::npos)
+			return;
+		start = newline + 1;
+		++shown;
+	}
+	for (; shown <= line + 2 && start <= request.source.size(); ++shown) {
+		const auto newline = request.source.find('\n', start);
+		const size_t length = std::min<size_t>(newline == std::string::npos ? request.source.size() - start : newline - start, 256);
+		std::fprintf(stderr, "raven: shader source %zu: %.*s%s\n", shown, int(length), request.source.data() + start,
+			(newline == std::string::npos ? request.source.size() - start : newline - start) > length ? " [truncated]" : "");
+		if (newline == std::string::npos)
+			break;
+		start = newline + 1;
+	}
+}
 
 // Requests are words and length-prefixed byte strings, as raven-d3dcompiler writes them.
 class Reader {
@@ -138,6 +213,10 @@ ShaderResult serve(const std::vector<uint8_t> &bytes)
 			return result;
 		}
 		result.status = compiled.failed ? 1 : 0;
+		if (compiled.failed)
+			trace_shader_failure(request, compiled);
+		else
+			dump_shader_bytecode(compiled.code);
 		result.code = std::move(compiled.code);
 		result.messages = std::move(compiled.messages);
 		return result;

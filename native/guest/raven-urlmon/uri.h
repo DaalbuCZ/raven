@@ -11,6 +11,8 @@
 #include <urlmon.h>
 #include <wchar.h>
 
+void uri_trace(const WCHAR *stage, const WCHAR *text);
+
 /* Set on text this module composed from valid parts: a DOS path's rules were already applied. */
 #define URI_INTERNAL_COMBINED 0x80000000u
 

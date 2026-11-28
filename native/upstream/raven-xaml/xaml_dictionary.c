@@ -571,7 +571,7 @@ static HRESULT adopt_source(struct dictionary *self, IInspectable *locator)
 	struct dictionary *loaded = NULL;
 	HRESULT result;
 	if (!locator)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_dictionary.c:468\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_dictionary.c:468\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	result = IInspectable_QueryInterface(locator, &IID___x_ABI_CWindows_CFoundation_CIUriRuntimeClass, (void **)&uri);
 	if (FAILED(result))
 		return result;
@@ -672,7 +672,7 @@ static HRESULT WINAPI resource_put_source(resource1 *iface, uint64_t value)
 	if (InterlockedIncrement(&source_depth) > SOURCE_DEPTH) {
 		InterlockedDecrement(&source_depth);
 		/* A Source graph that names itself compiles to no usable dictionary; the document is refused, not followed. */
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_dictionary.c:569\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_dictionary.c:569\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	result = adopt_source(self, (IInspectable *)(uintptr_t)value);
 	InterlockedDecrement(&source_depth);
@@ -1168,7 +1168,7 @@ HRESULT raven_xaml_dictionary_defer(IInspectable *object, const WCHAR *text, UIN
 	IInspectable *key;
 	struct dictionary_entry *entry;
 	HRESULT result;
-	if (!self || !realize || !release) return E_INVALIDARG;
+	if (!self || !realize || !release) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	key = raven_xaml_boxed_string(text, length);
 	if (!key) return E_OUTOFMEMORY;
 	/* The insert pass hands back the entry it found or appended, so the deferred state lands on it directly — the second

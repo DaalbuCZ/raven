@@ -740,6 +740,8 @@ struct object {
 	IUnknown *factory;
 };
 
+static void svg_trace_object(const char *interface_name, const char *method, const void *iface, ULONG refs);
+
 static void object_init(struct object *self, void **table, void (*destroy)(struct object *), const GUID *const *iids, size_t count, IUnknown *factory)
 {
 	self->vtbl = table;
@@ -784,6 +786,29 @@ static ULONG STDMETHODCALLTYPE object_Release(void *iface)
 			IUnknown_Release(factory);
 	}
 	return (ULONG)refs;
+}
+
+/* Internal releases stay raw; interface releases serialize a possible tree teardown. */
+static void svg_lock_tree(void);
+static void svg_unlock_tree(void);
+static ULONG STDMETHODCALLTYPE svg_element_Release(void *iface)
+{
+	ULONG refs;
+	svg_lock_tree();
+	svg_trace_object("ID2D1SvgElement", "Release", iface, (ULONG)InterlockedCompareExchange(&((struct object *)iface)->refs, 0, 0));
+	refs = object_Release(iface);
+	svg_unlock_tree();
+	return refs;
+}
+
+static ULONG STDMETHODCALLTYPE svg_document_Release(void *iface)
+{
+	ULONG refs;
+	svg_lock_tree();
+	svg_trace_object("ID2D1SvgDocument", "Release", iface, (ULONG)InterlockedCompareExchange(&((struct object *)iface)->refs, 0, 0));
+	refs = object_Release(iface);
+	svg_unlock_tree();
+	return refs;
 }
 
 /* ID2D1Resource::GetFactory: every resource names the factory it came from. */
@@ -4737,6 +4762,7 @@ struct svg_attribute_base {
 struct svg_element {
 	struct object base;
 	struct svg_document *document;
+	struct svg_element *document_next;
 	struct svg_element *parent;
 	WCHAR *tag;      /* empty for a text content element */
 	WCHAR *text;     /* the text of a text content element */
@@ -4750,6 +4776,7 @@ struct svg_document {
 	struct object base;
 	D2D1_SIZE_F viewport;
 	struct svg_element *root;
+	struct svg_element *elements;
 	UINT32 element_count;
 };
 
@@ -4796,6 +4823,21 @@ struct svg_glyph_style {
 static void **svg_document_table, **svg_element_table, **svg_paint_table, **svg_dash_table, **svg_points_table,
 	**svg_path_table, **svg_style_table;
 
+/* Serialize the SVG tree against edits without entering the guest lock APIs. */
+static volatile LONG svg_tree_lock;
+
+static void svg_lock_tree(void)
+{
+	while (InterlockedCompareExchange(&svg_tree_lock, 1, 0))
+		while (__atomic_load_n(&svg_tree_lock, __ATOMIC_RELAXED))
+			;
+}
+
+static void svg_unlock_tree(void)
+{
+	__atomic_store_n(&svg_tree_lock, 0, __ATOMIC_RELEASE);
+}
+
 static const GUID *const svg_document_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgDocument};
 static const GUID *const svg_element_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgElement};
 static const GUID *const svg_paint_iids[] = {&IID_ID2D1Resource, &IID_ID2D1SvgAttribute, &IID_ID2D1SvgPaint};
@@ -4816,6 +4858,38 @@ static void svg_trace2(const char *interface_name, const char *method, const cha
 			text[at++] = part[index][length];
 	text[at] = 0;
 	RavenTrace(text);
+}
+
+/* Keep pointer/refcount diagnostics short and whole when several guest threads emit them. */
+static volatile LONG svg_object_trace_lock;
+
+static void svg_trace_object(const char *interface_name, const char *method, const void *iface, ULONG refs)
+{
+	static const char digits[] = "0123456789abcdef";
+	char text[128], pointer[2 + sizeof(uintptr_t) * 2];
+	uintptr_t value = (uintptr_t)iface;
+	UINT32 at = 0, index, length = 0;
+	char count[10];
+	do {
+		count[length++] = (char)('0' + refs % 10);
+		refs /= 10;
+	} while (refs && length < sizeof(count));
+	pointer[0] = '0'; pointer[1] = 'x';
+	for (index = 0; index < sizeof(uintptr_t) * 2; ++index)
+		pointer[2 + index] = digits[(value >> ((sizeof(uintptr_t) * 2 - index - 1) * 4)) & 15];
+	while (InterlockedCompareExchange(&svg_object_trace_lock, 1, 0))
+		while (__atomic_load_n(&svg_object_trace_lock, __ATOMIC_RELAXED))
+			;
+	#define SVG_TRACE_PART(part) do { for (index = 0; (part)[index] && at < sizeof(text) - 1; ++index) text[at++] = (part)[index]; } while (0)
+	SVG_TRACE_PART("d2d1: "); SVG_TRACE_PART(interface_name); SVG_TRACE_PART("::"); SVG_TRACE_PART(method);
+	SVG_TRACE_PART(" ptr=");
+	for (index = 0; index < sizeof(pointer) && at < sizeof(text) - 1; ++index) text[at++] = pointer[index];
+	SVG_TRACE_PART(" refs=");
+	while (length && at < sizeof(text) - 1) text[at++] = count[--length];
+	text[at] = 0;
+	RavenTrace(text);
+	#undef SVG_TRACE_PART
+	__atomic_store_n(&svg_object_trace_lock, 0, __ATOMIC_RELEASE);
 }
 
 static void svg_trace(const char *interface_name, const char *method) { svg_trace2(interface_name, method, NULL); }
@@ -5111,7 +5185,9 @@ static BOOL svg_color(const WCHAR *text, D2D1_COLOR_F *color)
 static void svg_element_destroy(struct object *base);
 static void svg_document_destroy(struct object *base);
 
-static void svg_attribute_clear(struct svg_attribute *attribute)
+static void svg_attribute_note_element(IUnknown *unknown, struct svg_element *element, struct svg_element *expected);
+
+static void svg_attribute_clear(struct svg_attribute *attribute, struct svg_element *element)
 {
 	FREE(attribute->string);
 	attribute->string = NULL;
@@ -5119,6 +5195,7 @@ static void svg_attribute_clear(struct svg_attribute *attribute)
 	attribute->pod = NULL;
 	attribute->pod_bytes = 0;
 	if (attribute->value) {
+		svg_attribute_note_element(attribute->value, NULL, element);
 		object_Release(attribute->value);
 		attribute->value = NULL;
 	}
@@ -5128,11 +5205,23 @@ static void svg_element_destroy(struct object *base)
 {
 	struct svg_element *self = (struct svg_element *)base;
 	UINT32 i;
-	for (i = 0; i < self->child_count; ++i)
-		object_Release(self->children[i]);
+	if (self->document) {
+		struct svg_element **link = &self->document->elements;
+		while (*link && *link != self)
+			link = &(*link)->document_next;
+		if (*link)
+			*link = self->document_next;
+	}
+	for (i = 0; i < self->child_count; ++i) {
+		struct svg_element *child = self->children[i];
+		/* A child may outlive its parent through a caller-held COM reference. */
+		if (child->parent == self)
+			child->parent = NULL;
+		object_Release(&child->base);
+	}
 	FREE(self->children);
 	for (i = 0; i < self->attribute_count; ++i) {
-		svg_attribute_clear(self->attributes + i);
+		svg_attribute_clear(self->attributes + i, (struct svg_element *)base);
 		FREE(self->attributes[i].name);
 	}
 	FREE(self->attributes);
@@ -5143,6 +5232,10 @@ static void svg_element_destroy(struct object *base)
 static void svg_document_destroy(struct object *base)
 {
 	struct svg_document *self = (struct svg_document *)base;
+	struct svg_element *element;
+	for (element = self->elements; element; element = element->document_next)
+		element->document = NULL;
+	self->elements = NULL;
 	if (self->root)
 		object_Release(&self->root->base);
 }
@@ -5155,6 +5248,8 @@ static struct svg_element *svg_new_element(struct svg_document *document, const 
 		return NULL;
 	object_init(&element->base, svg_element_table, svg_element_destroy, svg_element_iids, 2, document->base.factory);
 	element->document = document;
+	element->document_next = document->elements;
+	document->elements = element;
 	element->tag = svg_dup(tag, tag_length);
 	if (!element->tag) {
 		object_Release(&element->base);
@@ -5166,13 +5261,15 @@ static struct svg_element *svg_new_element(struct svg_document *document, const 
 
 static BOOL svg_attach_child(struct svg_element *parent, struct svg_element *child)
 {
-	if (!parent || !child || child->parent)
+	if (!parent || !child || child->parent) {
 		return FALSE;
+	}
 	if (parent->child_count == parent->child_capacity) {
 		UINT32 capacity = parent->child_capacity ? parent->child_capacity * 2 : 8;
 		struct svg_element **grown = GROW(parent->children, capacity * sizeof(*grown));
-		if (!grown)
+		if (!grown) {
 			return FALSE;
+		}
 		parent->children = grown;
 		parent->child_capacity = capacity;
 	}
@@ -5207,7 +5304,19 @@ static void svg_detach_child(struct svg_element *child)
 static UINT32 svg_retag_subtree(struct svg_element *element, struct svg_document *document)
 {
 	UINT32 count = 1, i;
+	struct svg_document *old = element->document;
+	if (old && old != document) {
+		struct svg_element **link = &old->elements;
+		while (*link && *link != element)
+			link = &(*link)->document_next;
+		if (*link)
+			*link = element->document_next;
+	}
 	element->document = document;
+	if (old != document) {
+		element->document_next = document->elements;
+		document->elements = element;
+	}
 	for (i = 0; i < element->child_count; ++i)
 		count += svg_retag_subtree(element->children[i], document);
 	return count;
@@ -5222,6 +5331,15 @@ static UINT32 svg_adopt_subtree(struct svg_element *element, struct svg_document
 		document->element_count += count;
 	}
 	return count;
+}
+
+/* A document root owns one reference in addition to any caller or parent reference. */
+static void svg_document_release_root(struct svg_document *document, struct svg_element *element)
+{
+	if (document && document->root == element) {
+		document->root = NULL;
+		object_Release(&element->base);
+	}
 }
 
 /* The tag of an element, narrowed for a trace line. */
@@ -5296,7 +5414,7 @@ static BOOL svg_remove_attribute(struct svg_element *self, const WCHAR *name)
 	UINT32 i;
 	for (i = 0; i < self->attribute_count; ++i) {
 		if (svg_same(self->attributes[i].name, name)) {
-			svg_attribute_clear(self->attributes + i);
+			svg_attribute_clear(self->attributes + i, self);
 			FREE(self->attributes[i].name);
 			memmove(self->attributes + i, self->attributes + i + 1, (self->attribute_count - i - 1) * sizeof(*self->attributes));
 			--self->attribute_count;
@@ -6112,6 +6230,10 @@ static void svg_serialize_element(struct bytes *out, struct svg_element *element
 		for (i = 0; i < element->attribute_count; ++i) {
 			struct svg_text text = {0};
 			BOOL have_text = FALSE;
+			if (!element->attributes[i].name) {
+				svg_trace2("ID2D1SvgDocument", "Serialize", "an attribute with no name was skipped");
+				continue;
+			}
 			bytes_add(out, " ", 1);
 			svg_write_escaped(out, element->attributes[i].name, svg_len(element->attributes[i].name), FALSE);
 			bytes_add(out, "=\"", 2);
@@ -6212,7 +6334,7 @@ static HRESULT svg_element_set_attribute_string(struct svg_element *self, PCWSTR
 		return E_INVALIDARG;
 	if (!(attribute = svg_find_attribute(self, name)) && !(attribute = svg_add_attribute(self, name)))
 		return E_OUTOFMEMORY;
-	svg_attribute_clear(attribute);
+	svg_attribute_clear(attribute, self);
 	attribute->string = svg_dup(value, svg_len(value));
 	if (!attribute->string)
 		return E_OUTOFMEMORY;
@@ -6220,20 +6342,25 @@ static HRESULT svg_element_set_attribute_string(struct svg_element *self, PCWSTR
 }
 
 /* An attribute object answers GetElement with the element it hangs on. */
-static void svg_attribute_note_element(IUnknown *unknown, struct svg_element *element)
+static void svg_attribute_note_element(IUnknown *unknown, struct svg_element *element, struct svg_element *expected)
 {
 	ID2D1SvgPaint *paint = NULL;
 	ID2D1SvgStrokeDashArray *dash = NULL;
 	ID2D1SvgPointCollection *points = NULL;
 	ID2D1SvgPathData *data = NULL;
-	if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPaint, (void **)&paint)))
-		((struct svg_paint *)paint)->element = element;
-	else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgStrokeDashArray, (void **)&dash)))
-		((struct svg_dash_array *)dash)->element = element;
-	else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPointCollection, (void **)&points)))
-		((struct svg_points *)points)->element = element;
-	else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPathData, (void **)&data)))
-		((struct svg_path_data *)data)->element = element;
+	if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPaint, (void **)&paint))) {
+		struct svg_paint *value = (struct svg_paint *)paint;
+		if (!expected || value->element == expected) value->element = element;
+	} else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgStrokeDashArray, (void **)&dash))) {
+		struct svg_dash_array *value = (struct svg_dash_array *)dash;
+		if (!expected || value->element == expected) value->element = element;
+	} else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPointCollection, (void **)&points))) {
+		struct svg_points *value = (struct svg_points *)points;
+		if (!expected || value->element == expected) value->element = element;
+	} else if (SUCCEEDED(IUnknown_QueryInterface(unknown, &IID_ID2D1SvgPathData, (void **)&data))) {
+		struct svg_path_data *value = (struct svg_path_data *)data;
+		if (!expected || value->element == expected) value->element = element;
+	}
 	if (paint)
 		object_Release(paint);
 	if (dash)
@@ -6325,7 +6452,7 @@ static HRESULT svg_element_set_attribute_pod(struct svg_element *self, PCWSTR na
 		return E_INVALIDARG;
 	if (!(attribute = svg_find_attribute(self, name)) && !(attribute = svg_add_attribute(self, name)))
 		return E_OUTOFMEMORY;
-	svg_attribute_clear(attribute);
+	svg_attribute_clear(attribute, self);
 	if (!(attribute->pod = ALLOC(bytes)))
 		return E_OUTOFMEMORY;
 	memcpy(attribute->pod, value, bytes);
@@ -6363,11 +6490,11 @@ static HRESULT svg_element_set_attribute_object(struct svg_element *self, PCWSTR
 		return E_INVALIDARG;
 	if (!(attribute = svg_find_attribute(self, name)) && !(attribute = svg_add_attribute(self, name)))
 		return E_OUTOFMEMORY;
-	svg_attribute_clear(attribute);
+	svg_attribute_clear(attribute, self);
 	attribute->value = (IUnknown *)value;
 	if (attribute->value) {
 		IUnknown_AddRef(attribute->value);
-		svg_attribute_note_element(attribute->value, self);
+		svg_attribute_note_element(attribute->value, self, NULL);
 	}
 	return S_OK;
 }
@@ -6523,25 +6650,37 @@ static HRESULT STDMETHODCALLTYPE svg_element_SetAttributeValue_string(void *ifac
 	struct svg_element *self = iface;
 	HRESULT result;
 	svg_trace("ID2D1SvgElement", "SetAttributeValue");
+	svg_lock_tree();
 	if (FAILED(result = svg_element_set_attribute_string(self, name, type, value)))
 		svg_trace2("ID2D1SvgElement", "SetAttributeValue", "the value was not kept");
+	svg_unlock_tree();
 	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_GetAttributeValue_string(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_STRING_TYPE type, PWSTR value, UINT32 value_count)
 {
 	struct svg_element *self = iface;
+	HRESULT result;
+	svg_lock_tree();
 	if (type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG && type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_ID)
-		return E_INVALIDARG;
-	return svg_element_get_attribute_text(self, name, value, value_count, NULL);
+		result = E_INVALIDARG;
+	else
+		result = svg_element_get_attribute_text(self, name, value, value_count, NULL);
+	svg_unlock_tree();
+	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_GetAttributeValueLength(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_STRING_TYPE type, UINT32 *value_length)
 {
 	struct svg_element *self = iface;
+	HRESULT result;
+	svg_lock_tree();
 	if (type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG && type != D2D1_SVG_ATTRIBUTE_STRING_TYPE_ID)
-		return E_INVALIDARG;
-	return svg_element_get_attribute_length(self, name, value_length);
+		result = E_INVALIDARG;
+	else
+		result = svg_element_get_attribute_length(self, name, value_length);
+	svg_unlock_tree();
+	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_SetAttributeValue_pod(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_POD_TYPE type, const void *value, UINT32 value_size_in_bytes)
@@ -6549,15 +6688,21 @@ static HRESULT STDMETHODCALLTYPE svg_element_SetAttributeValue_pod(void *iface, 
 	struct svg_element *self = iface;
 	HRESULT result;
 	svg_trace("ID2D1SvgElement", "SetAttributeValue");
+	svg_lock_tree();
 	if (FAILED(result = svg_element_set_attribute_pod(self, name, type, value, value_size_in_bytes)))
 		svg_trace2("ID2D1SvgElement", "SetAttributeValue", "the typed value was not kept");
+	svg_unlock_tree();
 	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_GetAttributeValue_pod(void *iface, PCWSTR name, D2D1_SVG_ATTRIBUTE_POD_TYPE type, void *value, UINT32 value_size_in_bytes)
 {
 	struct svg_element *self = iface;
-	return svg_element_get_attribute_pod(self, name, type, value, value_size_in_bytes);
+	HRESULT result;
+	svg_lock_tree();
+	result = svg_element_get_attribute_pod(self, name, type, value, value_size_in_bytes);
+	svg_unlock_tree();
+	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_SetAttributeValue_object(void *iface, PCWSTR name, ID2D1SvgAttribute *value)
@@ -6565,8 +6710,10 @@ static HRESULT STDMETHODCALLTYPE svg_element_SetAttributeValue_object(void *ifac
 	struct svg_element *self = iface;
 	HRESULT result;
 	svg_trace("ID2D1SvgElement", "SetAttributeValue");
+	svg_lock_tree();
 	if (FAILED(result = svg_element_set_attribute_object(self, name, value)))
 		svg_trace2("ID2D1SvgElement", "SetAttributeValue", "the attribute object was not kept");
+	svg_unlock_tree();
 	return result;
 }
 
@@ -6580,19 +6727,23 @@ static HRESULT STDMETHODCALLTYPE svg_element_GetAttributeValue_interface(void *i
 	*value = NULL;
 	if (!name || !riid)
 		return E_INVALIDARG;
+	svg_lock_tree();
 	if ((attribute = svg_find_attribute(self, name)) && attribute->value)
-		return IUnknown_QueryInterface(attribute->value, riid, value);
-	result = svg_element_materialize_attribute(self, name, riid, value);
-	if (SUCCEEDED(result) && *value) {
-		/* the object made of the parsed value becomes the attribute, so a later get finds it */
-		if (!(attribute = svg_find_attribute(self, name)))
-			attribute = svg_add_attribute(self, name);
-		if (attribute) {
-			svg_attribute_clear(attribute);
-			attribute->value = (IUnknown *)*value;
-			IUnknown_AddRef(attribute->value);
+		result = IUnknown_QueryInterface(attribute->value, riid, value);
+	else {
+		result = svg_element_materialize_attribute(self, name, riid, value);
+		if (SUCCEEDED(result) && *value) {
+			/* the object made of the parsed value becomes the attribute, so a later get finds it */
+			if (!(attribute = svg_find_attribute(self, name)))
+				attribute = svg_add_attribute(self, name);
+			if (attribute) {
+				svg_attribute_clear(attribute, self);
+				attribute->value = (IUnknown *)*value;
+				IUnknown_AddRef(attribute->value);
+			}
 		}
 	}
+	svg_unlock_tree();
 	return result;
 }
 
@@ -6601,35 +6752,49 @@ static HRESULT STDMETHODCALLTYPE svg_document_SetViewportSize(void *iface, D2D1_
 {
 	struct svg_document *self = iface;
 	svg_trace("ID2D1SvgDocument", "SetViewportSize");
+	svg_lock_tree();
 	self->viewport = viewport_size;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static D2D1_SIZE_F STDMETHODCALLTYPE svg_document_GetViewportSize(void *iface)
 {
 	struct svg_document *self = iface;
+	D2D1_SIZE_F viewport;
 	svg_trace("ID2D1SvgDocument", "GetViewportSize");
-	return self->viewport;
+	svg_lock_tree();
+	viewport = self->viewport;
+	svg_unlock_tree();
+	return viewport;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_document_SetRoot(void *iface, ID2D1SvgElement *root)
 {
 	struct svg_document *self = iface;
 	struct svg_element *element = (struct svg_element *)root;
+	struct svg_document *old_document;
 	svg_trace("ID2D1SvgDocument", "SetRoot");
+	svg_lock_tree();
+	old_document = element ? element->document : NULL;
 	if (element) {
 		if (element->base.factory != self->base.factory) {
 			svg_trace2("ID2D1SvgDocument", "SetRoot", "an element of another resource domain");
+			svg_unlock_tree();
 			return D2DERR_WRONG_RESOURCE_DOMAIN;
 		}
+		svg_document_release_root(old_document, element);
+		svg_detach_child(element);
+	}
+	if (element) {
 		if (element->document != self)
 			svg_adopt_subtree(element, self); /* a sibling document's element over the same device */
-		svg_detach_child(element); /* out of any parent; the document owns it now */
 		object_AddRef(&element->base);
 	}
 	if (self->root)
 		object_Release(&self->root->base);
 	self->root = element;
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -6638,9 +6803,14 @@ static void STDMETHODCALLTYPE svg_document_GetRoot(void *iface, ID2D1SvgElement 
 	struct svg_document *self = iface;
 	if (!root)
 		return;
+	svg_lock_tree();
 	*root = (ID2D1SvgElement *)self->root;
-	if (*root)
+	if (*root) {
 		object_AddRef(&self->root->base);
+		svg_trace_object("ID2D1SvgDocument", "GetRoot returned", *root,
+			(ULONG)InterlockedCompareExchange(&self->root->base.refs, 0, 0));
+	}
+	svg_unlock_tree();
 }
 
 static BOOL svg_find_by_id(struct svg_element *element, const WCHAR *id, struct svg_element **found)
@@ -6665,12 +6835,18 @@ static HRESULT STDMETHODCALLTYPE svg_document_FindElementById(void *iface, PCWST
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (!id || !self->root)
+	if (!id)
 		return E_INVALIDARG;
+	svg_lock_tree();
+	if (!self->root) {
+		svg_unlock_tree();
+		return E_INVALIDARG;
+	}
 	if (svg_find_by_id(self->root, id, &found)) {
 		*out = (ID2D1SvgElement *)found;
 		object_AddRef(&found->base);
 	}
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -6685,7 +6861,9 @@ static HRESULT STDMETHODCALLTYPE svg_document_Serialize(void *iface, IStream *st
 	svg_trace("ID2D1SvgDocument", "Serialize");
 	if (!stream)
 		return E_POINTER;
+	svg_lock_tree();
 	if (element && element->document != self) {
+		svg_unlock_tree();
 		svg_trace2("ID2D1SvgDocument", "Serialize", "an element of another document");
 		return D2DERR_WRONG_RESOURCE_DOMAIN;
 	}
@@ -6695,6 +6873,7 @@ static HRESULT STDMETHODCALLTYPE svg_document_Serialize(void *iface, IStream *st
 	}
 	if (element)
 		svg_serialize_element(&out, element);
+	svg_unlock_tree();
 	if (out.size) {
 		static LONG serialized = 0;
 		LONG seen = InterlockedIncrement(&serialized);
@@ -6769,19 +6948,23 @@ static HRESULT STDMETHODCALLTYPE svg_document_Deserialize(void *iface, IStream *
 	if (FAILED(result = svg_read_stream(stream, &xml, &count)))
 		return result;
 	/* the fragment parses into the document but stays apart from it */
+	svg_lock_tree();
 	previous_root = self->root;
 	self->root = NULL;
 	if (!svg_parse(self, xml, count, NULL)) {
 		self->root = previous_root;
+		svg_unlock_tree();
 		FREE(xml);
 		return E_INVALIDARG;
 	}
-	FREE(xml);
 	element = self->root;
 	self->root = previous_root;
+	if (element)
+		object_AddRef(&element->base);
+	svg_unlock_tree();
+	FREE(xml);
 	if (!element)
 		return E_INVALIDARG;
-	object_AddRef(&element->base);
 	*subtree = (ID2D1SvgElement *)element;
 	return S_OK;
 }
@@ -6906,30 +7089,43 @@ static void STDMETHODCALLTYPE svg_element_GetDocument(void *iface, ID2D1SvgDocum
 	struct svg_element *self = iface;
 	if (!document)
 		return;
+	svg_lock_tree();
 	*document = (ID2D1SvgDocument *)self->document;
 	if (*document)
 		object_AddRef(&self->document->base);
+	svg_unlock_tree();
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_GetTagName(void *iface, PWSTR name, UINT32 name_count)
 {
 	struct svg_element *self = iface;
-	HRESULT result = svg_text_out(self->tag, name, name_count);
+	HRESULT result;
+	svg_lock_tree();
+	result = svg_text_out(self->tag, name, name_count);
 	if (FAILED(result))
 		svg_trace2("ID2D1SvgElement", "GetTagName", "the buffer is too small");
+	svg_unlock_tree();
 	return result;
 }
 
 static UINT32 STDMETHODCALLTYPE svg_element_GetTagNameLength(void *iface)
 {
 	struct svg_element *self = iface;
-	return svg_len(self->tag);
+	UINT32 length;
+	svg_lock_tree();
+	length = svg_len(self->tag);
+	svg_unlock_tree();
+	return length;
 }
 
 static BOOL STDMETHODCALLTYPE svg_element_IsTextContent(void *iface)
 {
 	struct svg_element *self = iface;
-	return !self->tag[0];
+	BOOL text;
+	svg_lock_tree();
+	text = !self->tag[0];
+	svg_unlock_tree();
+	return text;
 }
 
 static void STDMETHODCALLTYPE svg_element_GetParent(void *iface, ID2D1SvgElement **parent)
@@ -6937,15 +7133,24 @@ static void STDMETHODCALLTYPE svg_element_GetParent(void *iface, ID2D1SvgElement
 	struct svg_element *self = iface;
 	if (!parent)
 		return;
+	svg_lock_tree();
 	*parent = (ID2D1SvgElement *)self->parent;
-	if (*parent)
+	if (*parent) {
 		object_AddRef(&self->parent->base);
+		svg_trace_object("ID2D1SvgElement", "GetParent returned", *parent,
+			(ULONG)InterlockedCompareExchange(&self->parent->base.refs, 0, 0));
+	}
+	svg_unlock_tree();
 }
 
 static BOOL STDMETHODCALLTYPE svg_element_HasChildren(void *iface)
 {
 	struct svg_element *self = iface;
-	return self->child_count != 0;
+	BOOL result;
+	svg_lock_tree();
+	result = self->child_count != 0;
+	svg_unlock_tree();
+	return result;
 }
 
 static void STDMETHODCALLTYPE svg_element_GetFirstChild(void *iface, ID2D1SvgElement **child)
@@ -6953,9 +7158,14 @@ static void STDMETHODCALLTYPE svg_element_GetFirstChild(void *iface, ID2D1SvgEle
 	struct svg_element *self = iface;
 	if (!child)
 		return;
+	svg_lock_tree();
 	*child = self->child_count ? (ID2D1SvgElement *)self->children[0] : NULL;
-	if (*child)
+	if (*child) {
 		object_AddRef(&self->children[0]->base);
+		svg_trace_object("ID2D1SvgElement", "GetFirstChild returned", *child,
+			(ULONG)InterlockedCompareExchange(&self->children[0]->base.refs, 0, 0));
+	}
+	svg_unlock_tree();
 }
 
 static void STDMETHODCALLTYPE svg_element_GetLastChild(void *iface, ID2D1SvgElement **child)
@@ -6963,9 +7173,11 @@ static void STDMETHODCALLTYPE svg_element_GetLastChild(void *iface, ID2D1SvgElem
 	struct svg_element *self = iface;
 	if (!child)
 		return;
+	svg_lock_tree();
 	*child = self->child_count ? (ID2D1SvgElement *)self->children[self->child_count - 1] : NULL;
 	if (*child)
 		object_AddRef(&self->children[self->child_count - 1]->base);
+	svg_unlock_tree();
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_GetPreviousChild(void *iface, ID2D1SvgElement *reference_child, ID2D1SvgElement **previous_child)
@@ -6977,14 +7189,17 @@ static HRESULT STDMETHODCALLTYPE svg_element_GetPreviousChild(void *iface, ID2D1
 	*previous_child = NULL;
 	if (!reference_child)
 		return E_INVALIDARG;
+	svg_lock_tree();
 	if (!svg_child_index(self, (struct svg_element *)reference_child, &index)) {
 		svg_trace2("ID2D1SvgElement", "GetPreviousChild", "the reference child is not a child of this element");
+		svg_unlock_tree();
 		return E_INVALIDARG;
 	}
 	if (index) {
 		*previous_child = (ID2D1SvgElement *)self->children[index - 1];
 		object_AddRef(&self->children[index - 1]->base);
 	}
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -6997,14 +7212,19 @@ static HRESULT STDMETHODCALLTYPE svg_element_GetNextChild(void *iface, ID2D1SvgE
 	*next_child = NULL;
 	if (!reference_child)
 		return E_INVALIDARG;
+	svg_lock_tree();
 	if (!svg_child_index(self, (struct svg_element *)reference_child, &index)) {
 		svg_trace2("ID2D1SvgElement", "GetNextChild", "the reference child is not a child of this element");
+		svg_unlock_tree();
 		return E_INVALIDARG;
 	}
 	if (index + 1 < self->child_count) {
 		*next_child = (ID2D1SvgElement *)self->children[index + 1];
 		object_AddRef(&self->children[index + 1]->base);
+		svg_trace_object("ID2D1SvgElement", "GetNextChild returned", *next_child,
+			(ULONG)InterlockedCompareExchange(&self->children[index + 1]->base.refs, 0, 0));
 	}
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -7031,6 +7251,7 @@ static HRESULT svg_element_admit_child(struct svg_element *self, ID2D1SvgElement
 			svg_trace2("ID2D1SvgElement", method, "an element into its own subtree");
 			return E_INVALIDARG;
 		}
+	svg_document_release_root(child->document, child);
 	if (child->document != self->document) {
 		static const char note[] = " adopted from another document (";
 		char text[160];
@@ -7057,24 +7278,36 @@ static HRESULT STDMETHODCALLTYPE svg_element_InsertChildBefore(void *iface, ID2D
 	UINT32 index;
 	HRESULT result;
 	svg_trace("ID2D1SvgElement", "InsertChildBefore");
+	svg_lock_tree();
 	/* the reference is validated first: admitting the child moves it out of its old
 	   document, and that must not happen for a call that is going to fail */
 	if (reference_child && !svg_child_index(self, (struct svg_element *)reference_child, &index)) {
 		svg_trace2("ID2D1SvgElement", "InsertChildBefore", "the reference child is not a child of this element");
+		svg_unlock_tree();
 		return E_INVALIDARG;
 	}
-	if (FAILED(result = svg_element_admit_child(self, new_child, "InsertChildBefore")))
+	if (FAILED(result = svg_element_admit_child(self, new_child, "InsertChildBefore"))) {
+		svg_unlock_tree();
 		return result;
-	if (!reference_child)
-		return svg_attach_child(self, child) ? S_OK : E_OUTOFMEMORY;
+	}
+	if (!reference_child) {
+		result = svg_attach_child(self, child) ? S_OK : E_OUTOFMEMORY;
+		svg_unlock_tree();
+		return result;
+	}
 	/* the admission may have detached the child from this very list: the reference's
 	   place is looked up again */
-	svg_child_index(self, (struct svg_element *)reference_child, &index);
+	if (!svg_child_index(self, (struct svg_element *)reference_child, &index)) {
+		svg_unlock_tree();
+		return E_INVALIDARG;
+	}
 	if (self->child_count == self->child_capacity) {
 		UINT32 capacity = self->child_capacity ? self->child_capacity * 2 : 8;
 		struct svg_element **grown = GROW(self->children, capacity * sizeof(*grown));
-		if (!grown)
+		if (!grown) {
+			svg_unlock_tree();
 			return E_OUTOFMEMORY;
+		}
 		self->children = grown;
 		self->child_capacity = capacity;
 	}
@@ -7083,6 +7316,7 @@ static HRESULT STDMETHODCALLTYPE svg_element_InsertChildBefore(void *iface, ID2D
 	child->parent = self;
 	self->child_count += 1;
 	object_AddRef(&child->base);
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -7092,9 +7326,14 @@ static HRESULT STDMETHODCALLTYPE svg_element_AppendChild(void *iface, ID2D1SvgEl
 	struct svg_element *child = (struct svg_element *)new_child;
 	HRESULT result;
 	svg_trace("ID2D1SvgElement", "AppendChild");
-	if (FAILED(result = svg_element_admit_child(self, new_child, "AppendChild")))
+	svg_lock_tree();
+	if (FAILED(result = svg_element_admit_child(self, new_child, "AppendChild"))) {
+		svg_unlock_tree();
 		return result;
-	return svg_attach_child(self, child) ? S_OK : E_OUTOFMEMORY;
+	}
+	result = svg_attach_child(self, child) ? S_OK : E_OUTOFMEMORY;
+	svg_unlock_tree();
+	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_ReplaceChild(void *iface, ID2D1SvgElement *new_child, ID2D1SvgElement *old_child)
@@ -7104,12 +7343,27 @@ static HRESULT STDMETHODCALLTYPE svg_element_ReplaceChild(void *iface, ID2D1SvgE
 	UINT32 index;
 	HRESULT result;
 	svg_trace("ID2D1SvgElement", "ReplaceChild");
-	if (!old)
+	svg_lock_tree();
+	if (!old) {
+		svg_unlock_tree();
 		return E_POINTER;
-	if (FAILED(result = svg_element_admit_child(self, new_child, "ReplaceChild")))
-		return result;
+	}
 	if (!svg_child_index(self, old, &index)) {
 		svg_trace2("ID2D1SvgElement", "ReplaceChild", "the old child is not a child of this element");
+		svg_unlock_tree();
+		return E_INVALIDARG;
+	}
+	if (child == old) {
+		svg_unlock_tree();
+		return S_OK;
+	}
+	if (FAILED(result = svg_element_admit_child(self, new_child, "ReplaceChild"))) {
+		svg_unlock_tree();
+		return result;
+	}
+	if (!svg_child_index(self, old, &index)) {
+		svg_trace2("ID2D1SvgElement", "ReplaceChild", "the old child is not a child of this element");
+		svg_unlock_tree();
 		return E_INVALIDARG;
 	}
 	/* the old child leaves (the reference the parent held goes with it) and the new one takes its place */
@@ -7118,6 +7372,7 @@ static HRESULT STDMETHODCALLTYPE svg_element_ReplaceChild(void *iface, ID2D1SvgE
 	self->children[index] = child;
 	child->parent = self;
 	object_AddRef(&child->base);
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -7126,13 +7381,18 @@ static HRESULT STDMETHODCALLTYPE svg_element_RemoveChild(void *iface, ID2D1SvgEl
 	struct svg_element *self = iface;
 	UINT32 index;
 	svg_trace("ID2D1SvgElement", "RemoveChild");
-	if (!old_child)
+	svg_lock_tree();
+	if (!old_child) {
+		svg_unlock_tree();
 		return E_POINTER;
+	}
 	if (!svg_child_index(self, (struct svg_element *)old_child, &index)) {
 		svg_trace2("ID2D1SvgElement", "RemoveChild", "the child is not a child of this element");
+		svg_unlock_tree();
 		return E_INVALIDARG;
 	}
 	svg_detach_child((struct svg_element *)old_child);
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -7146,64 +7406,89 @@ static HRESULT STDMETHODCALLTYPE svg_element_CreateChild(void *iface, PCWSTR tag
 	*new_child = NULL;
 	if (!tag_name)
 		return E_INVALIDARG;
-	if (!(child = svg_new_element(self->document, tag_name, svg_len(tag_name))))
+	svg_lock_tree();
+	if (!(child = svg_new_element(self->document, tag_name, svg_len(tag_name)))) {
+		svg_unlock_tree();
 		return E_OUTOFMEMORY;
+	}
 	if (!svg_attach_child(self, child)) {
 		object_Release(&child->base);
+		svg_unlock_tree();
 		return E_OUTOFMEMORY;
 	}
 	*new_child = (ID2D1SvgElement *)child;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static BOOL STDMETHODCALLTYPE svg_element_IsAttributeSpecified(void *iface, PCWSTR name, BOOL *inherited)
 {
 	struct svg_element *self = iface;
-	BOOL found = name && svg_find_attribute(self, name) != NULL;
+	BOOL found;
+	svg_lock_tree();
+	found = name && svg_find_attribute(self, name) != NULL;
 	if (inherited)
 		*inherited = FALSE;
+	svg_unlock_tree();
 	return found;
 }
 
 static UINT32 STDMETHODCALLTYPE svg_element_GetSpecifiedAttributeCount(void *iface)
 {
 	struct svg_element *self = iface;
-	return self->attribute_count;
+	UINT32 count;
+	svg_lock_tree();
+	count = self->attribute_count;
+	svg_unlock_tree();
+	return count;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_GetSpecifiedAttributeName(void *iface, UINT32 index, PWSTR name, UINT32 name_count, BOOL *inherited)
 {
 	struct svg_element *self = iface;
 	HRESULT result;
+	svg_lock_tree();
 	if (inherited)
 		*inherited = FALSE;
 	if (index >= self->attribute_count)
-		return E_INVALIDARG;
-	result = svg_text_out(self->attributes[index].name, name, name_count);
+		result = E_INVALIDARG;
+	else
+		result = svg_text_out(self->attributes[index].name, name, name_count);
 	if (FAILED(result))
 		svg_trace2("ID2D1SvgElement", "GetSpecifiedAttributeName", "the buffer is too small");
+	svg_unlock_tree();
 	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_GetSpecifiedAttributeNameLength(void *iface, UINT32 index, UINT32 *name_length, BOOL *inherited)
 {
 	struct svg_element *self = iface;
+	HRESULT result;
+	svg_lock_tree();
 	if (inherited)
 		*inherited = FALSE;
 	if (!name_length)
-		return E_POINTER;
-	if (index >= self->attribute_count)
-		return E_INVALIDARG;
-	*name_length = svg_len(self->attributes[index].name);
-	return S_OK;
+		result = E_POINTER;
+	else if (index >= self->attribute_count)
+		result = E_INVALIDARG;
+	else {
+		*name_length = svg_len(self->attributes[index].name);
+		result = S_OK;
+	}
+	svg_unlock_tree();
+	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_RemoveAttribute(void *iface, PCWSTR name)
 {
 	struct svg_element *self = iface;
+	BOOL removed;
 	if (!name)
 		return E_INVALIDARG;
-	if (!svg_remove_attribute(self, name)) {
+	svg_lock_tree();
+	removed = svg_remove_attribute(self, name);
+	svg_unlock_tree();
+	if (!removed) {
 		svg_trace2("ID2D1SvgElement", "RemoveAttribute", "no attribute of the name");
 		return E_INVALIDARG;
 	}
@@ -7214,38 +7499,49 @@ static HRESULT STDMETHODCALLTYPE svg_element_SetTextValue(void *iface, const WCH
 {
 	struct svg_element *self = iface;
 	WCHAR *copy;
+	HRESULT result = S_OK;
 	svg_trace("ID2D1SvgElement", "SetTextValue");
+	svg_lock_tree();
 	if (!self->tag[0]) {
 		svg_trace2("ID2D1SvgElement", "SetTextValue", "the element holds no text of its own");
-		return E_INVALIDARG;
+		result = E_INVALIDARG;
+	} else if (text_count && !text)
+		result = E_INVALIDARG;
+	else if (!(copy = svg_dup(text, text_count)))
+		result = E_OUTOFMEMORY;
+	else {
+		FREE(self->text);
+		self->text = copy;
 	}
-	if (text_count && !text)
-		return E_INVALIDARG;
-	if (!(copy = svg_dup(text, text_count)))
-		return E_OUTOFMEMORY;
-	FREE(self->text);
-	self->text = copy;
-	return S_OK;
+	svg_unlock_tree();
+	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_element_GetTextValue(void *iface, PWSTR text, UINT32 text_count)
 {
 	struct svg_element *self = iface;
 	HRESULT result;
+	svg_lock_tree();
 	if (!self->tag[0]) {
 		svg_trace2("ID2D1SvgElement", "GetTextValue", "the element holds no text of its own");
-		return E_INVALIDARG;
+		result = E_INVALIDARG;
+	} else {
+		result = svg_text_out(self->text ? self->text : L"", text, text_count);
+		if (FAILED(result))
+			svg_trace2("ID2D1SvgElement", "GetTextValue", "the buffer is too small");
 	}
-	result = svg_text_out(self->text ? self->text : L"", text, text_count);
-	if (FAILED(result))
-		svg_trace2("ID2D1SvgElement", "GetTextValue", "the buffer is too small");
+	svg_unlock_tree();
 	return result;
 }
 
 static UINT32 STDMETHODCALLTYPE svg_element_GetTextValueLength(void *iface)
 {
 	struct svg_element *self = iface;
-	return svg_len(self->text);
+	UINT32 length;
+	svg_lock_tree();
+	length = svg_len(self->text);
+	svg_unlock_tree();
+	return length;
 }
 
 /* ---- the attribute objects: the members ID2D1SvgAttribute itself carries ---- */
@@ -7254,28 +7550,36 @@ static void STDMETHODCALLTYPE svg_attribute_GetElement(void *iface, ID2D1SvgElem
 	struct svg_attribute_base *self = iface;
 	if (!element)
 		return;
+	svg_lock_tree();
 	*element = (ID2D1SvgElement *)self->element;
 	if (*element)
 		object_AddRef(&self->element->base);
+	svg_unlock_tree();
 }
 
 /* ---- the paint attribute object ---- */
 static HRESULT STDMETHODCALLTYPE svg_paint_Clone(void *iface, ID2D1SvgAttribute **attribute)
 {
+	svg_lock_tree();
 	struct svg_paint *self = iface;
 	struct svg_paint *copy;
 	WCHAR *copy_id = NULL;
 	svg_trace("ID2D1SvgPaint", "Clone");
-	if (!attribute)
+	if (!attribute) {
+		svg_unlock_tree();
 		return E_POINTER;
-	if (self->id && !(copy_id = svg_dup(self->id, svg_len(self->id))))
-		return E_OUTOFMEMORY;
-	if (!(copy = svg_make_paint(self->base.factory, self->type, &self->color, copy_id))) {
-		FREE(copy_id);
+	}
+	if (self->id && !(copy_id = svg_dup(self->id, svg_len(self->id)))) {
+		svg_unlock_tree();
 		return E_OUTOFMEMORY;
 	}
-	copy->element = self->element;
+	if (!(copy = svg_make_paint(self->base.factory, self->type, &self->color, copy_id))) {
+		FREE(copy_id);
+		svg_unlock_tree();
+	return E_OUTOFMEMORY;
+	}
 	*attribute = (ID2D1SvgAttribute *)copy;
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -7285,14 +7589,20 @@ static HRESULT STDMETHODCALLTYPE svg_paint_SetPaintType(void *iface, D2D1_SVG_PA
 	svg_trace("ID2D1SvgPaint", "SetPaintType");
 	if (paint_type > D2D1_SVG_PAINT_TYPE_URI_CURRENT_COLOR)
 		return E_INVALIDARG;
+	svg_lock_tree();
 	self->type = paint_type;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static D2D1_SVG_PAINT_TYPE STDMETHODCALLTYPE svg_paint_GetPaintType(void *iface)
 {
 	struct svg_paint *self = iface;
-	return self->type;
+	D2D1_SVG_PAINT_TYPE type;
+	svg_lock_tree();
+	type = self->type;
+	svg_unlock_tree();
+	return type;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_paint_SetColor(void *iface, const D2D1_COLOR_F *color)
@@ -7301,15 +7611,20 @@ static HRESULT STDMETHODCALLTYPE svg_paint_SetColor(void *iface, const D2D1_COLO
 	svg_trace("ID2D1SvgPaint", "SetColor");
 	if (!color)
 		return E_INVALIDARG;
+	svg_lock_tree();
 	self->color = *color;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static void STDMETHODCALLTYPE svg_paint_GetColor(void *iface, D2D1_COLOR_F *color)
 {
+	svg_lock_tree();
 	struct svg_paint *self = iface;
 	if (color)
 		*color = self->color;
+
+	svg_unlock_tree();
 }
 
 static HRESULT STDMETHODCALLTYPE svg_paint_SetId(void *iface, PCWSTR id)
@@ -7321,57 +7636,75 @@ static HRESULT STDMETHODCALLTYPE svg_paint_SetId(void *iface, PCWSTR id)
 		return E_INVALIDARG;
 	if (!(copy = svg_dup(id, svg_len(id))))
 		return E_OUTOFMEMORY;
+	svg_lock_tree();
 	FREE(self->id);
 	self->id = copy;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_paint_GetId(void *iface, PWSTR id, UINT32 id_count)
 {
+	svg_lock_tree();
 	struct svg_paint *self = iface;
 	HRESULT result = svg_text_out(self->id ? self->id : L"", id, id_count);
 	if (FAILED(result))
 		svg_trace2("ID2D1SvgPaint", "GetId", "the buffer is too small");
+	svg_unlock_tree();
 	return result;
 }
 
 static UINT32 STDMETHODCALLTYPE svg_paint_GetIdLength(void *iface)
 {
 	struct svg_paint *self = iface;
-	return svg_len(self->id);
+	UINT32 length;
+	svg_lock_tree();
+	length = svg_len(self->id);
+	svg_unlock_tree();
+	return length;
 }
 
 /* ---- the dash array attribute object: the dashes are lengths; the float form sees the values ---- */
 static HRESULT STDMETHODCALLTYPE svg_dash_Clone(void *iface, ID2D1SvgAttribute **attribute)
 {
+	svg_lock_tree();
 	struct svg_dash_array *self = iface;
 	struct svg_dash_array *copy;
 	svg_trace("ID2D1SvgStrokeDashArray", "Clone");
-	if (!attribute)
+	if (!attribute) {
+		svg_unlock_tree();
 		return E_POINTER;
-	if (!(copy = ALLOC(sizeof(*copy))))
+	}
+	if (!(copy = ALLOC(sizeof(*copy)))) {
+		svg_unlock_tree();
 		return E_OUTOFMEMORY;
+	}
 	object_init(&copy->base, svg_dash_table, NULL, svg_dash_iids, 3, self->base.factory);
-	copy->element = self->element;
 	copy->count = self->count;
 	if (self->count) {
 		if (!(copy->dashes = ALLOC(self->count * sizeof(*copy->dashes)))) {
 			object_Release(&copy->base);
-			return E_OUTOFMEMORY;
+			svg_unlock_tree();
+	return E_OUTOFMEMORY;
 		}
 		memcpy(copy->dashes, self->dashes, self->count * sizeof(*copy->dashes));
 	}
 	*attribute = (ID2D1SvgAttribute *)copy;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_dash_RemoveDashesAtEnd(void *iface, UINT32 dashes_count)
 {
+	svg_lock_tree();
 	struct svg_dash_array *self = iface;
 	svg_trace("ID2D1SvgStrokeDashArray", "RemoveDashesAtEnd");
-	if (dashes_count > self->count)
+	if (dashes_count > self->count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	self->count -= dashes_count;
+	svg_unlock_tree();
 	return S_OK;
 }
 
@@ -7392,29 +7725,37 @@ static HRESULT svg_dash_update(struct svg_dash_array *self, const D2D1_SVG_LENGT
 
 static HRESULT STDMETHODCALLTYPE svg_dash_UpdateDashes_float(void *iface, const FLOAT *dashes, UINT32 dashes_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_dash_array *self = iface;
 	D2D1_SVG_LENGTH lengths[64];
 	UINT32 i;
 	HRESULT result;
 	svg_trace("ID2D1SvgStrokeDashArray", "UpdateDashes");
-	if (dashes_count && !dashes)
+	if (dashes_count && !dashes) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	for (i = 0; i < dashes_count && i < 64; ++i) {
 		lengths[i].value = dashes[i];
 		lengths[i].units = D2D1_SVG_LENGTH_UNITS_NUMBER;
 	}
 	result = svg_dash_update(self, lengths, dashes_count > 64 ? 64 : dashes_count, start_index);
+	svg_unlock_tree();
 	return result;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_dash_UpdateDashes_length(void *iface, const D2D1_SVG_LENGTH *dashes, UINT32 dashes_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_dash_array *self = iface;
 	HRESULT result;
 	svg_trace("ID2D1SvgStrokeDashArray", "UpdateDashes");
-	if (dashes_count && !dashes)
+	if (dashes_count && !dashes) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	result = svg_dash_update(self, dashes, dashes_count, start_index);
+	svg_unlock_tree();
 	return result;
 }
 
@@ -7428,233 +7769,329 @@ static HRESULT svg_dash_get(const struct svg_dash_array *self, D2D1_SVG_LENGTH *
 
 static HRESULT STDMETHODCALLTYPE svg_dash_GetDashes_float(void *iface, FLOAT *dashes, UINT32 dashes_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_dash_array *self = iface;
 	D2D1_SVG_LENGTH lengths[64];
 	UINT32 i;
 	HRESULT result;
 	svg_trace("ID2D1SvgStrokeDashArray", "GetDashes");
-	if (dashes_count && !dashes)
+	if (dashes_count && !dashes) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	if (dashes_count > 64)
+	}
+	if (dashes_count > 64) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	if (FAILED(result = svg_dash_get(self, lengths, dashes_count, start_index)))
+	}
+	if (FAILED(result = svg_dash_get(self, lengths, dashes_count, start_index))) {
+		svg_unlock_tree();
 		return result;
+	}
 	for (i = 0; i < dashes_count; ++i)
 		dashes[i] = lengths[i].value;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_dash_GetDashes_length(void *iface, D2D1_SVG_LENGTH *dashes, UINT32 dashes_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_dash_array *self = iface;
 	HRESULT result;
 	svg_trace("ID2D1SvgStrokeDashArray", "GetDashes");
-	if (dashes_count && !dashes)
+	if (dashes_count && !dashes) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	return svg_dash_get(self, dashes, dashes_count, start_index);
+	}
+	result = svg_dash_get(self, dashes, dashes_count, start_index);
+	svg_unlock_tree();
+	return result;
 }
 
 static UINT32 STDMETHODCALLTYPE svg_dash_GetDashesCount(void *iface)
 {
 	struct svg_dash_array *self = iface;
-	return self->count;
+	UINT32 count;
+	svg_lock_tree();
+	count = self->count;
+	svg_unlock_tree();
+	return count;
 }
 
 /* ---- the point collection attribute object ---- */
 static HRESULT STDMETHODCALLTYPE svg_points_Clone(void *iface, ID2D1SvgAttribute **attribute)
 {
+	svg_lock_tree();
 	struct svg_points *self = iface;
 	struct svg_points *copy;
 	svg_trace("ID2D1SvgPointCollection", "Clone");
-	if (!attribute)
+	if (!attribute) {
+		svg_unlock_tree();
 		return E_POINTER;
-	if (!(copy = ALLOC(sizeof(*copy))))
+	}
+	if (!(copy = ALLOC(sizeof(*copy)))) {
+		svg_unlock_tree();
 		return E_OUTOFMEMORY;
+	}
 	object_init(&copy->base, svg_points_table, NULL, svg_points_iids, 3, self->base.factory);
-	copy->element = self->element;
 	copy->count = self->count;
 	if (self->count) {
 		if (!(copy->points = ALLOC(self->count * sizeof(*copy->points)))) {
 			object_Release(&copy->base);
-			return E_OUTOFMEMORY;
+			svg_unlock_tree();
+	return E_OUTOFMEMORY;
 		}
 		memcpy(copy->points, self->points, self->count * sizeof(*copy->points));
 	}
 	*attribute = (ID2D1SvgAttribute *)copy;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_points_RemovePointsAtEnd(void *iface, UINT32 points_count)
 {
+	svg_lock_tree();
 	struct svg_points *self = iface;
 	svg_trace("ID2D1SvgPointCollection", "RemovePointsAtEnd");
-	if (points_count > self->count)
+	if (points_count > self->count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	self->count -= points_count;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_points_UpdatePoints(void *iface, const D2D1_POINT_2F *points, UINT32 points_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_points *self = iface;
 	svg_trace("ID2D1SvgPointCollection", "UpdatePoints");
-	if (points_count && !points)
+	if (points_count && !points) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	if (start_index > self->count)
+	}
+	if (start_index > self->count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	if (start_index + points_count > self->count) {
 		D2D1_POINT_2F *grown = GROW(self->points, (start_index + points_count) * sizeof(*grown));
-		if (!grown)
+		if (!grown) {
+			svg_unlock_tree();
 			return E_OUTOFMEMORY;
+		}
 		self->points = grown;
 		self->count = start_index + points_count;
 	}
 	memcpy(self->points + start_index, points, points_count * sizeof(*points));
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_points_GetPoints(void *iface, D2D1_POINT_2F *points, UINT32 points_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_points *self = iface;
 	svg_trace("ID2D1SvgPointCollection", "GetPoints");
-	if (points_count && !points)
+	if (points_count && !points) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	if (start_index + points_count > self->count)
+	}
+	if (start_index + points_count > self->count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	memcpy(points, self->points + start_index, points_count * sizeof(*points));
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static UINT32 STDMETHODCALLTYPE svg_points_GetPointsCount(void *iface)
 {
 	struct svg_points *self = iface;
-	return self->count;
+	UINT32 count;
+	svg_lock_tree();
+	count = self->count;
+	svg_unlock_tree();
+	return count;
 }
 
 /* ---- the path data attribute object ---- */
 static HRESULT STDMETHODCALLTYPE svg_path_Clone(void *iface, ID2D1SvgAttribute **attribute)
 {
+	svg_lock_tree();
 	struct svg_path_data *self = iface;
 	struct svg_path_data *copy;
 	svg_trace("ID2D1SvgPathData", "Clone");
-	if (!attribute)
+	if (!attribute) {
+		svg_unlock_tree();
 		return E_POINTER;
-	if (!(copy = ALLOC(sizeof(*copy))))
+	}
+	if (!(copy = ALLOC(sizeof(*copy)))) {
+		svg_unlock_tree();
 		return E_OUTOFMEMORY;
+	}
 	object_init(&copy->base, svg_path_table, NULL, svg_path_iids, 3, self->base.factory);
-	copy->element = self->element;
 	copy->data_count = self->data_count;
 	copy->command_count = self->command_count;
 	if (self->data_count) {
 		if (!(copy->data = ALLOC(self->data_count * sizeof(*copy->data)))) {
 			object_Release(&copy->base);
-			return E_OUTOFMEMORY;
+			svg_unlock_tree();
+	return E_OUTOFMEMORY;
 		}
 		memcpy(copy->data, self->data, self->data_count * sizeof(*copy->data));
 	}
 	if (self->command_count) {
 		if (!(copy->commands = ALLOC(self->command_count * sizeof(*copy->commands)))) {
 			object_Release(&copy->base);
-			return E_OUTOFMEMORY;
+			svg_unlock_tree();
+	return E_OUTOFMEMORY;
 		}
 		memcpy(copy->commands, self->commands, self->command_count * sizeof(*copy->commands));
 	}
 	*attribute = (ID2D1SvgAttribute *)copy;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_path_RemoveSegmentDataAtEnd(void *iface, UINT32 data_count)
 {
+	svg_lock_tree();
 	struct svg_path_data *self = iface;
 	svg_trace("ID2D1SvgPathData", "RemoveSegmentDataAtEnd");
-	if (data_count > self->data_count)
+	if (data_count > self->data_count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	self->data_count -= data_count;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_path_UpdateSegmentData(void *iface, const FLOAT *data, UINT32 data_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_path_data *self = iface;
 	svg_trace("ID2D1SvgPathData", "UpdateSegmentData");
-	if (data_count && !data)
+	if (data_count && !data) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	if (start_index > self->data_count)
+	}
+	if (start_index > self->data_count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	if (start_index + data_count > self->data_count) {
 		FLOAT *grown = GROW(self->data, (start_index + data_count) * sizeof(*grown));
-		if (!grown)
+		if (!grown) {
+			svg_unlock_tree();
 			return E_OUTOFMEMORY;
+		}
 		self->data = grown;
 		self->data_count = start_index + data_count;
 	}
 	memcpy(self->data + start_index, data, data_count * sizeof(*data));
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_path_GetSegmentData(void *iface, FLOAT *data, UINT32 data_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_path_data *self = iface;
 	svg_trace("ID2D1SvgPathData", "GetSegmentData");
-	if (data_count && !data)
+	if (data_count && !data) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	if (start_index + data_count > self->data_count)
+	}
+	if (start_index + data_count > self->data_count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	memcpy(data, self->data + start_index, data_count * sizeof(*data));
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static UINT32 STDMETHODCALLTYPE svg_path_GetSegmentDataCount(void *iface)
 {
 	struct svg_path_data *self = iface;
-	return self->data_count;
+	UINT32 count;
+	svg_lock_tree();
+	count = self->data_count;
+	svg_unlock_tree();
+	return count;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_path_RemoveCommandsAtEnd(void *iface, UINT32 commands_count)
 {
+	svg_lock_tree();
 	struct svg_path_data *self = iface;
 	svg_trace("ID2D1SvgPathData", "RemoveCommandsAtEnd");
-	if (commands_count > self->command_count)
+	if (commands_count > self->command_count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	self->command_count -= commands_count;
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_path_UpdateCommands(void *iface, const D2D1_SVG_PATH_COMMAND *commands, UINT32 commands_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_path_data *self = iface;
 	svg_trace("ID2D1SvgPathData", "UpdateCommands");
-	if (commands_count && !commands)
+	if (commands_count && !commands) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	if (start_index > self->command_count)
+	}
+	if (start_index > self->command_count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	if (start_index + commands_count > self->command_count) {
 		D2D1_SVG_PATH_COMMAND *grown = GROW(self->commands, (start_index + commands_count) * sizeof(*grown));
-		if (!grown)
+		if (!grown) {
+			svg_unlock_tree();
 			return E_OUTOFMEMORY;
+		}
 		self->commands = grown;
 		self->command_count = start_index + commands_count;
 	}
 	memcpy(self->commands + start_index, commands, commands_count * sizeof(*commands));
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_path_GetCommands(void *iface, D2D1_SVG_PATH_COMMAND *commands, UINT32 commands_count, UINT32 start_index)
 {
+	svg_lock_tree();
 	struct svg_path_data *self = iface;
 	svg_trace("ID2D1SvgPathData", "GetCommands");
-	if (commands_count && !commands)
+	if (commands_count && !commands) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
-	if (start_index + commands_count > self->command_count)
+	}
+	if (start_index + commands_count > self->command_count) {
+		svg_unlock_tree();
 		return E_INVALIDARG;
+	}
 	memcpy(commands, self->commands + start_index, commands_count * sizeof(*commands));
+	svg_unlock_tree();
 	return S_OK;
 }
 
 static UINT32 STDMETHODCALLTYPE svg_path_GetCommandsCount(void *iface)
 {
 	struct svg_path_data *self = iface;
-	return self->command_count;
+	UINT32 count;
+	svg_lock_tree();
+	count = self->command_count;
+	svg_unlock_tree();
+	return count;
 }
 
 static HRESULT STDMETHODCALLTYPE svg_path_CreatePathGeometry(void *iface, D2D1_FILL_MODE fill_mode, ID2D1PathGeometry1 **path_geometry)
@@ -7786,6 +8223,8 @@ static HRESULT STDMETHODCALLTYPE target_CreateSvgDocument(void *iface, IStream *
 		FREE(xml);
 	}
 	svg_trace_created(document, viewport_size);
+	svg_trace_object("ID2D1SvgDocument", "CreateSvgDocument", document,
+		(ULONG)InterlockedCompareExchange(&document->base.refs, 0, 0));
 	*out = (ID2D1SvgDocument *)document;
 	return S_OK;
 }
@@ -7822,6 +8261,7 @@ static void build_svg_tables(void)
 {
 	svg_document_table = make_table(ID2D1SvgDocument_table, ID2D1SvgDocument_methods);
 	set_resource(svg_document_table);
+	svg_document_table[2] = (void *)svg_document_Release;
 	svg_document_table[ID2D1SvgDocument_SetViewportSize_slot] = (void *)svg_document_SetViewportSize;
 	svg_document_table[ID2D1SvgDocument_GetViewportSize_slot] = (void *)svg_document_GetViewportSize;
 	svg_document_table[ID2D1SvgDocument_SetRoot_slot] = (void *)svg_document_SetRoot;
@@ -7836,6 +8276,7 @@ static void build_svg_tables(void)
 
 	svg_element_table = make_table(ID2D1SvgElement_table, ID2D1SvgElement_methods);
 	set_resource(svg_element_table);
+	svg_element_table[2] = (void *)svg_element_Release;
 	svg_element_table[ID2D1SvgElement_GetDocument_slot] = (void *)svg_element_GetDocument;
 	svg_element_table[ID2D1SvgElement_GetTagName_slot] = (void *)svg_element_GetTagName;
 	svg_element_table[ID2D1SvgElement_GetTagNameLength_slot] = (void *)svg_element_GetTagNameLength;

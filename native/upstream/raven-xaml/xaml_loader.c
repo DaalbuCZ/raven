@@ -151,7 +151,7 @@ static HRESULT read_string_ref(struct reader *r, const WCHAR **text, UINT32 *len
 {
 	const int32_t size = next_i32(r);
 	if (r->invalid || size < 0 || (size_t)size > (r->end - r->at) / 2)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:151\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:151\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	*text = (const WCHAR *)(const void *)(r->data + r->at);
 	*length = (UINT32)size;
 	r->at += (size_t)size * 2;
@@ -179,11 +179,11 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 	m->data = data;
 	m->size = size;
 	if (start + 56 > size)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:179\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:179\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	for (int index = 0; index < 6; ++index) {
 		offsets[index] = read_u64(data + start + 8 + index * 8);
 		if (offsets[index] > size - start || size - start - (size_t)offsets[index] < 4)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:183\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:183\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	m->strings = start + (size_t)offsets[0];
 	m->assemblies = start + (size_t)offsets[1];
@@ -202,7 +202,7 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 		!metadata_bounds(m, m->types + 4, m->type_count, 12) ||
 		!metadata_bounds(m, m->properties + 4, m->property_count, 12) ||
 		!metadata_bounds(m, m->xmlns + 4, m->xmlns_count, 4))
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:202\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:202\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	/* Test both encodings independently: a bad plain-string interpretation must not reject a terminated table. */
 	for (int terminated = 0; terminated < 2; ++terminated) {
 		BOOL valid = TRUE;
@@ -223,28 +223,28 @@ static HRESULT metadata_parse(struct metadata *m, const uint8_t *data, size_t si
 			return S_OK;
 		}
 	}
-	{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:223\n"); return E_INVALIDARG; }
+	{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:223\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 }
 
 static HRESULT metadata_string(const struct metadata *m, uint32_t id, const WCHAR **text, UINT32 *length)
 {
 	size_t position = m->strings + 4;
 	if (id >= m->string_count)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:230\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:230\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	for (uint32_t index = 0; index < id; ++index) {
 		int32_t size;
 		if (position + 4 > m->size)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:234\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:234\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		size = (int32_t)read_u32(m->data + position);
 		if (size < 0)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:237\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:237\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		position += 4 + (size_t)size * 2 + (m->null_terminated ? 2 : 0);
 	}
 	if (position + 4 > m->size)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:241\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:241\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	*length = read_u32(m->data + position);
 	if ((size_t)*length * 2 > m->size - (position + 4))
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:244\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:244\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	*text = (const WCHAR *)(const void *)(m->data + position + 4);
 	return S_OK;
 }
@@ -264,37 +264,37 @@ static HRESULT metadata_type_name(const struct metadata *m, uint32_t id, WCHAR *
 	const WCHAR *namespace_text = NULL, *name_text = NULL;
 	UINT32 namespace_length = 0, name_length = 0;
 	if (id >= m->type_count)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:264\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:264\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	position = m->types + 4 + (size_t)id * 12;
 	namespace_kind = read_u32(m->data + position);
 	namespace_id = read_u32(m->data + position + 4);
 	name_id = read_u32(m->data + position + 8);
 	if (FAILED(metadata_string(m, name_id, &name_text, &name_length)))
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:270\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:270\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (namespace_kind == 2) {
 		if (namespace_id >= m->xmlns_count)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:273\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:273\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		namespace_name_id = read_u32(m->data + m->xmlns + 4 + (size_t)namespace_id * 4);
 		if (FAILED(metadata_string(m, namespace_name_id, &namespace_text, &namespace_length)) ||
 			namespace_length < ARRAYSIZE(using_prefix) - 1 ||
 			CompareStringOrdinal(namespace_text, ARRAYSIZE(using_prefix) - 1, using_prefix, -1, TRUE) != CSTR_EQUAL)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:278\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:278\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		namespace_text += ARRAYSIZE(using_prefix) - 1;
 		namespace_length -= ARRAYSIZE(using_prefix) - 1;
 		if (!namespace_length)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:282\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:282\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		for (UINT32 index = 0; index < namespace_length; ++index)
 			if (namespace_text[index] == L';')
-				{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:285\n"); return E_INVALIDARG; }
+				{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:285\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	} else {
 		if (namespace_id >= m->namespace_count)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:288\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:288\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		namespace_name_id = read_u32(m->data + m->namespaces + 4 + (size_t)namespace_id * 8 + 4);
 		if (FAILED(metadata_string(m, namespace_name_id, &namespace_text, &namespace_length)))
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:291\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:291\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	if ((size_t)namespace_length + 1 + name_length + 1 > capacity)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:294\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:294\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	for (UINT32 index = 0; index < namespace_length; ++index)
 		buffer[index] = namespace_text[index];
 	buffer[namespace_length] = L'.';
@@ -311,7 +311,7 @@ static HRESULT metadata_type_short_name(const struct metadata *m, uint32_t id, c
 	size_t position;
 	uint32_t name_id;
 	if (id >= m->type_count)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:311\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:311\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	position = m->types + 4 + (size_t)id * 12;
 	name_id = read_u32(m->data + position + 8);
 	return metadata_string(m, name_id, name, length);
@@ -336,7 +336,7 @@ static HRESULT metadata_property_name(const struct metadata *m, uint32_t id, con
 	size_t position;
 	uint32_t name_id;
 	if (id >= m->property_count)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:336\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:336\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	position = m->properties + 4 + (size_t)id * 12;
 	name_id = read_u32(m->data + position + 8);
 	return metadata_string(m, name_id, name, length);
@@ -383,7 +383,7 @@ static HRESULT create_reference(const struct metadata *m, uint16_t reference, II
 		return known != CLASS_E_CLASSNOTAVAILABLE ? known : made;
 	}
 	if (FAILED(metadata_type_name(m, reference, buffer, MAX_NAME, &length)))
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:375\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:375\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	{
 		const HRESULT known = create_known(buffer, length, out);
 		if (known != CLASS_E_CLASSNOTAVAILABLE)
@@ -461,15 +461,15 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	case 3:
 		v->kind = value_float;
 		v->real = next_f32(r);
-		return r->invalid ? E_INVALIDARG : S_OK;
+		return r->invalid ? (RAVEN_XAML_INVALIDARG(), E_INVALIDARG) : S_OK;
 	case 4:
 		v->kind = value_integer;
 		v->integer = next_i32(r);
-		return r->invalid ? E_INVALIDARG : S_OK;
+		return r->invalid ? (RAVEN_XAML_INVALIDARG(), E_INVALIDARG) : S_OK;
 	case 5: {
 		const uint16_t reference = next_u16(r);
 		if (r->invalid)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:461\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:461\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		if (reference & 0x8000)
 			return S_OK;
 		v->kind = value_string;
@@ -477,12 +477,12 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	}
 	case 6:
 		if (r->end - r->at < 16)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:469\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:469\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		r->at += 16;
 		break;
 	case 7:
 		if (r->end - r->at < 8)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:474\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:474\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		r->at += 8;
 		break;
 	case 11:
@@ -505,7 +505,7 @@ static HRESULT read_constant(struct reader *r, const struct metadata *m, struct 
 	default:
 		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	}
-	return r->invalid ? E_INVALIDARG : S_OK;
+	return r->invalid ? (RAVEN_XAML_INVALIDARG(), E_INVALIDARG) : S_OK;
 }
 
 static HRESULT apply_value(IInspectable *object, const WCHAR *name, UINT32 length, const struct value *value)
@@ -676,7 +676,7 @@ static HRESULT use_target(const struct metadata *m, uint16_t reference, IInspect
 				note[32 + index] = (char)actual_text[index];
 			lstrcpyA(note + 32 + shown, "' refused the documented root type\n");
 			raven_trace_note(note);
-			return E_INVALIDARG;
+			{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		}
 	}
 	IInspectable_AddRef(target);
@@ -980,7 +980,7 @@ static HRESULT append_dictionary(IInspectable *collection, IInspectable *item)
 	dictionary_vector_i *vector = NULL;
 	dictionary_i *dictionary = NULL;
 	HRESULT result;
-	if (!collection || !item) return E_INVALIDARG;
+	if (!collection || !item) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	result = IInspectable_QueryInterface(collection, &IID___FIVector_1_Windows__CUI__CXaml__CResourceDictionary, (void **)&vector);
 	if (SUCCEEDED(result)) result = IInspectable_QueryInterface(item, &IID__x_ABI_CWindows_CUI_CXaml_CIResourceDictionary, (void **)&dictionary);
 	if (SUCCEEDED(result)) result = vector->lpVtbl->Append(vector, dictionary);
@@ -1121,7 +1121,7 @@ static HRESULT add_with_implicit_key(IInspectable *object, IInspectable *value)
 	boolean replaced = FALSE;
 	HRESULT result;
 	if (!object || !value)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:923\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:923\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (FAILED(value->lpVtbl->QueryInterface(value, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&style)) || !style)
 		{ raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	target_type.Name = NULL;
@@ -1440,7 +1440,7 @@ static HRESULT read_custom_runtime_data(struct reader *r, const struct metadata 
 	if (complete && (type == 10 || type == 12))
 		complete = skip_predicates(r);
 	if (!complete || r->invalid)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1233\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1233\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	*type_index = type;
 	return S_OK;
 }
@@ -1510,7 +1510,7 @@ static HRESULT materialize_resource(IInspectable *dictionary, const WCHAR *key, 
 				text = short_name;
 			}
 			if (length != text_length || memcmp(key, text, length * sizeof(WCHAR))) continue;
-			if (entry->loading || frame->resource_depth >= RESOURCE_HOPS) return E_INVALIDARG;
+			if (entry->loading || frame->resource_depth >= RESOURCE_HOPS) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 			for (uint32_t j = 0; j < frame->map->capacity; ++j)
 				if (frame->map->entries[j].token == entry->token) frame->map->entries[j].loading = TRUE;
 			struct deferred_frame request = *frame;
@@ -1537,12 +1537,12 @@ static HRESULT resource_map_init(struct resource_map *map, const struct metadata
 	map->capacity = 0;
 	map->remaining = 0;
 	if (!start) return S_OK;
-	if (next_vint(&r) != 10) return E_INVALIDARG;
+	if (next_vint(&r) != 10) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	implicit = r;
-	if (!skip_resource_map(&implicit) || !skip_string_vector(&implicit)) return E_INVALIDARG;
+	if (!skip_resource_map(&implicit) || !skip_string_vector(&implicit)) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	implicit_count = (uint32_t)next_vint(&implicit);
 	explicit_count = (uint32_t)next_vint(&r);
-	if (r.invalid || implicit.invalid || implicit_count > 0x10000 || explicit_count > 0x10000) return E_INVALIDARG;
+	if (r.invalid || implicit.invalid || implicit_count > 0x10000 || explicit_count > 0x10000) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	count = explicit_count + implicit_count;
 	if (!count) return S_OK;
 	while (capacity < count * 2) capacity <<= 1;
@@ -1559,7 +1559,7 @@ static HRESULT resource_map_init(struct resource_map *map, const struct metadata
 		if (r.invalid || offset >= stream_size || FAILED(metadata_string(m, key, &text, &length))) {
 			HeapFree(GetProcessHeap(), 0, map->entries);
 			map->entries = NULL;
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1352\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1352\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		}
 		slot = ((offset + 1) * 2654435761u) & (capacity - 1);
 		while (map->entries[slot].token) slot = (slot + 1) & (capacity - 1);
@@ -1601,13 +1601,13 @@ static HRESULT deferred_stream_realize(void *context, IInspectable *dictionary, 
 	HRESULT result;
 	const size_t at = stream->begin + token - 1;
 	uint32_t slot = (token * 2654435761u) & (stream->map.capacity - 1);
-	if (at >= stream->end || (previous && previous->resource_depth >= RESOURCE_HOPS)) return E_INVALIDARG;
+	if (at >= stream->end || (previous && previous->resource_depth >= RESOURCE_HOPS)) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	while (stream->map.entries[slot].token && stream->map.entries[slot].token != token)
 		slot = (slot + 1) & (stream->map.capacity - 1);
-	if (!stream->map.entries[slot].token || stream->map.entries[slot].loading) return E_INVALIDARG;
+	if (!stream->map.entries[slot].token || stream->map.entries[slot].loading) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	const BYTE kind = stream->metadata.data[at];
 	if (kind != 1 && kind != 4 && kind != 20 && kind != 21 && kind != 22 && kind != 34 && kind != 35)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1400\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:1400\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	InterlockedIncrement(&stream->refs);
 	for (uint32_t i = 0; i < stream->map.capacity; ++i)
 		if (stream->map.entries[i].token == token) stream->map.entries[i].loading = TRUE;
@@ -1741,7 +1741,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 	size_t node_at = begin;
 	if (!entry_frame) {
 		status = resource_map_init(resource_map, m, map_start, map_limit, end - begin);
-		if (FAILED(status)) return status;
+		if (FAILED(status)) { if (status == E_INVALIDARG) RAVEN_XAML_INVALIDARG(); return status; }
 	} else {
 		stack[0] = (struct scope){entry_frame->dictionary, 0, NULL, NULL, 0};
 		IInspectable_AddRef(stack[0].object);
@@ -1799,12 +1799,12 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				stack[depth].deferred_length = 0;
 				++depth;
 			} else {
-				status = E_INVALIDARG;
+				RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG;
 				goto done;
 			}
 			break;
 		case 2: case 33: case 39: case 40:
-			if (!depth && target) { status = E_INVALIDARG; goto done; }
+			if (!depth && target) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 			if (depth) {
 				struct scope *scope = &stack[--depth];
 				const uint32_t closed_token = scope_tokens[depth];
@@ -1902,7 +1902,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				/* With a target the document must hand the collection its value; without one the skip convention
 				 * applies (an object whose creation was skipped leaves nothing to append, and a scope pushed
 				 * object-less over an unmodeled or unbuilt collection has nothing to receive it). */
-				if (target && !context->tolerant) { status = E_INVALIDARG; goto done; }
+				if (target && !context->tolerant) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 				break;
 			}
 			if (!stack[depth - 1].object && (!target || context->tolerant)) {
@@ -1919,7 +1919,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			 * other string key. */
 			IInspectable *value_object = last_object;
 			if (!depth || !value_object) {
-				if (target) { status = E_INVALIDARG; goto done; }
+				if (target) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 				break;
 			}
 			status = add_with_implicit_key(stack[depth - 1].object, value_object);
@@ -1933,7 +1933,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			IInspectable *object = NULL;
 			struct value value = {value_none, NULL, 0, 0, 0};
 			if (r.invalid || depth == LOADER_DEPTH) {
-				status = E_INVALIDARG;
+				RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG;
 				goto done;
 			}
 			if (reference == (0x8000 | 746) && kind == 20) {
@@ -1998,7 +1998,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					status = raven_double_value_create(value.real, &object);
 				if (FAILED(status) && !object && reference == (0x8000 | 601) && value.kind == value_enum) {
 					const WCHAR *enum_name = raven_xaml_class_by_stable(601);
-					if (value.enum_type != 601) { status = E_INVALIDARG; goto done; }
+					if (value.enum_type != 601) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 					status = raven_enum_value_create(enum_name, (UINT32)lstrlenW(enum_name), (INT32)value.integer, &object);
 				}
 			}
@@ -2097,7 +2097,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			IInspectable *object = NULL;
 			struct value value = {value_none, NULL, 0, 0, 0};
 			if (r.invalid) {
-				status = E_INVALIDARG;
+				RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG;
 				goto done;
 			}
 			if (kind != 23) {
@@ -2185,7 +2185,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				stack[depth].deferred_length = 0;
 				++depth;
 			} else {
-				status = E_INVALIDARG;
+				RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG;
 				goto done;
 			}
 			break;
@@ -2235,7 +2235,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 				if (length == 18 && !memcmp(name, L"MergedDictionaries", 18 * sizeof(WCHAR))) {
 					if (!stack[depth - 1].object) {
 						/* a create the skip convention left unbuilt: the scope still pushes, object-less */
-						if (depth == LOADER_DEPTH) { status = E_INVALIDARG; goto done; }
+						if (depth == LOADER_DEPTH) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 						memset(&stack[depth], 0, sizeof stack[depth]);
 						stack[depth].kind = 3; ++depth;
 						break;
@@ -2246,7 +2246,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					stack[depth].object = collection; stack[depth].kind = 3; ++depth;
 				} else if (length == 17 && !memcmp(name, L"ThemeDictionaries", 17 * sizeof(WCHAR))) {
 					if (!stack[depth - 1].object) {
-						if (depth == LOADER_DEPTH) { status = E_INVALIDARG; goto done; }
+						if (depth == LOADER_DEPTH) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 						memset(&stack[depth], 0, sizeof stack[depth]);
 						stack[depth].kind = 5; ++depth;
 						break;
@@ -2265,7 +2265,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					 * tracks. The scope takes the live vector the element owns, and the AddToCollection after each
 					 * child's scope pops appends through the parameterized IVector`1. */
 					if (!stack[depth - 1].object) {
-						if (depth == LOADER_DEPTH) { status = E_INVALIDARG; goto done; }
+						if (depth == LOADER_DEPTH) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 						memset(&stack[depth], 0, sizeof stack[depth]);
 						stack[depth].kind = 3; ++depth;
 						break;
@@ -2447,7 +2447,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const uint32_t themes = (uint32_t)next_vint(&r);
 			uint32_t runtime_type = 0;
 			size_t runtime_data;
-			if (r.invalid || statics > 0x10000 || themes > 0x10000) { status = E_INVALIDARG; goto done; }
+			if (r.invalid || statics > 0x10000 || themes > 0x10000) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 			for (uint32_t index = 0; index < statics + themes; ++index)
 				next_u16(&r);
 			runtime_data = r.at;
@@ -2492,7 +2492,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					}
 					/* Theme dictionary content is keyed immediately after its scope closes; defer it until that key is known. */
 					if (dictionary_content && depth >= 2 && stack[depth - 2].kind == 5 && stack[depth - 1].object) {
-						if (pending_theme_dictionary) { status = E_INVALIDARG; goto done; }
+						if (pending_theme_dictionary) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 						pending_theme_dictionary = stack[depth - 1].object;
 						IInspectable_AddRef(pending_theme_dictionary);
 						pending_theme_begin = deferred_begin;
@@ -2540,7 +2540,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const int32_t statics = next_vint(&r);
 			const int32_t themes = next_vint(&r);
 			if (r.invalid || (uint64_t)statics + (uint64_t)themes > (r.end - r.at) / 2) {
-				status = E_INVALIDARG;
+				RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG;
 				goto done;
 			}
 			for (uint64_t index = 0; index < (uint64_t)statics + (uint64_t)themes; ++index)
@@ -2560,7 +2560,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 					goto done;
 				}
 				if (!substream_range(context, substream, &deferred_begin, &deferred_end) || deferred_begin >= deferred_end) {
-					status = E_INVALIDARG;
+					RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG;
 					goto done;
 				}
 				loaded = load_nodes(m, deferred_begin, deferred_end, &root, NULL, &used, context,
@@ -2624,7 +2624,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			const uint16_t type_reference = next_u16(&r);
 			const WCHAR *name = NULL, *type_name = NULL;
 			UINT32 length = 0, type_length = 0;
-			if (r.invalid) { status = E_INVALIDARG; goto done; }
+			if (r.invalid) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 			if (depth && SUCCEEDED(property_reference(m, reference, &name, &length)) &&
 				SUCCEEDED(type_reference_name(m, type_reference, &type_name, &type_length))) {
 				HRESULT applied = raven_xaml_element_set_type(stack[depth - 1].object, name, length, type_name, type_length);
@@ -2637,7 +2637,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 			next_u16(&r);
 			/* TemplateBinding and the resolved-property forms apply when a template resolves them; a dictionary
 			 * document tolerates their presence the way it tolerates any value it cannot store. */
-			if (target && r.invalid) { status = E_INVALIDARG; goto done; }
+			if (target && r.invalid) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; goto done; }
 			if (target && !context->tolerant) { status = E_NOTIMPL; goto done; }
 			break;
 		default: {
@@ -2652,7 +2652,7 @@ static HRESULT load_nodes(const struct metadata *m, size_t begin, size_t end, II
 		}
 		}
 		if (r.invalid) {
-			status = E_INVALIDARG;
+			RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG;
 			goto done;
 		}
 		if (entry_frame && depth == 1 && !last_object && !pending_object && !pending_value_valid) {
@@ -2699,9 +2699,9 @@ done:
 			}
 		}
 		for (uint32_t i = 0; i < resource_map->capacity; ++i)
-			if (resource_map->entries[i].token && !resource_map->entries[i].seen) { status = E_INVALIDARG; break; }
+			if (resource_map->entries[i].token && !resource_map->entries[i].seen) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; break; }
 	}
-	if (SUCCEEDED(status) && target && (pending_name || last_object || pending_theme_dictionary)) status = E_INVALIDARG;
+	if (SUCCEEDED(status) && target && (pending_name || last_object || pending_theme_dictionary)) { RAVEN_XAML_INVALIDARG(); status = E_INVALIDARG; }
 	if (FAILED(status) && !nested_failed) {
 		char message[] = "raven-xaml: XBF failure at 00000000, status 00000000\n";
 		static const char hex[] = "0123456789abcdef";
@@ -2748,21 +2748,21 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 		return E_POINTER;
 	*root = NULL;
 	if (!bytes || size < 12 || bytes[0] != 'X' || bytes[1] != 'B' || bytes[2] != 'F' || bytes[3] != 0)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2343\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2343\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	metadata_size = read_u32(bytes + 4);
 	node_size = read_u32(bytes + 8);
 	if (metadata_size > size - 12)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2347\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2347\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	table = (size_t)12 + metadata_size;
 	if (node_size < 4 || (size_t)node_size > size - table)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2350\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2350\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	node_end = table + node_size;
 	status = metadata_parse(&metadata, bytes, table);
 	if (FAILED(status))
 		return status;
 	count = read_u32(bytes + table);
 	if ((size_t)count > (node_end - table - 4) / 8)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2357\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2357\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	substreams = table + 4 + (size_t)count * 8;
 	context.m = &metadata;
 	context.table = table;
@@ -2774,7 +2774,7 @@ static HRESULT load_document(const void *data, uint32_t size, IInspectable **roo
 		const uint32_t node_offset = read_u32(bytes + table + 4 + (size_t)index * 8);
 		const uint32_t line_offset = read_u32(bytes + table + 4 + (size_t)index * 8 + 4);
 		if (node_offset > line_offset || line_offset > node_end - substreams)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2369\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_loader.c:2369\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	if (count) {
 		const uint32_t node_offset = read_u32(bytes + table + 4);

@@ -1121,7 +1121,7 @@ static HRESULT WINAPI observable_add_map_changed(__FIObservableMap_2_HSTRING_HST
 	if (!token)
 		return E_POINTER;
 	if (!handler)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at resources.c:1124\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at resources.c:1124\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	EnterCriticalSection(&self->lock);
 	if (self->subscription_count == self->subscription_capacity) {
 		const size_t capacity = self->subscription_capacity ? self->subscription_capacity * 2 : 4;

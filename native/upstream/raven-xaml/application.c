@@ -679,7 +679,30 @@ static HRESULT property_has_key_impl(struct property_set_object *self, HSTRING k
 
 static HRESULT WINAPI property_map_lookup(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value)
 {
-	return property_lookup_impl(CONTAINING_RECORD(iface, struct property_set_object, map), key, value);
+	struct property_set_object *self = CONTAINING_RECORD(iface, struct property_set_object, map);
+	static volatile LONG trace_count;
+	static const WCHAR trace_key[] = L"com.shapr3d.shapr.userDefaults.remoteConfiguration.expirationTimes";
+	UINT32 length = 0;
+	const WCHAR *text = WindowsGetStringRawBuffer(key, &length);
+	BOOL trace = length == ARRAYSIZE(trace_key) - 1 && text && !memcmp(text, trace_key, sizeof(trace_key) - sizeof(WCHAR));
+	HRESULT result = property_lookup_impl(self, key, value);
+	if (trace && InterlockedIncrement(&trace_count) <= 8) {
+		HRESULT type_result = E_NOINTERFACE;
+		__x_ABI_CWindows_CFoundation_CPropertyType type = PropertyType_Empty;
+		if (SUCCEEDED(result) && value && *value) {
+			__x_ABI_CWindows_CFoundation_CIPropertyValue *property = NULL;
+			type_result = IInspectable_QueryInterface(*value, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue, (void **)&property);
+			if (SUCCEEDED(type_result)) {
+				type_result = property->lpVtbl->get_Type(property, &type);
+				property->lpVtbl->Release(property);
+			}
+		}
+		char note[192];
+		wsprintfA(note, "raven-xaml: PropertySet Lookup expirationTimes hr=%08x type_hr=%08x type=%u\n",
+			(unsigned)result, (unsigned)type_result, (unsigned)type);
+		raven_trace_note(note);
+	}
+	return result;
 }
 static HRESULT WINAPI property_map_size(__FIMap_2_HSTRING_IInspectable *iface, UINT32 *value)
 {
@@ -703,6 +726,8 @@ static HRESULT WINAPI property_map_insert(__FIMap_2_HSTRING_IInspectable *iface,
 {
 	struct property_set_object *self = CONTAINING_RECORD(iface, struct property_set_object, map);
 	struct property_entry *entry;
+	static volatile LONG trace_count;
+	static const WCHAR trace_key[] = L"com.shapr3d.shapr.userDefaults.remoteConfiguration.expirationTimes";
 	HRESULT result = S_OK;
 	if (replaced) *replaced = FALSE;
 	EnterCriticalSection(&self->lock);
@@ -742,6 +767,28 @@ static HRESULT WINAPI property_map_insert(__FIMap_2_HSTRING_IInspectable *iface,
 		}
 	}
 	LeaveCriticalSection(&self->lock);
+	UINT32 key_length = 0;
+	const WCHAR *key_text = WindowsGetStringRawBuffer(key, &key_length);
+	if (key_length == ARRAYSIZE(trace_key) - 1 && key_text &&
+		!memcmp(key_text, trace_key, sizeof(trace_key) - sizeof(WCHAR)) && InterlockedIncrement(&trace_count) <= 8) {
+		char enabled[2];
+		if (GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", enabled, sizeof enabled) && enabled[0] && enabled[0] != '0') {
+			HRESULT type_result = E_NOINTERFACE;
+			__x_ABI_CWindows_CFoundation_CPropertyType type = PropertyType_Empty;
+			if (SUCCEEDED(result) && value) {
+				__x_ABI_CWindows_CFoundation_CIPropertyValue *property = NULL;
+				type_result = IInspectable_QueryInterface(value, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue, (void **)&property);
+				if (SUCCEEDED(type_result)) {
+					type_result = property->lpVtbl->get_Type(property, &type);
+					property->lpVtbl->Release(property);
+				}
+			}
+			char note[160];
+			wsprintfA(note, "raven-xaml: PropertySet Insert expirationTimes hr=%08x replaced=%u type_hr=%08x type=%u\n",
+				(unsigned)result, replaced ? (unsigned)*replaced : 0, (unsigned)type_result, (unsigned)type);
+			raven_trace_note(note);
+		}
+	}
 	return result;
 }
 static HRESULT WINAPI property_map_remove(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key)

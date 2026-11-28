@@ -166,7 +166,7 @@ static HRESULT WINAPI application1_get_RequestedTheme(xaml_application1 *iface, 
 }
 static HRESULT WINAPI application1_put_RequestedTheme(xaml_application1 *iface, INT32 value)
 {
-	if (value < 0 || value > 1) return E_INVALIDARG;
+	if (value < 0 || value > 1) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	/* shortcut: resources do not yet select a theme or reject changes after startup; upgrade with theme rendering. */
 	((struct application1_part *)iface)->owner->requested_theme = (INT32)value;
 	return S_OK;
@@ -270,7 +270,7 @@ static HRESULT WINAPI statics_LoadComponent2(xaml_application_statics *iface, II
 {
 	/* location 1 is the form the UILibrary controls' generated InitializeComponent uses (the .NET Native 2.x
 	 * codegen passes it where app pages pass 0); the caller is authoritative, both load the same way. */
-	if (location != 0 && location != 1) return E_INVALIDARG;
+	if (location != 0 && location != 1) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	return load_component(component, locator);
 }
 

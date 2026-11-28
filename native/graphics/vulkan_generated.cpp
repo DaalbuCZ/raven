@@ -8,6 +8,9 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -110,6 +113,8 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		const auto window = load<uint64_t>(a[1] + 32);
 		uint32_t status = static_cast<uint32_t>(VK_ERROR_INITIALIZATION_FAILED);
 		const auto host = surface_source.create ? surface_source.create(window) : std::nullopt;
+		auto foreign_size = host ? std::nullopt : foreign_window_size(window);
+		bool headless_attempted = false;
 		VkSurfaceKHR surface = VK_NULL_HANDLE;
 		bool foreign=false;
 		if (host) {
@@ -131,12 +136,24 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 			if (created != VK_SUCCESS && surface_source.release && !shared) {
 				surface_source.release(window);
 			}
-		} else if (foreign_window_size(window)) {
+		} else if (foreign_size) {
+			headless_attempted = true;
 			const auto create=reinterpret_cast<PFN_vkCreateHeadlessSurfaceEXT>(vkGetInstanceProcAddr(marshal.host_instance,"vkCreateHeadlessSurfaceEXT"));
 			if (create) {
 				VkHeadlessSurfaceCreateInfoEXT info{VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT};
 				status=static_cast<uint32_t>(create(marshal.host_instance,&info,nullptr,&surface));
 				foreign=status==VK_SUCCESS;
+			}
+		}
+		if (status != VK_SUCCESS && std::getenv("RAVEN_TRACE_VULKAN_SURFACE")) {
+			if (host) foreign_size = foreign_window_size(window);
+			static std::atomic<unsigned> failures{};
+			if (failures.fetch_add(1, std::memory_order_relaxed) < 16) {
+				const char *platform = !host ? "none" : host->platform == HostPlatform::wayland ? "wayland" :
+					HostPlatform::xcb == host->platform ? "xcb" : "unknown";
+				fprintf(stderr, "Vulkan Win32 surface failure: hwnd=%#llx host_surface=%d foreign_window_size=%d headless_attempted=%d headless_succeeded=%d host_platform=%s VkResult=%d\n",
+					static_cast<unsigned long long>(window), host.has_value(), foreign_size.has_value(), headless_attempted,
+					headless_attempted && status == VK_SUCCESS, platform, static_cast<int32_t>(status));
 			}
 		}
 		if (status==VK_SUCCESS) {
@@ -256,6 +273,19 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 				}
 			}
 			if (results) marshal.write(results,info->pResults,size_t(info->swapchainCount)*4);
+			if (name == "vkQueuePresentKHR" && std::getenv("RAVEN_TRACE_VULKAN_SURFACE")) {
+				static std::atomic<unsigned> traces{};
+				if (traces.fetch_add(1, std::memory_order_relaxed) < 16) {
+					fprintf(stderr, "Vulkan queue present: queue=%#llx result=%d present_count=%u pResults=",
+						static_cast<unsigned long long>(arguments[0]), static_cast<int32_t>(result), info->swapchainCount);
+					if (info->pResults)
+						for (uint32_t index = 0; index < info->swapchainCount; ++index)
+							fprintf(stderr, "%s%d", index ? "," : "", static_cast<int32_t>(info->pResults[index]));
+					else
+						fputs("unavailable", stderr);
+					fputc('\n', stderr);
+				}
+			}
 		}
 		process.return_api(result);
 		return true;

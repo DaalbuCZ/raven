@@ -11,7 +11,7 @@ typedef __x_ABI_CWindows_CFoundation_CIPropertyValueStatics property_statics_i;
 typedef __x_ABI_CWindows_CFoundation_CPropertyType property_type;
 extern HRESULT raven_property_value_statics(property_statics_i **out);
 
-#define SETTINGS_LIMIT 8192U
+#define SETTINGS_LIMIT 16384U
 #define SETTINGS_MAGIC 0x31535652U
 struct settings_record {
 	UINT32 magic, key_length, type, length;
@@ -142,7 +142,7 @@ HRESULT raven_language_override_write(HSTRING value)
 	DWORD written = 0;
 	HRESULT result;
 	HANDLE file;
-	if (!valid_language_override(text, length)) { char line[128]; wsprintfA(line, "raven-storage: language override refused length %lu first %.8s\n", (unsigned long)length, text); OutputDebugStringA(line); return E_INVALIDARG; }
+	if (!valid_language_override(text, length)) { char line[128]; wsprintfA(line, "raven-storage: language override refused length %lu first %.8s\n", (unsigned long)length, text); OutputDebugStringA(line); RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	result = language_override_path(path, TRUE);
 	if (FAILED(result)) return result;
 	lstrcpyW(temporary, path);
@@ -266,7 +266,7 @@ static HRESULT settings_path(struct settings_object *self, HSTRING key, WCHAR *p
 	UINT64 hash = 14695981039346656037ULL;
 	if (length > 255) {
 		raven_trace_note("raven-storage: settings key longer than 255\n");
-		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:269\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:269\n"); RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	}
 	HRESULT result = settings_directory(self, path);
 	if (FAILED(result)) return result;
@@ -349,7 +349,7 @@ static HRESULT settings_encode(IInspectable *object, struct settings_record *rec
 	if (!object) { record->type = PropertyType_Empty; record->length = 0; return S_OK; }
 	if (FAILED(IInspectable_QueryInterface(object, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue, (void **)&value))) {
 		raven_trace_note("raven-storage: settings value is not a property value\n");
-		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:352\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:352\n"); RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	}
 	result = value->lpVtbl->get_Type(value, &type);
 	if (SUCCEEDED(result)) {
@@ -368,7 +368,14 @@ static HRESULT settings_encode(IInspectable *object, struct settings_record *rec
 			if (SUCCEEDED(result)) {
 				UINT32 length = 0;
 				const WCHAR *text = WindowsGetStringRawBuffer(string, &length);
-				if (length > SETTINGS_LIMIT / sizeof(WCHAR)) result = E_INVALIDARG;
+				if (length > SETTINGS_LIMIT / sizeof(WCHAR)) {
+					char enabled[2], note[128];
+					if (GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", enabled, sizeof enabled) && enabled[0] && enabled[0] != '0') {
+						wsprintfA(note, "raven-storage: settings string length %lu exceeds 4096 characters\n", (unsigned long)length);
+						raven_trace_note(note);
+					}
+					RAVEN_XAML_INVALIDARG(); result = E_INVALIDARG;
+				}
 				else { record->length = length * sizeof(WCHAR); if (length) memcpy(record->data, text, record->length); }
 				WindowsDeleteString(string);
 			}
@@ -376,6 +383,7 @@ static HRESULT settings_encode(IInspectable *object, struct settings_record *rec
 		}
 		default:
 			raven_trace_note("raven-storage: settings value type not stored\n");
+			RAVEN_XAML_INVALIDARG();
 			result = E_INVALIDARG;
 			break;
 		}
@@ -449,7 +457,7 @@ static HRESULT settings_insert(struct settings_object *self, HSTRING key, IInspe
 	HANDLE file;
 	if (!replaced) return E_POINTER;
 	*replaced = FALSE;
-	if (length > 255) { raven_trace_note("raven-storage: settings key longer than 255\n"); return E_INVALIDARG; }
+	if (length > 255) { raven_trace_note("raven-storage: settings key longer than 255\n"); RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	result = settings_encode(value, &record);
 	if (FAILED(result)) return result;
 	result = settings_read(self, key, &previous, old_path);
@@ -647,8 +655,31 @@ static HRESULT settings_walk(struct settings_object *self, UINT32 *count)
 static HRESULT WINAPI settings_map_lookup(__FIMap_2_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value)
 {
 	HRESULT result = settings_lookup(SETTINGS_OWNER(iface, map), key, value);
+	static volatile LONG trace_count;
+	static const WCHAR trace_key[] = L"com.shapr3d.shapr.userDefaults.remoteConfiguration.expirationTimes";
+	UINT32 length = 0;
+	const WCHAR *text = WindowsGetStringRawBuffer(key, &length);
+	BOOL trace = length == ARRAYSIZE(trace_key) - 1 && text && !memcmp(text, trace_key, sizeof(trace_key) - sizeof(WCHAR));
 	/* ApplicationDataContainerSettings projects absent values as null, unlike a general PropertySet. */
-	return result == E_BOUNDS ? S_OK : result;
+	if (result == E_BOUNDS)
+		result = S_OK;
+	if (trace && InterlockedIncrement(&trace_count) <= 8) {
+		HRESULT type_result = E_NOINTERFACE;
+		UINT32 type = 0;
+		if (SUCCEEDED(result) && value && *value) {
+			property_value_i *property = NULL;
+			type_result = IInspectable_QueryInterface(*value, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue, (void **)&property);
+			if (SUCCEEDED(type_result)) {
+				type_result = property->lpVtbl->get_Type(property, (property_type *)&type);
+				property->lpVtbl->Release(property);
+			}
+		}
+		char note[192];
+		wsprintfA(note, "raven-storage: settings Lookup expirationTimes hr=%08x type_hr=%08x type=%u\n",
+			(unsigned)result, (unsigned)type_result, (unsigned)type);
+		raven_trace_note(note);
+	}
+	return result;
 }
 
 static HRESULT WINAPI settings_map_size(__FIMap_2_HSTRING_IInspectable *iface, UINT32 *size)
@@ -689,6 +720,27 @@ static HRESULT WINAPI settings_map_insert(__FIMap_2_HSTRING_IInspectable *iface,
 	HRESULT result;
 	struct settings_object *self = SETTINGS_OWNER(iface, map);
 	result = settings_insert(self, key, value, replaced);
+	if (FAILED(result)) {
+		char enabled[2];
+		static volatile LONG trace_count;
+		if (GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", enabled, sizeof enabled) && enabled[0] && enabled[0] != '0' &&
+			InterlockedIncrement(&trace_count) <= 32) {
+			UINT32 length = 0;
+			const WCHAR *text = WindowsGetStringRawBuffer(key, &length);
+			BOOL expiration_times = length == 66 && text && !memcmp(text, L"com.shapr3d.shapr.userDefaults.remoteConfiguration.expirationTimes", length * sizeof(WCHAR));
+			property_value_i *property = NULL;
+			property_type type = PropertyType_Empty;
+			HRESULT type_result = E_NOINTERFACE;
+			if (value && SUCCEEDED(IInspectable_QueryInterface(value, &IID___x_ABI_CWindows_CFoundation_CIPropertyValue, (void **)&property))) {
+				type_result = property->lpVtbl->get_Type(property, &type);
+				property->lpVtbl->Release(property);
+			}
+			char note[192];
+			wsprintfA(note, "raven-storage: settings Insert failed hr=%08x key_length=%lu expiration_times=%u type_hr=%08x type=%u\n",
+				(unsigned)result, (unsigned long)length, (unsigned)expiration_times, (unsigned)type_result, (unsigned)type);
+			raven_trace_note(note);
+		}
+	}
 	if (SUCCEEDED(result)) {
 		HSTRING change_key = NULL;
 		if (WindowsDuplicateString(key, &change_key) == S_OK) {
@@ -806,7 +858,7 @@ static HRESULT WINAPI settings_observed_add(__FIObservableMap_2_HSTRING_IInspect
 		return E_POINTER;
 	token->value = 0;
 	if (!handler)
-		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:800\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:800\n"); RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	AcquireSRWLockExclusive(&self->lock);
 	if (self->handler_count == self->handler_capacity) {
 		const UINT32 capacity = self->handler_capacity ? self->handler_capacity * 2 : 4;
@@ -835,7 +887,7 @@ static HRESULT WINAPI settings_observed_remove(__FIObservableMap_2_HSTRING_IInsp
 	struct settings_object *self = SETTINGS_OWNER(iface, observable);
 	__FIMapChangedEventHandler_2_HSTRING_IInspectable *handler = NULL;
 	if (token.value == 0)
-		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:829\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:829\n"); RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	AcquireSRWLockExclusive(&self->lock);
 	for (UINT32 index = 0; index < self->handler_count; ++index) {
 		if (self->handlers[index].token == token.value) {
@@ -1066,7 +1118,7 @@ static HRESULT settings_open_child(struct settings_object *parent, HSTRING name,
 		wsprintfA(line, "raven-storage: open child refused length %lu disposition %lu\n",
 			(unsigned long)length, (unsigned long)disposition);
 		OutputDebugStringA(line);
-		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:1060\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage_settings.inc:1060\n"); RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	}
 	if (parent->depth >= 32) return HRESULT_FROM_WIN32(ERROR_DIRECTORY);
 	result = settings_directory(parent, parent_path);

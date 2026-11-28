@@ -255,7 +255,7 @@ static HRESULT unbox_string(IInspectable *value, const WCHAR **text)
 	if (!value)
 		return S_OK;
 	if (FAILED(((IInspectable *)value)->lpVtbl->QueryInterface(value, &IID___FIReference_1_HSTRING, (void **)&reference)))
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:258\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:258\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	result = reference->lpVtbl->get_Value(reference, &string);
 	reference->lpVtbl->Release(reference);
 	if (FAILED(result))
@@ -1634,7 +1634,7 @@ static HRESULT WINAPI map_set(namedmap_i *iface, node_i *node, node_i **out)
 		return E_POINTER;
 	*out = NULL;
 	if (attr->kind != K_ATTR)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:1637\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:1637\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	previous = map_find(element, attr->name);
 	if (previous) {
 		*out = (node_i *)previous;
@@ -1922,7 +1922,7 @@ static HRESULT xml_select(struct xml_node *ctx, HSTRING path, nodelist_i **list_
 	if (!xpath_parse(text, &steps, &count)) {
 		if (list_out) *list_out = NULL;
 		if (single_out) *single_out = NULL;
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:1925\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:1925\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	/* an absolute path selects from the document */
 	if (ctx->kind != K_DOC && ctx->doc && text[0] == L'/')
@@ -1977,7 +1977,7 @@ static HRESULT WINAPI node_put_value(node_i *p, IInspectable *value)
 	HRESULT result;
 	if (self->kind != K_TEXT && self->kind != K_CDATA && self->kind != K_COMMENT && self->kind != K_PI &&
 		self->kind != K_ATTR)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:1980\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:1980\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	result = unbox_string(value, &text);
 	if (FAILED(result))
 		return result;
@@ -2151,9 +2151,9 @@ static HRESULT WINAPI node_insert_before(node_i *p, node_i *child, node_i *refer
 		return E_POINTER;
 	*inserted = NULL;
 	if (!new_child || new_child == self || new_child->kind == K_DOC)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2154\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2154\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (ref && ref->parent != self)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2156\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2156\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	before = ref;
 	if (new_child->parent)
 		xml_node_unlink(new_child);
@@ -2187,7 +2187,7 @@ static HRESULT WINAPI node_replace_child(node_i *p, node_i *child, node_i *refer
 		return E_POINTER;
 	*previous = NULL;
 	if (!old || old->parent != self)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2190\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2190\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	result = node_insert_before(p, child, reference, NULL);
 	if (FAILED(result))
 		return result;
@@ -2205,7 +2205,7 @@ static HRESULT WINAPI node_remove_child(node_i *p, node_i *child, node_i **remov
 		return E_POINTER;
 	*removed = NULL;
 	if (!old || old->parent != self)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2208\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2208\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	xml_node_addref(old); /* the tree's reference dies in the unlink */
 	xml_node_unlink(old);
 	*removed = child;
@@ -2220,7 +2220,7 @@ static HRESULT WINAPI node_append_child(node_i *p, node_i *child, node_i **appen
 		return E_POINTER;
 	*appended = NULL;
 	if (!new_child || new_child == self || new_child->kind == K_DOC)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2223\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2223\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	xml_node_append(self, new_child);
 	*appended = child;
 	xml_node_addref(new_child);
@@ -2304,7 +2304,7 @@ static HRESULT WINAPI node_put_prefix(node_i *p, IInspectable *value)
 	const WCHAR *text;
 	HRESULT result;
 	if (self->kind != K_ELEMENT && self->kind != K_ATTR)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2307\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2307\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	result = unbox_string(value, &text);
 	if (FAILED(result))
 		return result;
@@ -2434,7 +2434,7 @@ static HRESULT WINAPI element_set_attribute(element_i *p, HSTRING name, HSTRING 
 	if (FAILED((result = hstring_text(name, &name_text))) || FAILED((result = hstring_text(value, &value_text))))
 		return result;
 	if (!*name_text)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2437\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2437\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	attr = map_find(self, name_text);
 	if (!attr) {
 		attr = xml_node_create(self->doc, K_ATTR, name_text, NULL);
@@ -2501,7 +2501,7 @@ static HRESULT WINAPI element_set_attribute_node(element_i *p, attribute_i *attr
 		return E_POINTER;
 	*previous = NULL;
 	if (!attr || attr->kind != K_ATTR)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2504\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2504\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	old = map_find(self, attr->name);
 	if (old) {
 		*previous = (attribute_i *)&old->attribute;
@@ -2521,7 +2521,7 @@ static HRESULT WINAPI element_remove_attribute_node(element_i *p, attribute_i *a
 		return E_POINTER;
 	*removed = NULL;
 	if (!attr || attr->kind != K_ATTR || attr->parent != self)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2524\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2524\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	*removed = attribute;
 	xml_node_addref(attr);
 	xml_attr_unlink(self, attr);
@@ -2651,7 +2651,7 @@ static HRESULT chardata_self(chardata_i *p, struct xml_node **self)
 {
 	*self = ((struct chardata_part *)p)->owner;
 	if ((*self)->kind != K_TEXT && (*self)->kind != K_CDATA && (*self)->kind != K_COMMENT)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2654\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2654\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	return S_OK;
 }
 
@@ -2844,7 +2844,7 @@ static HRESULT WINAPI text_split(text_i *p, UINT32 offset, text_i **out)
 		return E_POINTER;
 	*out = NULL;
 	if (self->kind != K_TEXT && self->kind != K_CDATA)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2847\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:2847\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	length = (UINT32)(self->value ? lstrlenW(self->value) : 0);
 	if (offset > length)
 		return E_BOUNDS;
@@ -3056,7 +3056,7 @@ static HRESULT WINAPI document_create_element(document_i *p, HSTRING tag, elemen
 		return E_POINTER;
 	*out = NULL;
 	if (!*text)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:3059\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:3059\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	element = xml_node_create(self, K_ELEMENT, text, NULL);
 	if (!element)
 		return E_OUTOFMEMORY;
@@ -3126,7 +3126,7 @@ static HRESULT WINAPI document_create_pi(document_i *p, HSTRING target, HSTRING 
 		return E_POINTER;
 	*out = NULL;
 	if (!*target_text)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:3129\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:3129\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	node = xml_node_create(self, K_PI, target_text, data_text);
 	if (!node)
 		return E_OUTOFMEMORY;
@@ -3146,7 +3146,7 @@ static HRESULT WINAPI document_create_attribute(document_i *p, HSTRING name, att
 		return E_POINTER;
 	*out = NULL;
 	if (!*text)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:3149\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xml_dom.c:3149\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	node = xml_node_create(self, K_ATTR, text, NULL);
 	if (!node)
 		return E_OUTOFMEMORY;

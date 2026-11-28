@@ -322,11 +322,11 @@ __declspec(dllexport) HRESULT WINAPI CreateStreamOverRandomAccessStream(IUnknown
 		return E_POINTER;
 	*out = NULL;
 	if (!random_access_stream)
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	result = random_access_stream->lpVtbl->QueryInterface(random_access_stream,
 		&IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream, (void **)&ras);
 	if (FAILED(result))
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	if (!(self = ALLOC(sizeof *self))) {
 		ras->lpVtbl->Release(ras);
 		return E_OUTOFMEMORY;

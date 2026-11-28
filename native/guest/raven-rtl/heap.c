@@ -67,6 +67,14 @@ typedef struct heap {
 
 static PVOID process_heaps_lock;
 static BOOLEAN initialized;
+static volatile LONG bin_rejections_reported;
+ULONG __cdecl DbgPrint(PCSTR format, ...);
+
+static void report_bin_rejection(void)
+{
+	if (InterlockedIncrement(&bin_rejections_reported) <= 8)
+		DbgPrint("raven-rtl: rejecting corrupt free-bin links\n");
+}
 
 /* The lock is a word as an SRW lock is: the thread that releases it and asks again gets it back rather than queueing behind a waiter. */
 static void heap_lock(heap *owner, ULONG flags)
@@ -104,14 +112,57 @@ static void bin_insert(heap *owner, chunk *block)
 	owner->bin_bits[bin / 64] |= 1ull << (bin % 64);
 }
 
-static void bin_remove(heap *owner, chunk *block)
+static segment *segment_of(heap *owner, const void *address);
+
+static BOOLEAN bin_link_address_valid(heap *owner, unsigned bin, free_links *links)
+{
+	if (links == &owner->bins[bin])
+		return TRUE;
+	if ((uintptr_t)links % UNIT)
+		return FALSE;
+	segment *item = segment_of(owner, links);
+	if (!item || (PUCHAR)links < item->base + sizeof(chunk) || (PUCHAR)links > item->top - sizeof(*links))
+		return FALSE;
+	return TRUE;
+}
+
+static BOOLEAN bin_link_valid(heap *owner, unsigned bin, free_links *links)
+{
+	if (!bin_link_address_valid(owner, bin, links))
+		return FALSE;
+	if (links == &owner->bins[bin])
+		return TRUE;
+	segment *item = segment_of(owner, links);
+	chunk *block = (chunk *)links - 1;
+	return block->state == state_free && block->units >= MIN_UNITS &&
+	       bin_of(block->units) == bin && (PUCHAR)(block + block->units) <= item->top;
+}
+
+static BOOLEAN bin_links_valid(heap *owner, unsigned bin, free_links *links)
+{
+	if (!bin_link_address_valid(owner, bin, links)) {
+		report_bin_rejection();
+		return FALSE;
+	}
+	if (!bin_link_valid(owner, bin, links->previous) || !bin_link_valid(owner, bin, links->next) ||
+	    links->previous->next != links || links->next->previous != links) {
+		report_bin_rejection();
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static BOOLEAN bin_remove(heap *owner, chunk *block)
 {
 	free_links *links = (free_links *)(block + 1);
+	unsigned bin = bin_of(block->units);
+	if (!bin_links_valid(owner, bin, links))
+		return FALSE;
 	links->previous->next = links->next;
 	links->next->previous = links->previous;
-	unsigned bin = bin_of(block->units);
 	if (owner->bins[bin].next == &owner->bins[bin])
 		owner->bin_bits[bin / 64] &= ~(1ull << (bin % 64));
+	return TRUE;
 }
 
 static chunk *next_chunk(chunk *block)
@@ -248,12 +299,15 @@ static BOOLEAN bin_entry_valid(heap *owner, chunk *block)
 	return !((uintptr_t)block % UNIT) && block->state == state_free && segment_of(owner, block);
 }
 
-static void bin_drop(heap *owner, unsigned bin, free_links *links)
+static BOOLEAN bin_drop(heap *owner, unsigned bin, free_links *links)
 {
+	if (!bin_links_valid(owner, bin, links))
+		return FALSE;
 	links->previous->next = links->next;
 	links->next->previous = links->previous;
 	if (owner->bins[bin].next == &owner->bins[bin])
 		owner->bin_bits[bin / 64] &= ~(1ull << (bin % 64));
+	return TRUE;
 }
 
 static chunk *take_from_bins(heap *owner, SIZE_T units)
@@ -263,12 +317,17 @@ static chunk *take_from_bins(heap *owner, SIZE_T units)
 	if (bin >= EXACT_BINS) {
 		unsigned looked = 0;
 		for (free_links *links = owner->bins[bin].next; links != &owner->bins[bin] && looked < 16;) {
+			if (!bin_links_valid(owner, bin, links))
+				return NULL;
 			free_links *next = links->next;
 			chunk *block = (chunk *)links - 1;
-			if (!bin_entry_valid(owner, block))
-				bin_drop(owner, bin, links);
+			if (!bin_entry_valid(owner, block)) {
+				if (!bin_drop(owner, bin, links))
+					return NULL;
+			}
 			else if (block->units >= units) {
-				bin_remove(owner, block);
+				if (!bin_remove(owner, block))
+					return NULL;
 				return block;
 			}
 			links = next;
@@ -283,13 +342,18 @@ static chunk *take_from_bins(heap *owner, SIZE_T units)
 		if (!bits)
 			continue;
 		unsigned found = word * 64 + (unsigned)__builtin_ctzll(bits);
-		chunk *block = (chunk *)owner->bins[found].next - 1;
+		free_links *links = owner->bins[found].next;
+		if (!bin_links_valid(owner, found, links))
+			return NULL;
+		chunk *block = (chunk *)links - 1;
 		if (!bin_entry_valid(owner, block)) {
-			bin_drop(owner, found, owner->bins[found].next);
+			if (!bin_drop(owner, found, links))
+				return NULL;
 			word--;
 			continue;
 		}
-		bin_remove(owner, block);
+		if (!bin_remove(owner, block))
+			return NULL;
 		return block;
 	}
 	return NULL;

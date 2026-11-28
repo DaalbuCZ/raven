@@ -11,6 +11,7 @@
 #define WIDL_using_Windows_UI_Core
 #define WIDL_using_Windows_Foundation
 #include <windows.h>
+#include "xaml_internal.h"
 #include <winstring.h>
 #include "dispatcher_queue.h"
 #include "events.h"
@@ -181,7 +182,7 @@ static HRESULT timer_arm(struct timer *self, BOOL restart)
 {
 	struct queue *queue = self->queue;
 	UINT64 milliseconds = interval_ms(self), now = GetTickCount64();
-	if (milliseconds > ~(UINT64)0 - now) { OutputDebugStringA("raven-xaml: dispatcher delay overflow\n"); return E_INVALIDARG; }
+	if (milliseconds > ~(UINT64)0 - now) { OutputDebugStringA("raven-xaml: dispatcher delay overflow\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	UINT_PTR id = 0x40000000U | (UINT32)InterlockedIncrement(&next_timer_id);
 	UINT delay = milliseconds > USER_TIMER_MAXIMUM ? USER_TIMER_MAXIMUM : (UINT)milliseconds;
 	if (!SetTimer(queue->hwnd, id, delay, NULL)) return last_error();
@@ -212,7 +213,7 @@ static HRESULT WINAPI timer_interval(IDispatcherQueueTimer *iface, TimeSpan *out
 }
 static HRESULT WINAPI timer_put_interval(IDispatcherQueueTimer *iface, TimeSpan value)
 {
-	if (value.Duration < 0) { OutputDebugStringA("raven-xaml: dispatcher negative delay\n"); return E_INVALIDARG; }
+	if (value.Duration < 0) { OutputDebugStringA("raven-xaml: dispatcher negative delay\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	struct timer *self = (void *)iface;
 	EnterCriticalSection(&self->queue->lock);
 	TimeSpan previous = self->interval;
@@ -391,7 +392,7 @@ static HRESULT WINAPI queue_enqueue_priority(IDispatcherQueue *iface, Dispatcher
 	case DispatcherQueuePriority_Low: rank = CoreDispatcherPriority_Low; break;
 	case DispatcherQueuePriority_Normal: rank = CoreDispatcherPriority_Normal; break;
 	case DispatcherQueuePriority_High: rank = CoreDispatcherPriority_High; break;
-	default: OutputDebugStringA("raven-xaml: dispatcher priority refused\n"); return E_INVALIDARG;
+	default: OutputDebugStringA("raven-xaml: dispatcher priority refused\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	}
 	struct work *work = new_work();
 	if (!work) return E_OUTOFMEMORY;
@@ -1168,7 +1169,7 @@ __declspec(dllexport) HRESULT WINAPI CreateDispatcherQueueController(struct disp
 	if (!out) return E_POINTER;
 	*out = NULL;
 	if (options.size != sizeof options || (options.thread_type != 1 && options.thread_type != 2) || options.apartment_type > 2)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at dispatcher_queue.c:1165\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at dispatcher_queue.c:1165\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	/* shortcut: current-thread queues and explicit COM apartments need their own lifecycle; implement before accepting them. */
 	if (options.thread_type != 1 || options.apartment_type != 0) { raven_trace_not_implemented(__func__); return E_NOTIMPL; }
 	return dedicated_create(NULL, out);

@@ -194,18 +194,31 @@ HRESULT file_bytes_open(const WCHAR *path, DWORD mode, BOOL create, ILockBytes *
 }
 
 /* Global memory. The bytes live in one HGLOBAL that clones share; every touch of the block's fields — the handle the
- * block stands for, the logical size, the memory itself — runs under the block's critical section, the way ole32's
+ * block stands for, the logical size, the memory itself — runs under the block's host-side spin lock, the way ole32's
  * lock bytes hold the block while a stream op runs. A write that must grow calls GlobalReAlloc inside the section:
  * while a caller holds a GlobalLock of its own on the handle, the realloc fails (a locked object does not move), and
- * the failure comes back as the medium-full error a Windows stream answers in that spot. */
+ * the failure comes back as the medium-full error a Windows stream answers in that spot. This cannot use the guest
+ * critical-section API: acquiring it from a storage callback would re-enter native callback accounting. */
 
 struct shared_block {
 	LONG refs;
-	CRITICAL_SECTION lock;
+	volatile LONG lock;
 	HGLOBAL memory;
 	BOOL free_on_release;
 	ULONGLONG size;
 };
+
+static void block_lock(struct shared_block *block)
+{
+	while (__atomic_exchange_n(&block->lock, 1, __ATOMIC_ACQUIRE))
+		while (__atomic_load_n(&block->lock, __ATOMIC_RELAXED))
+			;
+}
+
+static void block_unlock(struct shared_block *block)
+{
+	__atomic_store_n(&block->lock, 0, __ATOMIC_RELEASE);
+}
 
 static HRESULT block_create(HGLOBAL memory, BOOL free_on_release, struct shared_block **result)
 {
@@ -213,13 +226,12 @@ static HRESULT block_create(HGLOBAL memory, BOOL free_on_release, struct shared_
 
 	if (!block)
 		return E_OUTOFMEMORY;
-	InitializeCriticalSection(&block->lock);
+	block->lock = 0;
 	if (memory) {
 		block->size = GlobalSize(memory);
 	} else {
 		memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_ZEROINIT, 0);
 		if (!memory) {
-			DeleteCriticalSection(&block->lock);
 			mem_free(block);
 			return E_OUTOFMEMORY;
 		}
@@ -237,7 +249,6 @@ static void block_release(struct shared_block *block)
 		return;
 	if (block->free_on_release)
 		GlobalFree(block->memory);
-	DeleteCriticalSection(&block->lock);
 	mem_free(block);
 }
 
@@ -245,18 +256,18 @@ static void block_release(struct shared_block *block)
 static HGLOBAL block_memory(struct shared_block *block)
 {
 	HGLOBAL memory;
-	EnterCriticalSection(&block->lock);
+	block_lock(block);
 	memory = block->memory;
-	LeaveCriticalSection(&block->lock);
+	block_unlock(block);
 	return memory;
 }
 
 static ULONGLONG block_logical_size(struct shared_block *block)
 {
 	ULONGLONG size;
-	EnterCriticalSection(&block->lock);
+	block_lock(block);
 	size = block->size;
-	LeaveCriticalSection(&block->lock);
+	block_unlock(block);
 	return size;
 }
 
@@ -289,9 +300,9 @@ static HRESULT block_resize(struct shared_block *block, ULONGLONG size)
 {
 	HRESULT status;
 
-	EnterCriticalSection(&block->lock);
+	block_lock(block);
 	status = block_resize_locked(block, size);
-	LeaveCriticalSection(&block->lock);
+	block_unlock(block);
 	return status;
 }
 
@@ -299,7 +310,7 @@ static ULONG block_read(struct shared_block *block, ULONGLONG offset, void *buff
 {
 	BYTE *data;
 
-	EnterCriticalSection(&block->lock);
+	block_lock(block);
 	if (offset >= block->size)
 		count = 0;
 	else if (count > block->size - offset)
@@ -313,7 +324,7 @@ static ULONG block_read(struct shared_block *block, ULONGLONG offset, void *buff
 			GlobalUnlock(block->memory);
 		}
 	}
-	LeaveCriticalSection(&block->lock);
+	block_unlock(block);
 	return count;
 }
 
@@ -324,25 +335,25 @@ static HRESULT block_write(struct shared_block *block, ULONGLONG offset, const v
 	*written = 0;
 	if (!count)
 		return S_OK;
-	EnterCriticalSection(&block->lock);
+	block_lock(block);
 	if (offset + count > block->size) {
 		/* The growth stays inside the section: the resize's realloc and this memcpy cannot interleave with another
 		   writer's, and a locked block answers the medium-full error before anything is written. */
 		HRESULT grown = block_resize_locked(block, offset + count);
 		if (FAILED(grown)) {
-			LeaveCriticalSection(&block->lock);
+			block_unlock(block);
 			return grown;
 		}
 	}
 	data = GlobalLock(block->memory);
 	if (!data) {
-		LeaveCriticalSection(&block->lock);
+		block_unlock(block);
 		return STG_E_MEDIUMFULL;
 	}
 	memcpy(data + offset, buffer, count);
 	GlobalUnlock(block->memory);
 	*written = count;
-	LeaveCriticalSection(&block->lock);
+	block_unlock(block);
 	return S_OK;
 }
 
@@ -452,9 +463,22 @@ HRESULT WINAPI GetHGlobalFromILockBytes(ILockBytes *bytes, HGLOBAL *memory)
 typedef struct memory_stream {
 	IStream IStream_iface;
 	LONG refs;
+	volatile LONG position_lock;
 	struct shared_block *block;
 	ULONGLONG position;
 } memory_stream;
+
+static void stream_position_lock(memory_stream *object)
+{
+	while (__atomic_exchange_n(&object->position_lock, 1, __ATOMIC_ACQUIRE))
+		while (__atomic_load_n(&object->position_lock, __ATOMIC_RELAXED))
+			;
+}
+
+static void stream_position_unlock(memory_stream *object)
+{
+	__atomic_store_n(&object->position_lock, 0, __ATOMIC_RELEASE);
+}
 
 static const IStreamVtbl memory_stream_vtable;
 
@@ -496,9 +520,13 @@ static ULONG WINAPI memory_stream_Release(IStream *iface)
 static HRESULT WINAPI memory_stream_Read(IStream *iface, void *buffer, ULONG count, ULONG *read)
 {
 	memory_stream *object = memory_stream_of(iface);
-	ULONG done = block_read(object->block, object->position, buffer, count);
+	ULONG done;
+
+	stream_position_lock(object);
+	done = block_read(object->block, object->position, buffer, count);
 
 	object->position += done;
+	stream_position_unlock(object);
 	if (read)
 		*read = done;
 	return S_OK;
@@ -514,8 +542,10 @@ static HRESULT WINAPI memory_stream_Write(IStream *iface, const void *buffer, UL
 		*written = 0;
 	if (!buffer)
 		return STG_E_INVALIDPOINTER;
+	stream_position_lock(object);
 	status = block_write(object->block, object->position, buffer, count, &done);
 	object->position += done;
+	stream_position_unlock(object);
 	if (written)
 		*written = done;
 	return status;
@@ -527,6 +557,7 @@ static HRESULT WINAPI memory_stream_Seek(IStream *iface, LARGE_INTEGER move, DWO
 	LONGLONG base;
 	HRESULT status = S_OK;
 
+	stream_position_lock(object);
 	switch (origin) {
 	case STREAM_SEEK_SET:
 		base = 0;
@@ -551,6 +582,7 @@ static HRESULT WINAPI memory_stream_Seek(IStream *iface, LARGE_INTEGER move, DWO
 	object->position = (ULONGLONG)(base + move.QuadPart);
 	if (position)
 		position->QuadPart = object->position;
+	stream_position_unlock(object);
 	return status;
 }
 
@@ -627,6 +659,7 @@ static HRESULT memory_stream_new(struct shared_block *block, IStream **out)
 		return E_OUTOFMEMORY;
 	object->IStream_iface.lpVtbl = &memory_stream_vtable;
 	object->refs = 1;
+	object->position_lock = 0;
 	object->block = block;
 	*out = &object->IStream_iface;
 	return S_OK;
@@ -648,7 +681,9 @@ static HRESULT WINAPI memory_stream_Clone(IStream *iface, IStream **out)
 		block_release(object->block);
 		return status;
 	}
+	stream_position_lock(object);
 	memory_stream_of(*out)->position = object->position;
+	stream_position_unlock(object);
 	return S_OK;
 }
 

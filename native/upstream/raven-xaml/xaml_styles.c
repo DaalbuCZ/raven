@@ -597,14 +597,14 @@ static HRESULT metadata_create(IInspectable *default_value,
 	if (default_factory) {
 		if (default_factory->lpVtbl->QueryInterface(default_factory,
 			&IID___x_ABI_CWindows_CUI_CXaml_CICreateDefaultValueCallback, (void **)&factory) != S_OK || !factory)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:586\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:586\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	if (changed_callback) {
 		if (changed_callback->lpVtbl->QueryInterface(changed_callback,
 			&IID___x_ABI_CWindows_CUI_CXaml_CIPropertyChangedCallback, (void **)&changed) != S_OK || !changed) {
 			if (factory)
 				factory->lpVtbl->Release(factory);
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:593\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:593\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		}
 	}
 	self = ALLOC(sizeof *self);
@@ -699,7 +699,7 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 	/* The duplicate contract needs an owner: a registration without the owner name or the property name cannot be told
 	 * apart from another, so it is not accepted. */
 	if (!name_text || !name_length || !type_text || !type_length || !owner_text || !owner_length)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:688\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:688\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	for (UINT32 index = 0; index < dp_registry_count; ++index) {
 		struct dp_object *registered = dp_registry[index];
 		UINT32 length = 0;
@@ -711,7 +711,7 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 		if (length == owner_length &&
 			CompareStringOrdinal(text, (int)length, owner_text, (int)owner_length, FALSE) == CSTR_EQUAL) {
 			OutputDebugStringA("raven-xaml: duplicate style entry\n");
-			return E_INVALIDARG;
+			{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		}
 	}
 	/* The default value comes from the metadata's real DefaultValue, or — for the engine's own factory-backed
@@ -722,7 +722,7 @@ static HRESULT dp_register(HSTRING name, __x_ABI_CWindows_CUI_CXaml_CInterop_CTy
 	if (metadata) {
 		if (metadata->lpVtbl->QueryInterface(metadata, &IID___x_ABI_CWindows_CUI_CXaml_CIPropertyMetadata,
 			(void **)&metadata) != S_OK)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:708\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:708\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		HRESULT result = metadata_registration_default(metadata, &default_value);
 		if (SUCCEEDED(result)) {
 			raven_property_metadata_interop *interop = NULL;
@@ -1181,7 +1181,7 @@ static HRESULT WINAPI metadata_statics_factory(__x_ABI_CWindows_CUI_CXaml_CIProp
 		return E_POINTER;
 	*result = NULL;
 	if (!create_default_value_callback)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1064\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1064\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	return metadata_create(NULL, create_default_value_callback, NULL, NULL, NULL, result);
 }
 
@@ -1195,7 +1195,7 @@ static HRESULT WINAPI metadata_statics_factory_callback(__x_ABI_CWindows_CUI_CXa
 		return E_POINTER;
 	*result = NULL;
 	if (!create_default_value_callback)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1078\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1078\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	return metadata_create(NULL, create_default_value_callback, property_changed_callback, NULL, NULL, result);
 }
 
@@ -1363,9 +1363,9 @@ static HRESULT WINAPI setter_put_property(__x_ABI_CWindows_CUI_CXaml_CISetter *T
 	IInspectable *candidate = (IInspectable *)(uintptr_t)value;
 	struct dp_object *dp = candidate ? dp_of(candidate) : NULL;
 	if (self->sealed)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1246\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1246\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (candidate && !dp)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1248\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1248\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (dp) {
 		UINT32 length = 0;
 		const WCHAR *name = WindowsGetStringRawBuffer(dp->name, &length);
@@ -1400,7 +1400,7 @@ static HRESULT WINAPI setter_put_value(__x_ABI_CWindows_CUI_CXaml_CISetter *ifac
 	struct setter_object *self = (struct setter_object *)iface;
 	IInspectable *object = (IInspectable *)(uintptr_t)value;
 	if (self->sealed)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1283\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1283\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (object)
 		object->lpVtbl->AddRef(object);
 	if (self->value)
@@ -1637,7 +1637,7 @@ static HRESULT WINAPI vector_append(setter_vector1 *iface, __x_ABI_CWindows_CUI_
 	if (!value)
 		return E_POINTER;
 	if (self->sealed)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1520\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1520\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (self->count == self->capacity) {
 		const UINT32 capacity = self->capacity ? self->capacity * 2 : 4;
 		struct setter_object **items = ALLOC((size_t)capacity * sizeof *items);
@@ -1661,7 +1661,7 @@ static HRESULT WINAPI vector_clear(setter_vector1 *iface)
 {
 	struct setters_vector *self = (struct setters_vector *)iface;
 	if (self->sealed)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1544\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1544\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	for (UINT32 index = 0; index < self->count; ++index)
 		if (self->items[index])
 			setter_release_any(self->items[index]);
@@ -1857,7 +1857,7 @@ static HRESULT WINAPI style_put_target_type(__x_ABI_CWindows_CUI_CXaml_CIStyle *
 	UINT32 length = 0;
 	const WCHAR *text = NULL;
 	if (self->sealed)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1740\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1740\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	/* The name is stored when the struct carries one; a nameless struct resets the TargetType, so an empty TypeName
 	 * hands back from get_TargetType. */
 	if (value.Name)
@@ -1911,7 +1911,7 @@ static HRESULT WINAPI style_put_based_on(__x_ABI_CWindows_CUI_CXaml_CIStyle *ifa
 	struct style_object *self = (struct style_object *)iface;
 	IInspectable *based_on = (IInspectable *)(uintptr_t)value;
 	if (self->sealed)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1794\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1794\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (based_on)
 		based_on->lpVtbl->AddRef(based_on);
 	if (self->based_on)
@@ -2060,7 +2060,7 @@ static HRESULT WINAPI factory_create(__x_ABI_CWindows_CUI_CXaml_CIStyleFactory *
 	if (!out)
 		return E_POINTER;
 	if (base_interface)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1943\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:1943\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	return factory_activate(NULL, (IInspectable **)(uintptr_t)out);
 }
 
@@ -2305,7 +2305,7 @@ __declspec(dllexport) HRESULT raven_style_add_setter(IInspectable *style, const 
 	if (!self)
 		return S_FALSE;
 	if (!property || !length)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:2148\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_styles.c:2148\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	setter = create_setter(property, length, value);
 	if (!setter)
 		return E_OUTOFMEMORY;
@@ -3071,7 +3071,7 @@ HRESULT raven_acrylic_brush_set_float(IInspectable *brush, const WCHAR *name, UI
 	if (acrylic_property(name, length, L"TintOpacity")) slot = &self->tint_opacity;
 	else if (acrylic_property(name, length, L"TintLuminosityOpacity")) slot = &self->luminosity_opacity;
 	else return S_FALSE;
-	if (!(value >= 0.0f && value <= 1.0f)) { OutputDebugStringA("raven-xaml: opacity out of range\n"); return E_INVALIDARG; }
+	if (!(value >= 0.0f && value <= 1.0f)) { OutputDebugStringA("raven-xaml: opacity out of range\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	*slot = value;
 	return S_OK;
 }
@@ -3086,7 +3086,7 @@ HRESULT raven_acrylic_brush_set_text(IInspectable *brush, const WCHAR *name, UIN
 	if (acrylic_property(name, length, L"BackgroundSource")) {
 		if (acrylic_property(value, value_length, L"Backdrop")) self->background_source = 0;
 		else if (acrylic_property(value, value_length, L"HostBackdrop")) self->background_source = 1;
-		else return E_INVALIDARG;
+		else { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		return S_OK;
 	}
 	if (!acrylic_property(name, length, L"TintOpacity") && !acrylic_property(name, length, L"TintLuminosityOpacity"))
@@ -3094,13 +3094,13 @@ HRESULT raven_acrylic_brush_set_text(IInspectable *brush, const WCHAR *name, UIN
 	for (UINT32 i = 0; i < value_length; ++i) {
 		WCHAR c = value[i];
 		if (c == L'.' && !fraction) { fraction = TRUE; continue; }
-		if (c < L'0' || c > L'9') return E_INVALIDARG;
+		if (c < L'0' || c > L'9') { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		digit = TRUE;
 		if (fraction) { number += (c - L'0') * factor; factor *= 0.1f; }
 		else number = number * 10.0f + (c - L'0');
-		if (number > 1.0f) return E_INVALIDARG;
+		if (number > 1.0f) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	}
-	return digit ? raven_acrylic_brush_set_float(brush, name, length, number) : E_INVALIDARG;
+	return digit ? raven_acrylic_brush_set_float(brush, name, length, number) : (RAVEN_XAML_INVALIDARG(), E_INVALIDARG);
 }
 
 HRESULT raven_acrylic_brush_set_color(IInspectable *brush, const WCHAR *name, UINT32 length, const __x_ABI_CWindows_CUI_CColor *value)
@@ -3153,7 +3153,7 @@ HRESULT raven_xaml_property_register(const WCHAR *name, UINT32 name_length, cons
 		return E_POINTER;
 	*out = NULL;
 	if (!name || !name_length || !type_name || !type_length || !owner_name || !owner_length)
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	result = WindowsCreateString(name, name_length, &name_h);
 	if (SUCCEEDED(result))
 		result = WindowsCreateString(type_name, type_length, &type_h);

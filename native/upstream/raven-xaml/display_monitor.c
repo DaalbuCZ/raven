@@ -102,6 +102,26 @@ static void trace_query_refuse(const char *face, REFIID iid)
 	trace_member(line);
 }
 
+static void trace_monitor_operation_query_refuse(const char *operation, REFIID iid, REFIID expected)
+{
+	static LONG trace_gate = -1;
+	static LONG trace_count;
+	char flag[8] = "", line[160];
+	if (lstrcmpA(operation, "monitor_operation") != 0)
+		return;
+	if (trace_gate < 0)
+		InterlockedCompareExchange(&trace_gate,
+			GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", flag, sizeof flag) ? 1 : 0, -1);
+	if (!trace_gate || InterlockedIncrement(&trace_count) > 8)
+		return;
+	wsprintfA(line, "raven-xaml: DisplayMonitor operation QI refused %08x-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x expected %08x-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x\n",
+		(unsigned int)iid->Data1, (unsigned int)iid->Data2, (unsigned int)iid->Data3,
+		iid->Data4[0], iid->Data4[1], iid->Data4[2], iid->Data4[3], iid->Data4[4], iid->Data4[5], iid->Data4[6], iid->Data4[7],
+		(unsigned int)expected->Data1, (unsigned int)expected->Data2, (unsigned int)expected->Data3,
+		expected->Data4[0], expected->Data4[1], expected->Data4[2], expected->Data4[3], expected->Data4[4], expected->Data4[5], expected->Data4[6], expected->Data4[7]);
+	OutputDebugStringA(line);
+}
+
 static HRESULT inspectable_iids(ULONG *count, IID **iids)
 {
 	if (!count || !iids)
@@ -546,7 +566,7 @@ static HRESULT WINAPI monitor_get_descriptor(monitor1 *iface, int32_t kind, UINT
 	}
 	if (kind != descriptor_edid) {
 		trace_member("GetDescriptor");
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	}
 	trace_member("GetDescriptor(Edid)");
 	return read_edid_descriptor(value_size, value);
@@ -747,6 +767,7 @@ static LONG next_display_async_id;
 					*out = &self->info; \
 				else { \
 					trace_query_refuse("op", iid); \
+					trace_monitor_operation_query_refuse(#name, iid, &own_iids[0]); \
 					return E_NOINTERFACE; \
 				} \
 			} \

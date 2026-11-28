@@ -70,6 +70,73 @@ void raven_trace_note(const char *text)
 	OutputDebugStringA(text);
 }
 
+void raven_trace_invalidarg_site(const char *source, unsigned line_number)
+{
+	static volatile LONG emitted;
+	static __declspec(thread) int logging;
+	char enabled[2], message[160], digits[10];
+	const char *base = source, *scan;
+	char *out;
+	UINT count = 0;
+	LONG sequence;
+	if (logging || !GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", enabled, sizeof enabled) ||
+		!enabled[0] || enabled[0] == '0')
+		return;
+	sequence = InterlockedIncrement(&emitted);
+	if (sequence > 32)
+		return;
+	logging = 1;
+	for (scan = source; *scan; ++scan)
+		if (*scan == '/' || *scan == '\\')
+			base = scan + 1;
+	out = message;
+	for (const char *p = "raven-xaml: E_INVALIDARG at "; *p; ++p)
+		*out++ = *p;
+	for (const char *p = base; *p && *p != '.' && out < message + sizeof message - 24; ++p)
+		*out++ = *p;
+	*out++ = ':';
+	do {
+		digits[count++] = (char)('0' + line_number % 10);
+		line_number /= 10;
+	} while (line_number && count < ARRAYSIZE(digits));
+	while (count)
+		*out++ = digits[--count];
+	*out++ = '\n';
+	*out = 0;
+	OutputDebugStringA(message);
+	logging = 0;
+}
+
+static char *trace_text(char *out, const char *text)
+{
+	while (*text)
+		*out++ = *text++;
+	return out;
+}
+
+static char *trace_hex(char *out, uintptr_t value)
+{
+	static const char digits[] = "0123456789abcdef";
+	*out++ = '0';
+	*out++ = 'x';
+	for (int shift = (int)(sizeof value * 8) - 4; shift >= 0; shift -= 4)
+		*out++ = digits[(value >> shift) & 0xf];
+	return out;
+}
+
+static char *trace_decimal(char *out, UINT32 value)
+{
+	char digits[10];
+	UINT32 count = 0;
+	do {
+		digits[count++] = (char)('0' + value % 10);
+		value /= 10;
+	} while (value);
+	while (count)
+		*out++ = digits[--count];
+	return out;
+}
+
 LONG raven_xaml_objects;
 static LONG next_action_id;
 static DWORD window_tls = TLS_OUT_OF_INDEXES;
@@ -167,6 +234,114 @@ struct action {
 	BOOL closed, assigned;
 	completed_handler *completed;
 };
+
+static void trace_action_result(async_action *iface, UINT32 id, AsyncStatus status, HRESULT stored_error,
+	HRESULT result, DWORD thread)
+{
+	char line[256], *out = line;
+	out = trace_text(out, "raven-xaml: async action results failed action=");
+	out = trace_hex(out, (uintptr_t)iface);
+	out = trace_text(out, " id=");
+	out = trace_decimal(out, id);
+	out = trace_text(out, " status=");
+	out = trace_decimal(out, (UINT32)status);
+	out = trace_text(out, " hr=");
+	out = trace_hex(out, (UINT32)result);
+	out = trace_text(out, " stored_hr=");
+	out = trace_hex(out, (UINT32)stored_error);
+	out = trace_text(out, " thread=");
+	out = trace_decimal(out, thread);
+	*out++ = '\n';
+	*out = 0;
+	raven_trace_note(line);
+}
+
+static void trace_action_invoke(async_action *action, dispatched_handler *handler, core_dispatcher *dispatcher,
+	struct window *window, DWORD thread)
+{
+	char line[768], *out = line;
+	UINT_PTR target;
+	UINT_PTR target_words[4];
+	SIZE_T target_bytes = 0;
+	UINT_PTR owner_words[4];
+	SIZE_T owner_bytes = 0;
+	out = trace_text(out, "raven-xaml: async action invoke action=");
+	out = trace_hex(out, (uintptr_t)action);
+	out = trace_text(out, " id=");
+	out = trace_decimal(out, ((struct action *)action)->id);
+	out = trace_text(out, " handler=");
+	out = trace_hex(out, (uintptr_t)handler);
+	out = trace_text(out, " handler_vtable=");
+	out = trace_hex(out, (uintptr_t)handler->lpVtbl);
+	out = trace_text(out, " object_words=");
+	for (UINT32 i = 1; i < 7; ++i) {
+		UINT_PTR word;
+		memcpy(&word, (const BYTE *)handler + i * sizeof word, sizeof word);
+		if (i == 1)
+			target = word;
+		if (i > 1)
+			*out++ = ',';
+		out = trace_hex(out, word);
+	}
+	out = trace_text(out, " target_words=");
+	if (!target) {
+		out = trace_text(out, "null");
+	} else if (ReadProcessMemory(GetCurrentProcess(), (const void *)target, target_words, sizeof target_words,
+		&target_bytes) && target_bytes == sizeof target_words) {
+		for (UINT32 i = 0; i < ARRAYSIZE(target_words); ++i) {
+			if (i)
+				*out++ = ',';
+			out = trace_hex(out, target_words[i]);
+		}
+	} else {
+		out = trace_text(out, "unreadable");
+	}
+	out = trace_text(out, " state_words=");
+	if (target_bytes != sizeof target_words || !target_words[1]) {
+		out = trace_text(out, target_bytes == sizeof target_words ? "null" : "unreadable");
+	} else if (ReadProcessMemory(GetCurrentProcess(), (const void *)target_words[1], owner_words, sizeof owner_words,
+		&owner_bytes) && owner_bytes == sizeof owner_words) {
+		for (UINT32 i = 0; i < ARRAYSIZE(owner_words); ++i) {
+			if (i)
+				*out++ = ',';
+			out = trace_hex(out, owner_words[i]);
+		}
+	} else {
+		out = trace_text(out, "unreadable");
+	}
+	out = trace_text(out, " dispatcher=");
+	out = trace_hex(out, (uintptr_t)dispatcher);
+	out = trace_text(out, " window=");
+	out = trace_hex(out, (uintptr_t)window);
+	out = trace_text(out, " thread=");
+	out = trace_decimal(out, thread);
+	*out++ = '\n';
+	*out = 0;
+	raven_trace_note(line);
+}
+
+static void trace_action_invoke_failure(async_action *action, dispatched_handler *handler, HRESULT result,
+	core_dispatcher *dispatcher, struct window *window, DWORD thread)
+{
+	char line[256], *out = line;
+	out = trace_text(out, "raven-xaml: async action failed action=");
+	out = trace_hex(out, (uintptr_t)action);
+	out = trace_text(out, " id=");
+	out = trace_decimal(out, ((struct action *)action)->id);
+	out = trace_text(out, " handler_vtable=");
+	out = trace_hex(out, (uintptr_t)handler->lpVtbl);
+	out = trace_text(out, " hr=");
+	out = trace_hex(out, (UINT32)result);
+	out = trace_text(out, " dispatcher=");
+	out = trace_hex(out, (uintptr_t)dispatcher);
+	out = trace_text(out, " window=");
+	out = trace_hex(out, (uintptr_t)window);
+	out = trace_text(out, " thread=");
+	out = trace_decimal(out, thread);
+	*out++ = '\n';
+	*out = 0;
+	raven_trace_note(line);
+}
 
 static HRESULT WINAPI action_query(async_action *iface, REFIID iid, void **out);
 static ULONG WINAPI action_addref(async_action *iface);
@@ -435,7 +610,7 @@ static HRESULT cursor_create(__x_ABI_CWindows_CUI_CCore_CCoreCursorType type, UI
 		return E_POINTER;
 	*out = NULL;
 	if (type < CoreCursorType_Arrow || type > cursor_type_last())
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:412\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:412\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	struct cursor *self = ALLOC(sizeof *self);
 	if (!self)
 		return E_OUTOFMEMORY;
@@ -1035,9 +1210,25 @@ static HRESULT WINAPI action_results(async_action *iface)
 {
 	struct action *self = (struct action *)iface;
 	HRESULT result;
+	UINT32 id;
+	AsyncStatus status;
+	HRESULT stored_error;
 	EnterCriticalSection(&self->lock);
 	result = self->closed ? RO_E_CLOSED : self->status == Started ? E_ILLEGAL_METHOD_CALL : self->error;
+	id = self->id;
+	status = self->status;
+	stored_error = self->error;
 	LeaveCriticalSection(&self->lock);
+	if (FAILED(result)) {
+		static int trace_gate = -1;
+		if (trace_gate < 0) {
+			char flag[8] = "";
+			trace_gate = GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", flag, sizeof flag) ? 1 : 0;
+		}
+		if (trace_gate) {
+			trace_action_result(iface, id, status, stored_error, result, GetCurrentThreadId());
+		}
+	}
 	return result;
 }
 
@@ -1196,7 +1387,7 @@ static HRESULT WINAPI dispatcher_process_events(core_dispatcher *iface, __x_ABI_
 	if (window->thread != GetCurrentThreadId())
 		return RPC_E_WRONG_THREAD;
 	if (options < CoreProcessEventsOption_ProcessOneAndAllPending || options > CoreProcessEventsOption_ProcessAllIfPresent)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:1173\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:1173\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	for (;;) {
 		struct queued *node;
 		MSG message;
@@ -1246,7 +1437,26 @@ static HRESULT WINAPI dispatcher_process_events(core_dispatcher *iface, __x_ABI_
 			AsyncStatus status;
 			info_status(&action->info, &status);
 			if (status == Started) {
+				static int trace_gate = -1;
+				static volatile LONG traced_invocations;
+				if (trace_gate < 0) {
+					char flag[8] = "";
+					trace_gate = GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", flag, sizeof flag) ? 1 : 0;
+				}
+				if (trace_gate && InterlockedIncrement(&traced_invocations) <= 64) {
+					trace_action_invoke(node->action, node->handler, iface, window, GetCurrentThreadId());
+				}
 				HRESULT result = __x_ABI_CWindows_CUI_CCore_CIDispatchedHandler_Invoke(node->handler);
+				if (FAILED(result)) {
+					static int trace_gate = -1;
+					if (trace_gate < 0) {
+						char flag[8] = "";
+						trace_gate = GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", flag, sizeof flag) ? 1 : 0;
+					}
+					if (trace_gate) {
+						trace_action_invoke_failure(node->action, node->handler, result, iface, window, GetCurrentThreadId());
+					}
+				}
 				action_finish(node->action, result, FAILED(result) ? Error : Completed);
 			}
 		} else invoked = __x_ABI_CWindows_CUI_CCore_CIDispatchedHandler_Invoke(node->handler);
@@ -1310,7 +1520,7 @@ static HRESULT WINAPI dispatcher_run_async(core_dispatcher *iface, __x_ABI_CWind
 	if (!callback)
 		return E_POINTER;
 	if (priority < CoreDispatcherPriority_Idle || priority > CoreDispatcherPriority_High)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:1287\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml.c:1287\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (!(action = ALLOC(sizeof *action)))
 		return E_OUTOFMEMORY;
 	action->lpVtbl = &action_table;
@@ -1478,6 +1688,26 @@ static ULONG WINAPI idle_work_release(dispatched_handler *iface)
 static HRESULT WINAPI idle_work_invoke(dispatched_handler *iface)
 {
 	struct idle_work *self = (struct idle_work *)iface;
+	static int trace_gate = -1;
+	static volatile LONG traced_invocations;
+	if (trace_gate < 0) {
+		char flag[8] = "";
+		trace_gate = GetEnvironmentVariableA("RAVEN_TRACE_XAML_ACTION_FAILURE", flag, sizeof flag) ? 1 : 0;
+	}
+	if (trace_gate && InterlockedIncrement(&traced_invocations) <= 64) {
+		char line[256], *out = line;
+		out = trace_text(out, "raven-xaml: idle callback invoke handler=");
+		out = trace_hex(out, (uintptr_t)self->handler);
+		out = trace_text(out, " handler_vtable=");
+		out = trace_hex(out, (uintptr_t)self->handler->lpVtbl);
+		out = trace_text(out, " args=");
+		out = trace_hex(out, (uintptr_t)self->args);
+		out = trace_text(out, " thread=");
+		out = trace_decimal(out, GetCurrentThreadId());
+		*out++ = '\n';
+		*out = 0;
+		raven_trace_note(line);
+	}
 	return self->handler->lpVtbl->Invoke(self->handler, (void *)self->args);
 }
 

@@ -3308,9 +3308,14 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	// RAVEN_SAMPLE_GUEST=1 reports every five seconds where the guest spent its running time, by module and 256-byte block.
 	if (std::getenv("RAVEN_SAMPLE_GUEST")) {
 		auto samples = std::make_shared<std::map<uint64_t, uint32_t>>();
+		auto sampled_registers = std::make_shared<std::map<uint64_t, user_regs_struct>>();
+		auto unwinder = std::make_shared<NativeUnwinder>(process, modules);
 		auto reported = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
-		process.set_guest_sampler(std::chrono::milliseconds(2), [&modules, samples, reported](uint64_t rip) {
-			++(*samples)[rip & ~uint64_t(255)];
+		process.set_guest_sampler(std::chrono::milliseconds(2), [&modules, &process, samples, sampled_registers, reported, unwinder](user_regs_struct registers) {
+			const uint64_t rip = registers.rip;
+			const uint64_t block = rip & ~uint64_t(255);
+			++(*samples)[block];
+			(*sampled_registers)[block] = registers;
 			if (std::chrono::steady_clock::now() - *reported < std::chrono::seconds(5))
 				return;
 			*reported = std::chrono::steady_clock::now();
@@ -3331,6 +3336,32 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 						place = text.str();
 					}
 				std::cerr << "  " << top[index].first << ' ' << place << '\n';
+				if (place == "d3d11.dll+284c00") {
+					const auto &regs = (*sampled_registers)[top[index].second];
+					ContextBytes context(x64_context::size);
+					const uint64_t general[16] = {regs.rax, regs.rcx, regs.rdx, regs.rbx, regs.rsp, regs.rbp, regs.rsi, regs.rdi,
+						regs.r8, regs.r9, regs.r10, regs.r11, regs.r12, regs.r13, regs.r14, regs.r15};
+					for (size_t reg = 0; reg < std::size(general); ++reg)
+						set_context_register(context, reg, general[reg]);
+					set_context_rip(context, regs.rip);
+					std::cerr << "    unwind:";
+					for (size_t frame = 0; frame < 24; ++frame) {
+						const uint64_t pc = context_rip(context);
+						const auto *module = unwinder->module_at(pc);
+						if (!module)
+							break;
+						std::cerr << ' ' << module->name << "+0x" << std::hex << pc - module->loaded.base();
+						try {
+							if (const auto function = unwinder->lookup(pc))
+								unwinder->unwind(0, pc, *function, context);
+							else
+								unwinder->unwind_leaf(context);
+						} catch (...) {
+							break;
+						}
+					}
+					std::cerr << std::dec << '\n';
+				}
 			}
 			// Then the modules, which show where the time goes when no single block stands out.
 			std::map<std::string_view, uint32_t> by_module;
@@ -3348,6 +3379,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			for (size_t index = 0; index < std::min<size_t>(ranked.size(), 10); ++index)
 				std::cerr << "  module " << ranked[index].first << ' ' << ranked[index].second << '\n';
 			samples->clear();
+			sampled_registers->clear();
 		});
 	}
 	kernel_ptr=&kernel;

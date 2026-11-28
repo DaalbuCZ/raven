@@ -1207,7 +1207,7 @@ static HRESULT WINAPI text_put_font_size(textblock1 *iface, uint64_t value)
 	struct textblock *self = (struct textblock *)iface;
 	const float size = float_of_word(value);
 	if (size <= 0.0f)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1093\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1093\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	self->font_size = size;
 	raven_render_changed();
 	return S_OK;
@@ -2093,7 +2093,7 @@ static HRESULT WINAPI base_put_click_mode(__x_ABI_CWindows_CUI_CXaml_CControls_C
 {
 	struct button *self = ((struct buttonbase_part *)This)->owner;
 	if (value > raven_xaml_click_hover)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1551\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1551\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	self->click_mode = (UINT32)value;
 	return S_OK;
 }
@@ -2251,7 +2251,7 @@ static HRESULT button_put_template(struct button *self, IInspectable *template_o
 	}
 	kind = raven_xaml_control_template_root(template_object, &root);
 	if (kind != S_OK)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1709\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:1709\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (root)
 		root->lpVtbl->Release(root);
 	button_store_template(self, template_object);
@@ -2912,7 +2912,7 @@ static HRESULT presenter_store_content_template(IInspectable *object, IInspectab
 		if (root)
 			root->lpVtbl->Release(root);
 		if (kind != S_OK)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2258\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2258\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	if (value)
 		value->lpVtbl->AddRef(value);
@@ -3352,13 +3352,13 @@ HRESULT raven_xaml_elements_set_integer(IInspectable *object, const WCHAR *name,
 	if (!object)
 		return E_POINTER;
 	if (same_text(name, length, L"Row"))
-		return value < 0 || value > 0xffff ? E_INVALIDARG : store_slot(object, grid_slot_row, (UINT32)value);
+		return value < 0 || value > 0xffff ? (RAVEN_XAML_INVALIDARG(), E_INVALIDARG) : store_slot(object, grid_slot_row, (UINT32)value);
 	if (same_text(name, length, L"Column"))
-		return value < 0 || value > 0xffff ? E_INVALIDARG : store_slot(object, grid_slot_column, (UINT32)value);
+		return value < 0 || value > 0xffff ? (RAVEN_XAML_INVALIDARG(), E_INVALIDARG) : store_slot(object, grid_slot_column, (UINT32)value);
 	if (same_text(name, length, L"RowSpan"))
-		return value < 0 || value > 0xffff ? E_INVALIDARG : store_slot(object, grid_slot_row_span, (UINT32)value);
+		return value < 0 || value > 0xffff ? (RAVEN_XAML_INVALIDARG(), E_INVALIDARG) : store_slot(object, grid_slot_row_span, (UINT32)value);
 	if (same_text(name, length, L"ColumnSpan"))
-		return value < 0 || value > 0xffff ? E_INVALIDARG : store_slot(object, grid_slot_column_span, (UINT32)value);
+		return value < 0 || value > 0xffff ? (RAVEN_XAML_INVALIDARG(), E_INVALIDARG) : store_slot(object, grid_slot_column_span, (UINT32)value);
 	return S_FALSE;
 }
 
@@ -3370,7 +3370,7 @@ HRESULT raven_xaml_elements_set_float(IInspectable *object, const WCHAR *name, U
 	if (same_text(name, length, L"Row") || same_text(name, length, L"Column") ||
 		same_text(name, length, L"RowSpan") || same_text(name, length, L"ColumnSpan")) {
 		if (value < 0.0f || value > 65535.0f)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2503\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2503\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		return store_slot(object,
 			same_text(name, length, L"Row") ? grid_slot_row :
 			same_text(name, length, L"Column") ? grid_slot_column :
@@ -3387,7 +3387,7 @@ HRESULT raven_xaml_elements_set_float(IInspectable *object, const WCHAR *name, U
 			struct textblock *self = (struct textblock *)textblock;
 			if (value <= 0.0f) {
 				textblock->lpVtbl->Release(textblock);
-				{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2520\n"); return E_INVALIDARG; }
+				{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2520\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 			}
 			self->font_size = value;
 			raven_render_changed();
@@ -3734,7 +3734,7 @@ static HRESULT grid_apply_setter(void *state, const WCHAR *name, UINT32 length, 
 		}
 		/* A value that is neither a colour brush nor a colour name — a number where a colour is wanted, or a spelling
 		 * the engine does not know — fails the application; put_Style answers E_INVALIDARG and stores nothing. */
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2859\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2859\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	/* The Rectangle's own shape properties. The fill rides the brush slot the Background store keeps (a rectangle has
 	 * no Background); a colour brush lands there the way a Background does, and so does the boxed colour a compiled
@@ -3788,14 +3788,14 @@ static HRESULT grid_apply_setter(void *state, const WCHAR *name, UINT32 length, 
 				return S_OK;
 			}
 		}
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3212\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3212\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	if (self->shape == grid_shape_rectangle &&
 		(same_text(name, length, L"StrokeThickness") || same_text(name, length, L"RadiusX") ||
 			same_text(name, length, L"RadiusY"))) {
 		float number = 0;
 		if (!value || !style_boxed_number(value, &number))
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3222\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3222\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		if (!check_only) {
 			if (same_text(name, length, L"StrokeThickness"))
 				self->stroke_thickness = number;
@@ -3810,7 +3810,7 @@ static HRESULT grid_apply_setter(void *state, const WCHAR *name, UINT32 length, 
 	if (same_text(name, length, L"Width") || same_text(name, length, L"Height")) {
 		float number = 0;
 		if (!value || !style_boxed_number(value, &number))
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2864\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2864\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		if (!check_only) {
 			if (same_text(name, length, L"Width"))
 				self->width = number;
@@ -3852,14 +3852,14 @@ static HRESULT textblock_apply_setter(void *state, const WCHAR *name, UINT32 len
 				return S_OK;
 			}
 		}
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2906\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2906\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	if (same_text(name, length, L"FontSize")) {
 		float number = 0;
 		if (!value || !style_boxed_number(value, &number))
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2911\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2911\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		if (number <= 0.0f)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2913\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2913\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		if (!check_only) {
 			self->font_size = number;
 			raven_render_changed();
@@ -3869,7 +3869,7 @@ static HRESULT textblock_apply_setter(void *state, const WCHAR *name, UINT32 len
 	if (same_text(name, length, L"Text")) {
 		HSTRING string = NULL;
 		if (!value || !style_boxed_text(value, &string))
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2923\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2923\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		if (!check_only) {
 			UINT32 text_length = 0;
 			const WCHAR *text = WindowsGetStringRawBuffer(string, &text_length);
@@ -3912,12 +3912,12 @@ static HRESULT button_apply_setter(void *state, const WCHAR *name, UINT32 length
 				return S_OK;
 			}
 		}
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2966\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2966\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	}
 	if (same_text(name, length, L"Width") || same_text(name, length, L"Height")) {
 		float number = 0;
 		if (!value || !style_boxed_number(value, &number))
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2971\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2971\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		if (!check_only) {
 			if (same_text(name, length, L"Width"))
 				self->width = number;
@@ -3933,7 +3933,7 @@ static HRESULT button_apply_setter(void *state, const WCHAR *name, UINT32 length
 		 * template untouched. A NULL value clears. */
 		IInspectable *root = NULL;
 		if (value && raven_xaml_control_template_root(value, &root) != S_OK)
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2987\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:2987\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		if (root)
 			root->lpVtbl->Release(root);
 		if (!check_only)
@@ -4052,7 +4052,7 @@ HRESULT __declspec(dllexport) raven_xaml_element_apply_value(IInspectable *objec
 			return S_FALSE;
 		if (FAILED(value->lpVtbl->QueryInterface(value, &IID__x_ABI_CWindows_CUI_CXaml_CIStyle, (void **)&base)) || !base) {
 			style->lpVtbl->Release(style);
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3101\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_elements.c:3101\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		}
 		base->lpVtbl->Release(base);
 		result = style->lpVtbl->put_BasedOn(style, (uint64_t)(uintptr_t)value);

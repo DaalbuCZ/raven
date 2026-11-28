@@ -344,7 +344,7 @@ static HRESULT WINAPI properties_usage(IPointerPointProperties *iface, UINT32 pa
 {
 	if (!out) return E_POINTER;
 	*out = 0;
-	{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:347\n"); return E_INVALIDARG; }
+	{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:347\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 }
 static struct pointer_device *device_owner(IPointerDevice *iface)
 {
@@ -1152,10 +1152,10 @@ static HRESULT WINAPI statics_GetPointerDevice(IPointerDeviceStatics *iface, UIN
 					return S_OK;
 				}
 			}
-			{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:1155\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:1155\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 		}
 	}
-	{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:1158\n"); return E_INVALIDARG; }
+	{ raven_trace_note("raven-xaml: E_INVALIDARG at pointer.c:1158\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 }
 struct device_view {
 	__FIVectorView_1_Windows__CDevices__CInput__CPointerDevice view;

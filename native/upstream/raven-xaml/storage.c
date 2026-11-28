@@ -659,11 +659,11 @@ static HRESULT WINAPI input_read(input_i *iface,buffer_i *buffer,UINT32 count,__
 	UINT32 capacity=0; BYTE *bytes=NULL; DWORD taken=0; HRESULT result;
 	(void)options;
 	if (!out) return E_POINTER; *out=NULL;
-	if (!buffer) { raven_trace_note("raven-storage: null buffer\n"); return E_INVALIDARG; }
+	if (!buffer) { raven_trace_note("raven-storage: null buffer\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (self->handle==INVALID_HANDLE_VALUE) return RO_E_CLOSED;
 	result=buffer->lpVtbl->get_Capacity(buffer,&capacity);
 	if (FAILED(result)) return result;
-	if (count>capacity) { raven_trace_note("raven-storage: count over capacity\n"); return E_INVALIDARG; }
+	if (count>capacity) { raven_trace_note("raven-storage: count over capacity\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	result=buffer->lpVtbl->QueryInterface(buffer,&IID___x_Windows_CStorage_CStreams_CIBufferByteAccess,(void **)&access);
 	if (FAILED(result)) return result;
 	result=access->lpVtbl->Buffer(access,&bytes);
@@ -1319,7 +1319,7 @@ static HRESULT file_create(const WCHAR *path, BOOL read_only, file_i **out)
 			dot = walk;
 	}
 	if ((SIZE_T)(walk - name_start) >= FILE_NAME_MAX || (SIZE_T)(dot ? walk - dot : 0) >= FILE_NAME_MAX)
-		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1118\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1118\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (!(self = ALLOC(sizeof *self)))
 		return E_OUTOFMEMORY;
 	self->iface.lpVtbl = (void *)&file_table;
@@ -1365,14 +1365,14 @@ static HRESULT validate_item_name(HSTRING name, UINT32 *length)
 	const WCHAR *text = WindowsGetStringRawBuffer(name, length);
 	UINT32 i;
 	if (!*length)
-		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1163\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1163\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (*length >= FILE_NAME_MAX)
 		return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
 	for (i = 0; i < *length; ++i)
 		if (text[i] == L'\\' || text[i] == L'/' || text[i] == L':')
-			{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1168\n"); return E_INVALIDARG; }
+			{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1168\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if ((*length == 1 && text[0] == L'.') || (*length == 2 && text[0] == L'.' && text[1] == L'.'))
-		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1170\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-storage: E_INVALIDARG at storage.c:1170\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	return S_OK;
 }
 
@@ -2657,7 +2657,7 @@ static HRESULT file_from_path(const WCHAR *path, BOOL read_only, file_operation_
 	file_i *file=NULL; DWORD attrs; HRESULT result;
 	if (!out) return E_POINTER;
 	*out=NULL;
-	if (!path || !*path || lstrlenW(path)>=MAX_PATH) { raven_trace_note("raven-storage: path empty or too long\n"); return E_INVALIDARG; }
+	if (!path || !*path || lstrlenW(path)>=MAX_PATH) { raven_trace_note("raven-storage: path empty or too long\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	attrs=GetFileAttributesW(path);
 	if (attrs==INVALID_FILE_ATTRIBUTES) return file_operation_completed(NULL,last_error(),out);
 	if (attrs & FILE_ATTRIBUTE_DIRECTORY) return file_operation_completed(NULL,HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND),out);
@@ -2685,8 +2685,8 @@ static HRESULT WINAPI file_static_uri(void *self,__x_ABI_CWindows_CFoundation_CI
 	rest=text+11;
 	/* Keep package resources inside the package; escaped paths need a full URI decoder. */
 	for (const WCHAR *scan=rest; *scan; ++scan)
-		if (*scan==L'%' || *scan==L':' || (*scan==L'.' && scan[1]==L'.')) { WindowsDeleteString(value); raven_trace_note("raven-storage: uri path escapes the package\n"); return E_INVALIDARG; }
-	if (!raven_package_root(path,MAX_PATH)) { WindowsDeleteString(value); raven_trace_note("raven-storage: no package root\n"); return E_INVALIDARG; }
+		if (*scan==L'%' || *scan==L':' || (*scan==L'.' && scan[1]==L'.')) { WindowsDeleteString(value); raven_trace_note("raven-storage: uri path escapes the package\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
+	if (!raven_package_root(path,MAX_PATH)) { WindowsDeleteString(value); raven_trace_note("raven-storage: no package root\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	if (lstrlenW(path)+1+lstrlenW(rest)>=MAX_PATH) { WindowsDeleteString(value); return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE); }
 	lstrcatW(path,L"\\"); lstrcatW(path,rest);
 	result=file_from_path(path,TRUE,out);

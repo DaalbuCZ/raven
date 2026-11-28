@@ -380,6 +380,8 @@ HRESULT uri_create(const WCHAR *text, UINT32 length, uri_class **out)
 	if (!(copy = WINRT_ALLOC(((size_t)length + 1) * sizeof(WCHAR))))
 		return E_OUTOFMEMORY;
 	memcpy(copy, text, length * sizeof(WCHAR));
+	copy[length] = 0;
+	web_uri_trace(L"input", copy);
 	HRESULT result = 	/* The default decoding Windows' CreateUri applies: the properties read canonical text and CombineUri composes with
 	 * it. The NO_DECODE_EXTRA_INFO form an earlier build asked for refuses an escaped path here (raven-urlmon's
 	 * no-decode path), and nothing of this component needs it. */

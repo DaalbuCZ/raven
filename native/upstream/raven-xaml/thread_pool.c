@@ -272,7 +272,7 @@ static HRESULT pool_run(work_handler *handler, async_action **operation)
 	HANDLE thread;
 	if (!operation) return E_POINTER;
 	*operation = NULL;
-	if (!handler) return E_INVALIDARG;
+	if (!handler) { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	if (!(action = new_pool_action())) return E_OUTOFMEMORY;
 	if (!(work = ALLOC(sizeof *work))) {
 		action_release(&action->iface);

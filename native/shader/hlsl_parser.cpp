@@ -564,6 +564,11 @@ private:
 			annotations(semantic, &register_class, &buffer.register_index, nullptr, &buffer.register_space);
 			expect("{");
 			while (!accept("}")) {
+				if ((is("struct") || is("class") || is("interface")) && (is("{", 2) || is(";", 2) || is(":", 2))) {
+					structure_definition();
+					expect(";");
+					continue;
+				}
 				auto members = declaration_list();
 				for (auto &member : members)
 					buffer.members.push_back(std::move(member));

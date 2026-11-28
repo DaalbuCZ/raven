@@ -458,7 +458,7 @@ static HRESULT WINAPI writer_get_encoding(writer_i *iface, __x_ABI_CWindows_CSto
 static HRESULT WINAPI writer_put_encoding(writer_i *iface, __x_ABI_CWindows_CStorage_CStreams_CUnicodeEncoding value)
 {
 	if ((UINT32)value > 2)
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	((struct writer *)iface)->encoding = (UINT32)value;
 	return S_OK;
 }
@@ -474,7 +474,7 @@ static HRESULT WINAPI writer_get_byte_order(writer_i *iface, __x_ABI_CWindows_CS
 static HRESULT WINAPI writer_put_byte_order(writer_i *iface, __x_ABI_CWindows_CStorage_CStreams_CByteOrder value)
 {
 	if ((UINT32)value > 1)
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	((struct writer *)iface)->byte_order = (UINT32)value;
 	return S_OK;
 }
@@ -1876,7 +1876,7 @@ static HRESULT WINAPI hash_statics_open(hash_statics_i *iface, HSTRING algorithm
 			note[28 + index] = (char)text[index];
 		lstrcpyA(note + 28 + shown, "' is not offered\n");
 		raven_trace_note(note);
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	}
 	struct hash_provider *self = HeapAlloc(GetProcessHeap(), 0, sizeof *self);
 	if (!self)
@@ -2058,7 +2058,7 @@ static HRESULT WINAPI cryptobuffer_from_hex(cryptobuffer_statics_i *iface, HSTRI
 	if (!text)
 		return E_POINTER;
 	if (length & 1)
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	BYTE *bytes = NULL;
 	if (length) {
 		bytes = HeapAlloc(GetProcessHeap(), 0, length / 2);
@@ -2068,7 +2068,7 @@ static HRESULT WINAPI cryptobuffer_from_hex(cryptobuffer_statics_i *iface, HSTRI
 			const int high = hex_value(text[index * 2]), low = hex_value(text[index * 2 + 1]);
 			if (high < 0 || low < 0) {
 				HeapFree(GetProcessHeap(), 0, bytes);
-				return E_INVALIDARG;
+				{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 			}
 			bytes[index] = (BYTE)(high * 16 + low);
 		}
@@ -2141,7 +2141,7 @@ static HRESULT WINAPI cryptobuffer_from_base64(cryptobuffer_statics_i *iface, HS
 			const int group = base64_value(text[index]);
 			if (group < 0) {
 				HeapFree(GetProcessHeap(), 0, bytes);
-				return E_INVALIDARG;
+				{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 			}
 			carry = (carry << 6) | (UINT32)group;
 			bits += 6;
@@ -2199,7 +2199,7 @@ static HRESULT WINAPI cryptobuffer_string_to_binary(cryptobuffer_statics_i *ifac
 	if (encoding == 0) {
 		const int size = WideCharToMultiByte(CP_UTF8, 0, text, (int)length, NULL, 0, NULL, NULL);
 		if (size <= 0)
-			return E_INVALIDARG;
+			{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		BYTE *bytes = HeapAlloc(GetProcessHeap(), 0, (UINT32)size);
 		if (!bytes)
 			return E_OUTOFMEMORY;
@@ -2235,7 +2235,7 @@ static HRESULT WINAPI cryptobuffer_binary_to_string(cryptobuffer_statics_i *ifac
 	if (encoding == 0) {
 		const int size = MultiByteToWideChar(CP_UTF8, 0, (const char *)bytes, (int)length, NULL, 0);
 		if (size <= 0)
-			return E_INVALIDARG;
+			{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 		WCHAR *text = HeapAlloc(GetProcessHeap(), 0, sizeof(WCHAR) * (UINT32)size);
 		if (!text)
 			return E_OUTOFMEMORY;
@@ -2245,7 +2245,7 @@ static HRESULT WINAPI cryptobuffer_binary_to_string(cryptobuffer_statics_i *ifac
 		return result;
 	}
 	if (length & 1)
-		return E_INVALIDARG;
+		{ RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; }
 	const BOOL big = encoding == 2;
 	result = WindowsCreateString((const WCHAR *)bytes, length / 2, value);
 	(void)big;

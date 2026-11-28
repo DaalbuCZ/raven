@@ -1433,7 +1433,7 @@ static HRESULT WINAPI children_remove(struct children_vector *This, visual1 *chi
 			return S_OK;
 		}
 	}
-	{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:1436\n"); return E_INVALIDARG; }
+	{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:1436\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 }
 
 static HRESULT WINAPI children_remove_all(struct children_vector *This)
@@ -2271,7 +2271,7 @@ static HRESULT WINAPI compositor_create_target_for_current_view(compositor1 *Thi
 	if (FAILED(window_status))
 		return window_status;
 	if (!window)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2274\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2274\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	struct composition_target *target = composition_alloc(sizeof *target);
 	if (!target) {
 		window->lpVtbl->Release(window);
@@ -2434,7 +2434,7 @@ HRESULT raven_composition_sprite_text(visual1 *visual, const WCHAR *text, UINT32
 	COLORREF color, BYTE alpha)
 {
 	if (!visual)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2437\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2437\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	/* The reference may arrive through any part of the sprite object; the IVisual query answers with the part the
 	 * visual state hangs off, the way put_Root resolves its root. */
 	visual1 *part = NULL;
@@ -2444,7 +2444,7 @@ HRESULT raven_composition_sprite_text(visual1 *visual, const WCHAR *text, UINT32
 	struct composition_visual *self = visual_of_part(part, offsetof(struct composition_visual, first));
 	part->lpVtbl->Release(part);
 	if (self->kind != composition_sprite)
-		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2447\n"); return E_INVALIDARG; }
+		{ raven_trace_note("raven-xaml: E_INVALIDARG at xaml_composition.c:2447\n"); { RAVEN_XAML_INVALIDARG(); return E_INVALIDARG; } }
 	struct composition_sprite *sprite = (struct composition_sprite *)
 		((char *)self - offsetof(struct composition_sprite, base));
 	WCHAR *copy = NULL;

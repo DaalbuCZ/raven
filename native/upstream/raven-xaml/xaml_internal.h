@@ -28,6 +28,9 @@
  * traced Shapr3D run survives both refusals. */
 typedef HRESULT (WINAPI *raven_weak_query_fn)(void *owner, REFIID iid, void **out);
 
+void raven_trace_invalidarg_site(const char *source, unsigned line);
+#define RAVEN_XAML_INVALIDARG() raven_trace_invalidarg_site(__FILE__, __LINE__)
+
 /* mingw's weakreference.h models both interfaces as IUnknown-only; the Windows ABI derives them from IInspectable, with the
  * one method at vtable slot 6, which is the layout .NET Native is compiled against. */
 struct raven_weak_source_vtbl {

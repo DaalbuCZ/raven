@@ -319,18 +319,44 @@ void NativeWindows::place_overlays(uint64_t root,const DesktopBitmap &bitmap,std
 
 std::optional<HostSurface> NativeWindows::host_surface(uint64_t handle,bool hidden)
 {
-	if (!presentation.host_surface) return std::nullopt;
+	const bool trace=std::getenv("RAVEN_TRACE_VULKAN_SURFACE")!=nullptr;
+	if (!presentation.host_surface) {
+		if (trace) std::fprintf(stderr,"Vulkan host surface unavailable: hwnd=%#llx reason=no-presentation-callback\n",(unsigned long long)handle);
+		return std::nullopt;
+	}
 	const auto root=objects.window_root(handle);
-	if (!std::as_const(objects).window(root) || !std::as_const(objects).window(handle) || (!hidden && !objects.window_visible(handle))) return std::nullopt;
+	const auto *top=std::as_const(objects).window(root);
+	const auto *window=std::as_const(objects).window(handle);
+	if (!top || !window || (!hidden && !objects.window_visible(handle))) {
+		if (trace) std::fprintf(stderr,"Vulkan host surface unavailable: hwnd=%#llx root=%#llx root_record=%d window_record=%d hidden=%d visible=%d\n",
+			(unsigned long long)handle,(unsigned long long)root,top!=nullptr,window!=nullptr,hidden,window && objects.window_visible(handle));
+		return std::nullopt;
+	}
 	// GPU drawing supplies the client pixels itself, so it cannot wait for WM_PAINT. A hidden window may get a surface nothing shows yet,
 	// as a program makes its swap chain before it shows the window.
 	if (objects.window_visible(root)) {
-		try { present(root,true); } catch (...) { return std::nullopt; }
+		try { present(root,true); } catch (const std::exception &error) {
+			if (trace) std::fprintf(stderr,"Vulkan host surface unavailable: hwnd=%#llx root=%#llx reason=present-failed error=%s\n",
+				(unsigned long long)handle,(unsigned long long)root,error.what());
+			return std::nullopt;
+		} catch (...) {
+			if (trace) std::fprintf(stderr,"Vulkan host surface unavailable: hwnd=%#llx root=%#llx reason=present-failed\n",
+				(unsigned long long)handle,(unsigned long long)root);
+			return std::nullopt;
+		}
 	}
-	if (!std::as_const(objects).window(handle)) return std::nullopt;
+	if (!std::as_const(objects).window(handle)) {
+		if (trace) std::fprintf(stderr,"Vulkan host surface unavailable: hwnd=%#llx root=%#llx reason=window-destroyed-during-present\n",
+			(unsigned long long)handle,(unsigned long long)root);
+		return std::nullopt;
+	}
 	hosted_windows[handle]=root;
 	auto surface=place_hosted(handle);
-	if (!surface) hosted_windows.erase(handle);
+	if (!surface) {
+		hosted_windows.erase(handle);
+		if (trace) std::fprintf(stderr,"Vulkan host surface unavailable: hwnd=%#llx root=%#llx reason=backend-rejected\n",
+			(unsigned long long)handle,(unsigned long long)root);
+	}
 	return surface;
 }
 
