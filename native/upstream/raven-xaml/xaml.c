@@ -2396,6 +2396,8 @@ __declspec(dllexport) HRESULT WINAPI DllGetActivationFactory(HSTRING name, IActi
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_xaml_controls_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
+			result = raven_message_dialog_factory(name, out);
+		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_xaml_elements_factory(name, out);
 		if (result == CLASS_E_CLASSNOTAVAILABLE)
 			result = raven_composition_factory(name, out);
